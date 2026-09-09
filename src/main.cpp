@@ -928,6 +928,12 @@ int main() {
   printBoth("ADV HMI native realtime menu firmware - boot");
   gNeo3.begin();
   gVesc.begin();
+  Board_SetRealtimeServiceCallback([]() {
+    gNeo3.pollSafetyIo();
+    gVesc.setSafetyStop(gNeo3.safetyPressed());
+    gVesc.poll();
+    gUsb.poll();
+  });
   initDisplay();
   restartSplash();
   if (!usbInitOk) gTelemetry.systemStatus = SYS_FAULT;
@@ -935,6 +941,9 @@ int main() {
 
   while (true) {
     gMainLoopHeartbeatMs = HAL_GetTick();
+    /* Service deferred UART recovery/queue work every loop. Motor-link TX also
+     * chains in its ISR, so this is a fallback rather than the realtime clock. */
+    Board_Service();
     if (!gCrashCounterCleared && static_cast<uint32_t>(HAL_GetTick() - gWatchdogHealthySinceMs) >= kCrashCounterClearMs) {
       __HAL_RCC_PWR_CLK_ENABLE();
       HAL_PWR_EnableBkUpAccess();
@@ -959,6 +968,7 @@ int main() {
     }
 
     gNeo3.poll();
+    Board_Service();
     gVesc.setSafetyStop(gNeo3.safetyPressed());
     gVesc.poll();
     pollSerialGui();

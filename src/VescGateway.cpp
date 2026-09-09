@@ -132,9 +132,11 @@ bool VescGateway::forwardHex(const char *hex, Owner source) {
   // Runtime is a latest-value 50-Hz stream. Never let a stalled F103 build a
   // long FIFO of old steering/RPM commands that could replay after recovery.
   if (source == Owner::RUNTIME && gVescUart.queuedForWrite() > kRuntimeMaxQueuedBytes) {
+    /* Runtime is latest-value traffic. Preserve the currently shifting UART
+     * segment so its VESC framing/CRC stays intact, discard only stale queued
+     * batches, then append this newest 50-Hz transaction. */
+    gVescUart.dropQueuedAfterActiveTx();
     ++runtime_queue_drop_;
-    rejected_bytes_ += static_cast<uint32_t>(count);
-    return false;
   }
   const size_t written = gVescUart.write(bytes, count);
   tx_bytes_ += static_cast<uint32_t>(written);
@@ -322,30 +324,6 @@ bool VescGateway::handleHostCommand(const char *command) {
   if (strncmp(command, "VESC:", 5) != 0) return false;
   if (strcmp(command, "VESC:STATUS") == 0) {
     publishStatus(true);
-    return true;
-  }
-  if (strcmp(command, "VESC:TXHOLDLOW") == 0) {
-    // Wiring diagnostic only: motors are not commanded. Temporarily detach
-    // USART1, drive PB6 (F411 TX -> F103 PB11 RX) low for a bounded window,
-    // then always restore the 115200 UART. This lets SWD verify the far-end
-    // logic level without leaving the serial wire latched low.
-    gVescUart.discardPendingTx();
-    gVescUart.end();
-    HAL_NVIC_DisableIRQ(USART1_IRQn);
-    GPIO_InitTypeDef gpio{};
-    gpio.Pin = GPIO_PIN_6;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    gpio.Pull = GPIO_NOPULL;
-    gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    HAL_GPIO_Init(GPIOB, &gpio);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
-    (void)gUsb.writeLine("VESC:TXHOLD:LOW:1200MS");
-    HAL_Delay(1200U);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
-    uart_ok_ = gVescUart.begin(active_baud_);
-    HAL_NVIC_SetPriority(USART1_IRQn, 0U, 0U);
-    (void)gUsb.writeLine("VESC:TXHOLD:DONE");
     return true;
   }
   if (strcmp(command, "VESC:RAWPROBE") == 0) {

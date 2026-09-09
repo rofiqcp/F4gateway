@@ -13,6 +13,8 @@ extern TIM_HandleTypeDef htim11;
 
 void Board_Init();
 void Board_Service();
+void Board_SetRealtimeServiceCallback(void (*callback)());
+void Board_RealtimeService();
 void Board_DelayUs(uint32_t microseconds);
 void Board_ReinitI2c1();
 void Board_SetWatchdogCallback(void (*callback)());
@@ -32,6 +34,7 @@ class HalUartPort {
   int availableForWrite() const;
   std::size_t queuedForWrite() const;
   void discardPendingTx();
+  void dropQueuedAfterActiveTx();
   std::size_t write(const uint8_t *data, std::size_t length);
   std::size_t write(uint8_t byte) { return write(&byte, 1U); }
   void flush();

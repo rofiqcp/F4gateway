@@ -36,6 +36,7 @@ void HmiDisplay::command(uint8_t value) {
   TouchCs(true); TftCs(false); TftDc(false);
   (void)HAL_SPI_Transmit(&hspi1, &value, 1U, 20U);
   TftCs(true);
+  Board_RealtimeService();
 }
 
 void HmiDisplay::data8(uint8_t value) {
@@ -43,6 +44,7 @@ void HmiDisplay::data8(uint8_t value) {
   TouchCs(true); TftCs(false); TftDc(true);
   (void)HAL_SPI_Transmit(&hspi1, &value, 1U, 20U);
   TftCs(true);
+  Board_RealtimeService();
 }
 
 void HmiDisplay::data(const uint8_t *bytes, uint16_t length) {
@@ -51,6 +53,7 @@ void HmiDisplay::data(const uint8_t *bytes, uint16_t length) {
   TouchCs(true); TftCs(false); TftDc(true);
   (void)HAL_SPI_Transmit(&hspi1, const_cast<uint8_t *>(bytes), length, 100U);
   TftCs(true);
+  Board_RealtimeService();
 }
 
 void HmiDisplay::init() {
@@ -125,7 +128,7 @@ void HmiDisplay::writeColor(uint16_t color,uint32_t count){
   uint8_t block[256];
   for(std::size_t i=0;i<sizeof(block);i+=2U){block[i]=static_cast<uint8_t>(color>>8U);block[i+1U]=static_cast<uint8_t>(color);}
   setSpiPrescaler(SPI_BAUDRATEPRESCALER_16);TouchCs(true);TftCs(false);TftDc(true);
-  while(count>0U){const uint32_t n=std::min<uint32_t>(count,sizeof(block)/2U);if(HAL_SPI_Transmit(&hspi1,block,static_cast<uint16_t>(n*2U),100U)!=HAL_OK)break;count-=n;}TftCs(true);
+  while(count>0U){const uint32_t n=std::min<uint32_t>(count,sizeof(block)/2U);if(HAL_SPI_Transmit(&hspi1,block,static_cast<uint16_t>(n*2U),100U)!=HAL_OK)break;count-=n;Board_RealtimeService();}TftCs(true);
 }
 void HmiDisplay::drawPixel(int32_t x,int32_t y,uint16_t color){if(x<0||y<0||x>=width_||y>=height_)return;setWindow(x,y,1,1);writeColor(color,1U);}
 void HmiDisplay::fillScreen(uint16_t color){fillRect(0,0,width_,height_,color);}
@@ -165,7 +168,7 @@ void HmiDisplay::fillTriangle(int32_t x0,int32_t y0,int32_t x1,int32_t y1,int32_
 void HmiDisplay::pushImage(int32_t x,int32_t y,int32_t w,int32_t h,const uint16_t *pixels){
   if (pixels == nullptr || w <= 0 || h <= 0 || x < 0 || y < 0 || x + w > width_ || y + h > height_) return;
   setWindow(x,y,w,h);uint8_t block[256];const uint32_t total=static_cast<uint32_t>(w*h);uint32_t pos=0U;setSpiPrescaler(SPI_BAUDRATEPRESCALER_16);TouchCs(true);TftCs(false);TftDc(true);
-  while(pos<total){const uint32_t n=std::min<uint32_t>(total-pos,sizeof(block)/2U);for(uint32_t i=0U;i<n;++i){const uint16_t c=pixels[pos+i];if(swap_bytes_){block[2U*i]=static_cast<uint8_t>(c>>8U);block[2U*i+1U]=static_cast<uint8_t>(c);}else{block[2U*i]=static_cast<uint8_t>(c);block[2U*i+1U]=static_cast<uint8_t>(c>>8U);}}if(HAL_SPI_Transmit(&hspi1,block,static_cast<uint16_t>(n*2U),100U)!=HAL_OK)break;pos+=n;}TftCs(true);
+  while(pos<total){const uint32_t n=std::min<uint32_t>(total-pos,sizeof(block)/2U);for(uint32_t i=0U;i<n;++i){const uint16_t c=pixels[pos+i];if(swap_bytes_){block[2U*i]=static_cast<uint8_t>(c>>8U);block[2U*i+1U]=static_cast<uint8_t>(c);}else{block[2U*i]=static_cast<uint8_t>(c);block[2U*i+1U]=static_cast<uint8_t>(c>>8U);}}if(HAL_SPI_Transmit(&hspi1,block,static_cast<uint16_t>(n*2U),100U)!=HAL_OK)break;pos+=n;Board_RealtimeService();}TftCs(true);
 }
 
 void HmiDisplay::textBounds(const char *text,int32_t &min_x,int32_t &min_y,int32_t &max_x,int32_t &max_y,int32_t &advance) const{

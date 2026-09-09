@@ -15,6 +15,9 @@ HalUartPort gGnssUart(&huart2, USART2);
 
 namespace {
 void (*g_watchdog_callback)() = nullptr;
+void (*g_realtime_service_callback)() = nullptr;
+bool g_realtime_service_active = false;
+uint32_t g_realtime_service_last_ms = 0U;
 uint32_t g_buzzer_deadline_ms = 0U;
 bool g_buzzer_active = false;
 
@@ -183,6 +186,7 @@ void UartPinsInit(UART_HandleTypeDef *huart) {
     gpio.Alternate = GPIO_AF7_USART1;
     HAL_GPIO_Init(GPIOB, &gpio);
     HAL_NVIC_SetPriority(USART1_IRQn, 0U, 0U);
+    HAL_NVIC_ClearPendingIRQ(USART1_IRQn);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
   } else if (huart->Instance == USART2) {
     __HAL_RCC_USART2_CLK_ENABLE();
@@ -190,6 +194,7 @@ void UartPinsInit(UART_HandleTypeDef *huart) {
     gpio.Alternate = GPIO_AF7_USART2;
     HAL_GPIO_Init(GPIOA, &gpio);
     HAL_NVIC_SetPriority(USART2_IRQn, 1U, 0U);
+    HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
   }
 }
@@ -217,6 +222,20 @@ void Board_Service() {
   if (g_buzzer_active && static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
     Board_BuzzerStop();
   }
+}
+
+void Board_SetRealtimeServiceCallback(void (*callback)()) { g_realtime_service_callback = callback; }
+
+void Board_RealtimeService() {
+  /* Long TFT draws are main-context blocking work. Yield at most once per ms
+   * into the motor-link service without permitting recursive entry. */
+  const uint32_t now = HAL_GetTick();
+  if (g_realtime_service_active || now == g_realtime_service_last_ms) return;
+  g_realtime_service_last_ms = now;
+  g_realtime_service_active = true;
+  Board_Service();
+  if (g_realtime_service_callback != nullptr) g_realtime_service_callback();
+  g_realtime_service_active = false;
 }
 
 void Board_DelayUs(uint32_t microseconds) {
@@ -279,10 +298,16 @@ bool HalUartPort::begin(uint32_t baudrate) {
 }
 
 void HalUartPort::end() {
+  const IRQn_Type irqn = (instance_ == USART1) ? USART1_IRQn : USART2_IRQn;
+  HAL_NVIC_DisableIRQ(irqn);
   if (handle_->Instance != nullptr && handle_->gState != HAL_UART_STATE_RESET) {
-    (void)HAL_UART_Abort_IT(handle_);
+    /* Recovery is a main-context operation and must finish before begin().
+     * HAL_UART_Abort_IT() completes asynchronously and can race the following
+     * HAL_UART_Init/Receive_IT, corrupting gState/RxState or tx_busy ownership. */
+    (void)HAL_UART_Abort(handle_);
     (void)HAL_UART_DeInit(handle_);
   }
+  HAL_NVIC_ClearPendingIRQ(irqn);
   handle_->Instance = instance_;
   rx_head_ = rx_tail_ = 0U;
   tx_head_ = tx_tail_ = tx_pending_ = 0U;
@@ -327,6 +352,20 @@ void HalUartPort::discardPendingTx() {
   (void)HAL_UART_AbortTransmit(handle_);
   tx_head_ = tx_tail_ = tx_pending_ = 0U;
   tx_busy_ = false;
+  if (primask == 0U) __enable_irq();
+}
+
+void HalUartPort::dropQueuedAfterActiveTx() {
+  /* Latest-value runtime traffic may replace queued stale batches, but never
+   * truncate the UART transfer already on the wire: doing so creates a partial
+   * VESC frame and forces the F103 parser into CRC/resync recovery. */
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (tx_busy_) {
+    tx_head_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
+  } else {
+    tx_head_ = tx_tail_;
+  }
   if (primask == 0U) __enable_irq();
 }
 
@@ -416,6 +455,23 @@ void HalUartPort::irqTxComplete() {
   tx_tail_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
   tx_pending_ = 0U;
   tx_busy_ = false;
+
+  /* Chain the next queued contiguous segment immediately from the TX-complete
+   * callback. HAL sets gState=READY before invoking this callback, so starting
+   * another interrupt-driven transfer here is valid and avoids depending on
+   * UI/I2C/GNSS main-loop latency to drain the motor command ring. */
+  if (tx_head_ != tx_tail_) {
+    const uint16_t tail = tx_tail_;
+    const uint16_t count = tx_head_ > tx_tail_ ? static_cast<uint16_t>(tx_head_ - tx_tail_)
+                                                : static_cast<uint16_t>(kTxSize - tx_tail_);
+    tx_pending_ = count;
+    tx_busy_ = true;
+    if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
+      tx_pending_ = 0U;
+      tx_busy_ = false;
+      ++error_count_;
+    }
+  }
 }
 
 void HalUartPort::irqError() {
