@@ -1,0 +1,20 @@
+Critical files:
+platformio.ini
+src/main.cpp
+include/Config.h
+include/Telemetry.h
+include/Theme.h
+include/Icons.h
+include/VisualAssets.h
+include/TopBar.h
+include/BottomMenu.h
+include/HomePage.h
+include/CameraPage.h
+include/GpsPage.h
+include/ActuatorPage.h
+include/TouchButtons.h
+include/SplashScreen.h
+lib/TFT_eSPI_Setup/User_Setup.h
+README_HMI_REVISION.md
+HMI_IMPLEMENTATION_PREVIEW.png
+HMI_VISUAL_REFERENCE.png

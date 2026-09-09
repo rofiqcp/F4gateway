@@ -1,0 +1,39 @@
+ADV HMI FINAL - VS CODE / PLATFORMIO
+
+1. Extract folder ini.
+2. Buka folder ADV_HMI_FINAL_VSCODE_UPLOAD_READY di VS Code.
+3. Pastikan extension PlatformIO IDE terpasang.
+4. Hubungkan STM32F411CEU6 ke ST-Link.
+5. Klik PlatformIO: Build.
+6. Jika SUCCESS, klik PlatformIO: Upload.
+
+Terminal alternatif:
+  pio run
+  pio run -t upload
+
+Hardware yang dipertahankan:
+- STM32F411CEU6 / blackpill_f411ce
+- ILI9341 320x240 landscape
+- XPT2046 touch CS PA4
+- SPI PA5/PA6/PA7
+- TFT CS PB0, DC PB1, RST PB2
+- USB CDC 115200
+- Serial1 115200
+
+Manual actuator adalah ONE-TAP / LATCH:
+- tap MAJU   = maju terus sampai STOP/command lain/safety lock
+- tap MUNDUR = mundur terus sampai STOP/command lain/safety lock
+- tap KIRI   = steering target -15 deg
+- tap KANAN  = steering target +15 deg
+- tap CENTER = steering target 0 deg
+- tap STOP   = drive stop
+
+Manual movement hanya aktif saat telemetry:
+  SYS:READY
+  MODE:MANUAL
+  ESC:1
+Steering juga perlu:
+  ENC:1
+
+CATATAN:
+Preset steering -15/+15 derajat dan speed manual default adalah nilai awal pengujian. Sesuaikan dengan batas mekanik kendaraan sebelum uji bergerak di lantai.
