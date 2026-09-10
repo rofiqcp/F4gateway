@@ -71,6 +71,7 @@ void VescGateway::begin() {
   last_rx_ms_ = HAL_GetTick();
   last_valid_frame_ms_ = last_rx_ms_;
   last_runtime_tx_ms_ = 0U;
+  runtime_tx_epoch_ms_ = 0U;
   last_recovery_ms_ = 0U;
   recovery_tx_marker_ = 0U;
   recovery_streak_ = 0U;
@@ -86,10 +87,10 @@ bool VescGateway::writeUsbBounded(const uint8_t *data, size_t len, uint32_t time
   const uint32_t start = HAL_GetTick();
   size_t sent = 0U;
   while (sent < len && static_cast<uint32_t>(HAL_GetTick() - start) < timeout_ms) {
-    const int room = gUsb.availableForWrite();
+    const int room = gUsb.availableHighPriorityForWrite();
     if (room <= 0) { HAL_Delay(1U); continue; }
     const size_t chunk = std::min(len - sent, static_cast<size_t>(room));
-    const size_t n = gUsb.write(data + sent, chunk);
+    const size_t n = gUsb.writeHighPriority(data + sent, chunk);
     if (n == 0U) { HAL_Delay(1U); continue; }
     sent += n;
   }
@@ -142,8 +143,14 @@ bool VescGateway::forwardHex(const char *hex, Owner source) {
   tx_bytes_ += static_cast<uint32_t>(written);
   if (written == count) {
     const uint32_t now = HAL_GetTick();
-    if (source == Owner::RUNTIME) last_runtime_tx_ms_ = now;
-    else maintenance_activity_ms_ = now;
+    if (source == Owner::RUNTIME) {
+      if (last_runtime_tx_ms_ == 0U || static_cast<uint32_t>(now - last_runtime_tx_ms_) > 500U) {
+        runtime_tx_epoch_ms_ = now;
+      }
+      last_runtime_tx_ms_ = now;
+    } else {
+      maintenance_activity_ms_ = now;
+    }
   }
   if (written != count) {
     (void)gUsb.writeLine("VESC:ERR:UART_TX");
@@ -169,13 +176,17 @@ void VescGateway::publishRxFrame(const uint8_t *data, size_t len) {
   }
   line[out++] = '\n';
   if (owner_ == Owner::RUNTIME) {
-    if (gUsb.availableForWrite() < static_cast<int>(out) ||
-        gUsb.write(reinterpret_cast<const uint8_t *>(line), out) != out) ++usb_drop_frames_;
+    if (gUsb.availableHighPriorityForWrite() < static_cast<int>(out) ||
+        gUsb.writeHighPriority(reinterpret_cast<const uint8_t *>(line), out) != out) {
+      ++usb_drop_frames_; ++usb_p1_drop_frames_;
+    }
     return;
   }
   // Maintenance/config replies may exceed one CDC queue. Stream them with a
   // bounded deadline: reliable while the host is present, but never an infinite block.
-  if (!writeUsbBounded(reinterpret_cast<const uint8_t *>(line), out, 400U)) ++usb_drop_frames_;
+  if (!writeUsbBounded(reinterpret_cast<const uint8_t *>(line), out, 400U)) {
+    ++usb_drop_frames_; ++usb_p1_drop_frames_;
+  }
 }
 
 void VescGateway::serviceRxFrames() {
@@ -195,7 +206,7 @@ void VescGateway::serviceRxFrames() {
       if (rx_len_ < data_start) return;
       payload = rx_chunk_[1];
       if (payload < 1U) {
-        ++rx_frame_errors_;
+        ++rx_frame_errors_; ++rx_frame_prefix_errors_; rx_last_error_byte_ = rx_chunk_[0];
         memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
         continue;
       }
@@ -205,7 +216,7 @@ void VescGateway::serviceRxFrames() {
       payload = (static_cast<size_t>(rx_chunk_[1]) << 8U) | rx_chunk_[2];
       // Upstream rejects a long header for a short payload.
       if (payload < 255U) {
-        ++rx_frame_errors_;
+        ++rx_frame_errors_; ++rx_frame_prefix_errors_; rx_last_error_byte_ = rx_chunk_[0];
         memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
         continue;
       }
@@ -217,19 +228,19 @@ void VescGateway::serviceRxFrames() {
       // F103 VESC_MAX_PAYLOAD is far below the 24-bit packet range. Keeping the
       // upstream short-header rule also makes random legacy byte streams resync.
       if (payload < 65535U) {
-        ++rx_frame_errors_;
+        ++rx_frame_errors_; ++rx_frame_prefix_errors_; rx_last_error_byte_ = rx_chunk_[0];
         memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
         continue;
       }
     } else {
-      ++rx_frame_errors_;
+      ++rx_frame_errors_; ++rx_frame_prefix_errors_; rx_last_error_byte_ = rx_chunk_[0];
       memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
       continue;
     }
 
     const size_t total = data_start + payload + 3U;
     if (total > kRxFrameBytes) {
-      ++rx_frame_errors_;
+      ++rx_frame_errors_; ++rx_frame_oversize_errors_; rx_last_error_byte_ = rx_chunk_[0];
       memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
       continue;
     }
@@ -240,13 +251,14 @@ void VescGateway::serviceRxFrames() {
       rx_chunk_[data_start + payload + 1U]);
     if (rx_chunk_[total - 1U] != 3U ||
         crc16(rx_chunk_ + data_start, payload) != expected) {
-      ++rx_frame_errors_;
+      ++rx_frame_errors_; ++rx_frame_crc_errors_; rx_last_error_byte_ = rx_chunk_[0];
       memmove(rx_chunk_, rx_chunk_ + 1U, --rx_len_);
       continue;
     }
 
     ++rx_frames_;
     last_valid_frame_ms_ = HAL_GetTick();
+    last_valid_frame_error_count_ = rx_frame_errors_;
     ever_valid_frame_ = true;
     recovery_streak_ = 0U;
     recovery_tx_marker_ = tx_bytes_;
@@ -267,6 +279,8 @@ void VescGateway::recoverRuntimeUart(uint32_t now) {
   last_recovery_ms_ = now;
   last_valid_frame_ms_ = now;
   last_rx_ms_ = now;
+  runtime_tx_epoch_ms_ = now;
+  last_valid_frame_error_count_ = rx_frame_errors_;
   recovery_tx_marker_ = tx_bytes_;
 }
 
@@ -275,6 +289,9 @@ void VescGateway::switchToRuntime(uint32_t now, bool announce) {
   maintenance_activity_ms_ = 0U;
   recovery_streak_ = 0U;
   last_valid_frame_ms_ = now;
+  last_runtime_tx_ms_ = 0U;
+  runtime_tx_epoch_ms_ = 0U;
+  last_valid_frame_error_count_ = rx_frame_errors_;
   recovery_tx_marker_ = tx_bytes_;
   while (gVescUart.available() > 0) (void)gVescUart.read();
   rx_len_ = 0U;
@@ -282,11 +299,26 @@ void VescGateway::switchToRuntime(uint32_t now, bool announce) {
 }
 
 void VescGateway::recoveryTick(uint32_t now) {
-  if (owner_ != Owner::RUNTIME || last_runtime_tx_ms_ == 0U) return;
+  if (owner_ != Owner::RUNTIME || last_runtime_tx_ms_ == 0U || runtime_tx_epoch_ms_ == 0U) return;
   if (static_cast<uint32_t>(now - last_runtime_tx_ms_) > 500U) return;
+  // A runtime stream that has just resumed after an idle period gets one full
+  // recovery window to receive its first response. Without this epoch grace,
+  // the first new command after a long idle immediately satisfied the stale
+  // valid-frame test and needlessly reset a healthy UART.
+  if (static_cast<uint32_t>(now - runtime_tx_epoch_ms_) < kRuntimeNoValidFrameRecoverMs) return;
   if (static_cast<uint32_t>(now - last_valid_frame_ms_) < kRuntimeNoValidFrameRecoverMs) return;
   if (static_cast<uint32_t>(now - last_recovery_ms_) < kRuntimeRecoverCooldownMs) return;
   if (tx_bytes_ == recovery_tx_marker_) return;
+
+  // Parser age alone is not evidence that USART1 is dead. If RX IRQs are still
+  // progressing and no new framing/CRC damage appeared since the last good
+  // packet, leave the UART running and let the parser catch up. Recover only
+  // when hardware RX itself is stale, or when fresh bytes are demonstrably
+  // corrupt while valid frames remain absent.
+  const bool hardware_rx_stale =
+      static_cast<uint32_t>(now - gVescUart.lastRxIrqMs()) >= kRuntimeNoValidFrameRecoverMs;
+  const bool parser_corruption = rx_frame_errors_ != last_valid_frame_error_count_;
+  if (!hardware_rx_stale && !parser_corruption) return;
   recoverRuntimeUart(now);
 }
 
@@ -294,19 +326,32 @@ void VescGateway::publishStatus(bool force) {
   const uint32_t now = HAL_GetTick();
   if (!force && static_cast<uint32_t>(now - last_status_ms_) < kStatusPeriodMs) return;
   last_status_ms_ = now;
-  char line[400];
+  char line[760];
   const int n = snprintf(line, sizeof(line),
     "VESC:STAT:mode=%s,baud=%lu,rx=%lu,tx=%lu,reject=%lu,frames=%lu,frame_err=%lu,"
-    "usb_drop=%lu,runtime_q_drop=%lu,uart_rx_overflow=%lu,uart_err=%lu,uart_tx_drop=%lu,uart_tx_free=%d,"
+    "frame_prefix=%lu,frame_crc=%lu,frame_timeout_bytes=%lu,frame_oversize=%lu,last_err_byte=%u,"
+    "usb_drop=%lu,usb_p1_drop=%lu,usb_p3_drop=%lu,runtime_q_drop=%lu,"
+    "uart_rx_overflow=%lu,uart_err=%lu,uart_tx_drop=%lu,uart_tx_free=%d,"
+    "tx_seg_start=%lu,tx_seg_done=%lu,rx_irq_bytes=%lu,rx_irq_age_ms=%lu,tx_q_max=%lu,service_gap_max_ms=%lu,"
     "valid_age_ms=%lu,recover=%lu,age_ms=%lu,rx_lvl=%d,tx_lvl=%d,brr=%lX,cr1=%lX,sr=%lX\n",
     ownerName(owner_), static_cast<unsigned long>(active_baud_),
     static_cast<unsigned long>(rx_bytes_), static_cast<unsigned long>(tx_bytes_),
     static_cast<unsigned long>(rejected_bytes_), static_cast<unsigned long>(rx_frames_),
-    static_cast<unsigned long>(rx_frame_errors_), static_cast<unsigned long>(usb_drop_frames_),
-    static_cast<unsigned long>(runtime_queue_drop_),
+    static_cast<unsigned long>(rx_frame_errors_),
+    static_cast<unsigned long>(rx_frame_prefix_errors_), static_cast<unsigned long>(rx_frame_crc_errors_),
+    static_cast<unsigned long>(rx_frame_timeout_bytes_), static_cast<unsigned long>(rx_frame_oversize_errors_),
+    static_cast<unsigned>(rx_last_error_byte_),
+    static_cast<unsigned long>(usb_drop_frames_), static_cast<unsigned long>(usb_p1_drop_frames_),
+    static_cast<unsigned long>(usb_p3_drop_frames_), static_cast<unsigned long>(runtime_queue_drop_),
     static_cast<unsigned long>(gVescUart.overflowCount()),
     static_cast<unsigned long>(gVescUart.errorCount()),
     static_cast<unsigned long>(gVescUart.txDropped()), gVescUart.availableForWrite(),
+    static_cast<unsigned long>(gVescUart.txSegmentsStarted()),
+    static_cast<unsigned long>(gVescUart.txSegmentsCompleted()),
+    static_cast<unsigned long>(gVescUart.rxIrqBytes()),
+    static_cast<unsigned long>(now - gVescUart.lastRxIrqMs()),
+    static_cast<unsigned long>(gVescUart.maxQueueBytes()),
+    static_cast<unsigned long>(Board_MaxServiceGapMs()),
     static_cast<unsigned long>(now - last_valid_frame_ms_), static_cast<unsigned long>(uart_recovery_count_),
     static_cast<unsigned long>(now - last_rx_ms_),
     HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7) == GPIO_PIN_SET ? 1 : 0,
@@ -314,9 +359,16 @@ void VescGateway::publishStatus(bool force) {
     static_cast<unsigned long>(USART1->BRR), static_cast<unsigned long>(USART1->CR1),
     static_cast<unsigned long>(USART1->SR));
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(line)) return;
-  if (gUsb.availableForWrite() < n) { ++usb_drop_frames_; return; }
-  if (gUsb.write(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(n)) != static_cast<size_t>(n)) {
-    ++usb_drop_frames_;
+  if (force) {
+    if (gUsb.availableHighPriorityForWrite() < n ||
+        gUsb.writeHighPriority(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(n)) != static_cast<size_t>(n)) {
+      ++usb_drop_frames_; ++usb_p3_drop_frames_;
+    }
+    return;
+  }
+  if (gUsb.availableForWrite() < n ||
+      gUsb.write(reinterpret_cast<const uint8_t *>(line), static_cast<size_t>(n)) != static_cast<size_t>(n)) {
+    ++usb_drop_frames_; ++usb_p3_drop_frames_;
   }
 }
 
@@ -445,6 +497,8 @@ void VescGateway::poll() {
     HAL_NVIC_SetPriority(USART1_IRQn, 0U, 0U);
   }
   if (rx_len_ > 0U && static_cast<uint32_t>(now - last_rx_ms_) > kRxFrameTimeoutMs) {
+    rx_last_error_byte_ = rx_chunk_[0];
+    rx_frame_timeout_bytes_ += static_cast<uint32_t>(rx_len_);
     rx_frame_errors_ += static_cast<uint32_t>(rx_len_);
     rx_len_ = 0U;
   }
@@ -456,7 +510,7 @@ void VescGateway::poll() {
     if (rx_len_ >= kRxBufferBytes) {
       serviceRxFrames();
       if (rx_len_ >= kRxBufferBytes) {
-        ++rx_frame_errors_;
+        ++rx_frame_errors_; ++rx_frame_oversize_errors_; rx_last_error_byte_ = rx_chunk_[0];
         memmove(rx_chunk_, &rx_chunk_[1], --rx_len_);
       }
     }

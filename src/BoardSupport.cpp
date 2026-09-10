@@ -18,6 +18,8 @@ void (*g_watchdog_callback)() = nullptr;
 void (*g_realtime_service_callback)() = nullptr;
 bool g_realtime_service_active = false;
 uint32_t g_realtime_service_last_ms = 0U;
+uint32_t g_board_last_service_ms = 0U;
+uint32_t g_board_max_service_gap_ms = 0U;
 uint32_t g_buzzer_deadline_ms = 0U;
 bool g_buzzer_active = false;
 
@@ -171,7 +173,7 @@ void Timers_Init() {
   htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim11) != HAL_OK) FatalError();
-  HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 2U, 0U);
+  HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 3U, 0U);
   HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
 }
 
@@ -217,12 +219,20 @@ void Board_Init() {
 }
 
 void Board_Service() {
+  const uint32_t now = HAL_GetTick();
+  if (g_board_last_service_ms != 0U) {
+    const uint32_t gap = static_cast<uint32_t>(now - g_board_last_service_ms);
+    if (gap > g_board_max_service_gap_ms) g_board_max_service_gap_ms = gap;
+  }
+  g_board_last_service_ms = now;
   (void)gVescUart.service();
   (void)gGnssUart.service();
   if (g_buzzer_active && static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
     Board_BuzzerStop();
   }
 }
+
+uint32_t Board_MaxServiceGapMs() { return g_board_max_service_gap_ms; }
 
 void Board_SetRealtimeServiceCallback(void (*callback)()) { g_realtime_service_callback = callback; }
 
@@ -242,6 +252,15 @@ void Board_DelayUs(uint32_t microseconds) {
   const uint32_t start = DWT->CYCCNT;
   const uint32_t cycles = microseconds * (HAL_RCC_GetHCLKFreq() / 1000000U);
   while (static_cast<uint32_t>(DWT->CYCCNT - start) < cycles) { __NOP(); }
+}
+
+bool Board_ReinitSpi1() {
+  (void)HAL_SPI_DeInit(&hspi1);
+  __HAL_RCC_SPI1_FORCE_RESET();
+  __NOP(); __NOP();
+  __HAL_RCC_SPI1_RELEASE_RESET();
+  Spi1_Init();
+  return hspi1.State == HAL_SPI_STATE_READY;
 }
 
 void Board_ReinitI2c1() {
@@ -291,6 +310,11 @@ bool HalUartPort::begin(uint32_t baudrate) {
   tx_dropped_ = 0U;
   overflow_count_ = 0U;
   error_count_ = 0U;
+  tx_segments_started_ = 0U;
+  tx_segments_completed_ = 0U;
+  rx_irq_bytes_ = 0U;
+  last_rx_irq_ms_ = HAL_GetTick();
+  max_queue_bytes_ = 0U;
   rx_restart_required_ = false;
   const bool started = HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) == HAL_OK;
   rx_restart_required_ = !started;
@@ -387,6 +411,8 @@ std::size_t HalUartPort::write(const uint8_t *data, std::size_t length) {
     tx_buffer_[tx_head_] = data[i];
     tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
   }
+  const uint16_t queued_now = static_cast<uint16_t>(used + length);
+  if (queued_now > max_queue_bytes_) max_queue_bytes_ = queued_now;
   if (primask == 0U) __enable_irq();
   (void)service();
   return length;
@@ -426,20 +452,26 @@ bool HalUartPort::service() {
       tx_busy_ = true;
     }
     if (primask == 0U) __enable_irq();
-    if (count > 0U && HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
-      const uint32_t retry_primask = __get_PRIMASK();
-      __disable_irq();
-      tx_pending_ = 0U;
-      tx_busy_ = false;
-      ++error_count_;
-      if (retry_primask == 0U) __enable_irq();
-      ok = false;
+    if (count > 0U) {
+      if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
+        const uint32_t retry_primask = __get_PRIMASK();
+        __disable_irq();
+        tx_pending_ = 0U;
+        tx_busy_ = false;
+        ++error_count_;
+        if (retry_primask == 0U) __enable_irq();
+        ok = false;
+      } else {
+        ++tx_segments_started_;
+      }
     }
   }
   return ok;
 }
 
 void HalUartPort::irqRxComplete() {
+  ++rx_irq_bytes_;
+  last_rx_irq_ms_ = HAL_GetTick();
   const uint16_t next = static_cast<uint16_t>((rx_head_ + 1U) % kRxSize);
   if (next != rx_tail_) {
     rx_buffer_[rx_head_] = rx_byte_;
@@ -452,6 +484,7 @@ void HalUartPort::irqRxComplete() {
 
 void HalUartPort::irqTxComplete() {
   if (!tx_busy_) return;
+  ++tx_segments_completed_;
   tx_tail_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
   tx_pending_ = 0U;
   tx_busy_ = false;
@@ -470,6 +503,8 @@ void HalUartPort::irqTxComplete() {
       tx_pending_ = 0U;
       tx_busy_ = false;
       ++error_count_;
+    } else {
+      ++tx_segments_started_;
     }
   }
 }

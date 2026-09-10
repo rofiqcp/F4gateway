@@ -14,6 +14,12 @@ struct VehicleTelemetry {
   bool rosConnected{false};
   bool eStop{false};
   bool vescConnected{false};
+  bool escFresh{false};
+  bool perceptionFresh{false};
+  bool navigationFresh{false};
+  uint32_t escAgeMs{0xFFFFFFFFUL};
+  uint32_t perceptionAgeMs{0xFFFFFFFFUL};
+  uint32_t navigationAgeMs{0xFFFFFFFFUL};
 
   float speedKmh{0.0F};
   float driveTargetMps{0.0F};

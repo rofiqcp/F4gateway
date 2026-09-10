@@ -13,7 +13,7 @@
 extern HmiDisplay tft;
 
 struct TouchEvent {
-  enum Type : uint8_t { NONE = 0, PRESS, REPEAT, RELEASE } type{NONE};
+  enum Type : uint8_t { NONE = 0, PRESS, REPEAT, HOLD, RELEASE } type{NONE};
   SoftKey key{SoftKey::NONE};
 };
 
@@ -21,12 +21,18 @@ static bool touchWasDown = false;
 static SoftKey touchActiveKey = SoftKey::NONE;
 static uint32_t touchPressMs = 0;
 static uint32_t touchLastRepeatMs = 0;
+static bool touchCanceled = false;
+static bool touchHoldSent = false;
+static bool touchDidRepeat = false;
 
 inline void resetTouchState() {
   touchWasDown = false;
   touchActiveKey = SoftKey::NONE;
   touchPressMs = 0;
   touchLastRepeatMs = 0;
+  touchCanceled = false;
+  touchHoldSent = false;
+  touchDidRepeat = false;
 }
 
 inline void beginTouch() {
@@ -97,6 +103,11 @@ inline SoftKey touchKeyAt(const UiState& ui, int x, int y) {
   return SoftKey::NONE;
 }
 
+inline bool isManualMotionKey(SoftKey key) {
+  return key == SoftKey::TEST_FORWARD || key == SoftKey::TEST_REVERSE ||
+         key == SoftKey::TEST_LEFT || key == SoftKey::TEST_RIGHT;
+}
+
 inline TouchEvent pollTouch(const UiState& ui) {
   TouchEvent ev{};
   uint16_t sx = 0, sy = 0;
@@ -105,8 +116,14 @@ inline TouchEvent pollTouch(const UiState& ui) {
 
   if (!down) {
     if (touchWasDown) {
+      const uint32_t heldMs = static_cast<uint32_t>(now - touchPressMs);
       ev.type = TouchEvent::RELEASE;
-      ev.key = touchActiveKey;
+      if (isManualMotionKey(touchActiveKey) && touchHoldSent) {
+        ev.key = touchActiveKey;  // dead-man release must always stop motion
+      } else if (!isManualMotionKey(touchActiveKey) && !touchCanceled &&
+                 !touchDidRepeat && heldMs >= TOUCH_TAP_MIN_MS) {
+        ev.key = touchActiveKey;  // normal controls commit on a clean release
+      }
       resetTouchState();
     }
     return ev;
@@ -121,15 +138,37 @@ inline TouchEvent pollTouch(const UiState& ui) {
     touchActiveKey = key;
     touchPressMs = now;
     touchLastRepeatMs = now;
+    touchCanceled = key == SoftKey::NONE;
     ev.type = TouchEvent::PRESS;
     ev.key = key;
     return ev;
   }
 
-  if (key != touchActiveKey) return ev;
+  if (key != touchActiveKey) {
+    // Sliding out of the armed control cancels a tap. If a hold-to-run motion
+    // was already active, emit an immediate release so motion cannot stick.
+    if (!touchCanceled && touchHoldSent && isManualMotionKey(touchActiveKey)) {
+      ev.type = TouchEvent::RELEASE;
+      ev.key = touchActiveKey;
+    }
+    touchCanceled = true;
+    return ev;
+  }
+  if (touchCanceled) return ev;
+
+  if (isManualMotionKey(key) && !touchHoldSent &&
+      static_cast<uint32_t>(now - touchPressMs) >= TOUCH_HOLD_ACTION_MS) {
+    touchHoldSent = true;
+    ev.type = TouchEvent::HOLD;
+    ev.key = key;
+    return ev;
+  }
+
   const bool repeatable = key == SoftKey::LEFT || key == SoftKey::RIGHT;
-  if (repeatable && now - touchPressMs >= 450U && now - touchLastRepeatMs >= 120U) {
+  if (repeatable && static_cast<uint32_t>(now - touchPressMs) >= TOUCH_REPEAT_DELAY_MS &&
+      static_cast<uint32_t>(now - touchLastRepeatMs) >= TOUCH_REPEAT_MS) {
     touchLastRepeatMs = now;
+    touchDidRepeat = true;
     ev.type = TouchEvent::REPEAT;
     ev.key = key;
   }

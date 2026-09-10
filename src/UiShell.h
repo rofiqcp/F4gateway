@@ -12,37 +12,79 @@
 #include "Theme.h"
 #include "Icons.h"
 #include "UiMenu.h"
+#include "Diagnostics.h"
 
 extern HmiDisplay tft;
 
-inline void drawDomainDot(int x, const char* label, bool ok) {
-  drawStatusDot(x, 14, healthColor(ok), 3);
-  drawMicroText(label, x + 7, 10, C_TEXT_DIM, C_BG);
+enum UiDirtyBits : uint8_t {
+  UI_DIRTY_NONE = 0U,
+  UI_DIRTY_TOPBAR = 1U << 0,
+  UI_DIRTY_CONTENT = 1U << 1,
+  UI_DIRTY_FOOTER = 1U << 2,
+  UI_DIRTY_ALL = UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT | UI_DIRTY_FOOTER
+};
+
+inline bool gUiDynamicPass = false;
+
+struct UiMetricCacheEntry {
+  bool valid{false};
+  int16_t y{0};
+  uint16_t color{0U};
+  char value[48]{};
+};
+inline UiMetricCacheEntry gUiMetricCache[4]{};
+inline void resetUiMetricCache() {
+  for (auto &entry : gUiMetricCache) entry = UiMetricCacheEntry{};
+}
+inline UiMetricCacheEntry* metricCacheForY(int y) {
+  static constexpr int kRows[4] = {48, 77, 106, 135};
+  for (uint8_t i = 0U; i < 4U; ++i) if (kRows[i] == y) return &gUiMetricCache[i];
+  return nullptr;
+}
+
+inline uint16_t domainHealthColor(bool ready, bool fresh = true) {
+  if (!fresh) return C_DISABLED;
+  return ready ? C_READY : C_FAULT;
+}
+
+inline void drawDomainDot(int x, const char* label, bool ready, bool fresh = true) {
+  drawStatusDot(x, 14, domainHealthColor(ready, fresh), 3);
+  drawMicroText(label, x + 7, 10, fresh ? C_TEXT_DIM : C_DISABLED, C_BG);
 }
 
 inline bool uiIsDomainRoot(UiMenuId id) {
-  return id == UiMenuId::ESC_ROOT || id == UiMenuId::PERCEPTION_ROOT || id == UiMenuId::NAVIGATION_ROOT;
+  return id == UiMenuId::ESC_ROOT || id == UiMenuId::PERCEPTION_ROOT ||
+         id == UiMenuId::NAVIGATION_ROOT || id == UiMenuId::SYSTEM_ROOT;
 }
 
 inline void drawUiTopBar(const UiState& ui, const VehicleTelemetry& d) {
-  tft.fillRect(0, 0, W, TOP_H, C_BG);
-  if (ui.menu == UiMenuId::OVERVIEW) {
-    iconGrid(14, 14, C_ACCENT);
-  } else if (uiIsDomainRoot(ui.menu)) {
-    iconHome(14, 14, C_TEXT);
-  } else {
-    iconBack(14, 14, C_TEXT);
+  if (!gUiDynamicPass) {
+    tft.fillRect(0, 0, W, TOP_H, C_BG);
+    if (ui.menu == UiMenuId::OVERVIEW) {
+      iconGrid(14, 14, C_ACCENT);
+    } else if (uiIsDomainRoot(ui.menu)) {
+      iconHome(14, 14, C_TEXT);
+    } else {
+      iconBack(14, 14, C_TEXT);
+    }
+    tft.drawFastVLine(28, 6, 17, C_BORDER);
   }
-  tft.drawFastVLine(28, 6, 17, C_BORDER);
-  char title[28];
-  snprintf(title, sizeof(title), "%.18s", menuTitle(ui.menu));
-  drawCompactText(title, 36, 7, C_TEXT, C_BG);
-  drawDomainDot(205, "E", d.escReady && d.vescConnected);
-  drawDomainDot(244, "P", d.perceptionReady);
-  drawDomainDot(283, "N", d.nav2Ready && d.motionReady);
+
+  // The title area is the only top-bar region that can be covered by E-STOP.
+  // Repaint just this bounded box on dynamic passes so removing E-STOP cannot
+  // leave stale red pixels behind.
+  tft.fillRect(32, 4, 156, 22, C_BG);
+  char title[24];
+  snprintf(title, sizeof(title), "%.14s", menuTitle(ui.menu));
+  drawCompactTextPadded(title, 36, 7, C_TEXT, C_BG, 145U);
+
+  drawDomainDot(196, "E", d.escReady && d.vescConnected, d.escFresh);
+  drawDomainDot(226, "P", d.perceptionReady, d.perceptionFresh);
+  drawDomainDot(256, "N", d.nav2Ready && d.motionReady, d.navigationFresh);
+  drawDomainDot(286, "S", gDiagnostics.tftOk, true);
   if (d.eStop) {
-    tft.fillRoundRect(126, 5, 67, 20, 4, C_FAULT);
-    drawMicroText("E-STOP", 159, 10, C_WHITE, C_FAULT, TC_DATUM);
+    tft.fillRoundRect(116, 5, 70, 20, 4, C_FAULT);
+    drawMicroText("E-STOP", 151, 10, C_WHITE, C_FAULT, TC_DATUM);
   }
 }
 
@@ -89,6 +131,7 @@ inline void drawCarouselFooter(const UiState& ui) {
 }
 
 inline void drawContentCard() {
+  if (gUiDynamicPass) return;
   drawCard(6, CONTENT_Y, 308, CONTENT_BOTTOM - CONTENT_Y + 1, C_CARD, C_CARD_LINE, false);
 }
 
@@ -115,6 +158,12 @@ inline void drawMenuNodeIcon(UiMenuId id, int cx, int cy, uint16_t c, uint16_t b
     case UiMenuId::PERCEPTION_INFERENCE:
     case UiMenuId::PERCEPTION_PERFORMANCE: iconGear(cx, cy, c, bg); break;
     case UiMenuId::PERCEPTION_LANE: iconAutoArrow(cx, cy, c, bg); break;
+    case UiMenuId::SYSTEM_ROOT:
+    case UiMenuId::SYSTEM_OVERVIEW:
+    case UiMenuId::SYSTEM_LINKS:
+    case UiMenuId::SYSTEM_ERRORS: iconChip(cx, cy, c, bg); break;
+    case UiMenuId::SYSTEM_PINS_IO:
+    case UiMenuId::SYSTEM_PINS_DISPLAY: iconPins(cx, cy, c, bg); break;
     case UiMenuId::NAVIGATION_ROOT:
     case UiMenuId::NAV_LOCALIZATION:
     case UiMenuId::NAV_EKF_LOCAL:
@@ -157,9 +206,22 @@ inline void drawMenuCardTitle(const char* title, int cx, int y, uint16_t fg, uin
   drawCompactText(second, cx, y + 17, fg, bg, TC_DATUM);
 }
 inline void drawMetricRow(int y, const char* label, const char* value, uint16_t valueColor = C_INK) {
-  drawSmallText(label, 18, y, C_DISABLED, C_CARD);
-  drawUiText(value, 252, y - 2, valueColor, C_CARD, TR_DATUM);
-  drawThinDivider(16, y + 20, 238, C_CARD_LINE);
+  UiMetricCacheEntry* cache = metricCacheForY(y);
+  if (gUiDynamicPass) {
+    if (cache != nullptr && cache->valid && cache->color == valueColor &&
+        std::strncmp(cache->value, value, sizeof(cache->value)) == 0) return;
+    drawUiTextPadded(value, 252, y - 2, valueColor, C_CARD, 138U, TR_DATUM);
+  } else {
+    drawSmallText(label, 18, y, C_DISABLED, C_CARD);
+    drawUiText(value, 252, y - 2, valueColor, C_CARD, TR_DATUM);
+    drawThinDivider(16, y + 20, 238, C_CARD_LINE);
+  }
+  if (cache != nullptr) {
+    cache->valid = true;
+    cache->y = static_cast<int16_t>(y);
+    cache->color = valueColor;
+    std::snprintf(cache->value, sizeof(cache->value), "%s", value);
+  }
 }
 
 inline void drawMetricFloat(int y, const char* label, float value, const char* unit, int precision = 1,
@@ -170,38 +232,83 @@ inline void drawMetricFloat(int y, const char* label, float value, const char* u
 }
 
 
-inline void drawOverviewDomainCard(int index, UiMenuId id, const char* status, bool ready) {
-  const int x = UI_CARD_X0 + index * (UI_CARD_W + UI_CARD_GAP);
-  drawCard(x, OVERVIEW_CARD_Y, UI_CARD_W, OVERVIEW_CARD_H, C_CARD, ready ? C_ACCENT : C_CARD_LINE, false);
-  drawMenuNodeIcon(id, x + UI_CARD_W / 2, OVERVIEW_CARD_Y + 31, ready ? C_ACCENT : C_DISABLED, C_CARD);
-  drawMenuCardTitle(menuTitle(id), x + UI_CARD_W / 2, OVERVIEW_CARD_Y + 58, C_INK, C_CARD);
-  drawStatusDot(x + 13, OVERVIEW_CARD_Y + 14, healthColor(ready), 3);
-  drawMicroText(status, x + UI_CARD_W / 2, OVERVIEW_CARD_Y + 91,
-                ready ? C_READY : C_DISABLED, C_CARD, TC_DATUM);
+inline bool overviewDomainReady(UiMenuId id, const VehicleTelemetry& d) {
+  if (id == UiMenuId::ESC_ROOT) return d.escReady && d.vescConnected;
+  if (id == UiMenuId::PERCEPTION_ROOT) return d.perceptionReady;
+  if (id == UiMenuId::NAVIGATION_ROOT) return d.motionReady && d.nav2Ready;
+  if (id == UiMenuId::SYSTEM_ROOT) return gDiagnostics.tftOk;
+  return false;
+}
+
+inline bool overviewDomainFresh(UiMenuId id, const VehicleTelemetry& d) {
+  if (id == UiMenuId::ESC_ROOT) return d.escFresh;
+  if (id == UiMenuId::PERCEPTION_ROOT) return d.perceptionFresh;
+  if (id == UiMenuId::NAVIGATION_ROOT) return d.navigationFresh;
+  return true;
+}
+
+inline const char* overviewDomainStatus(UiMenuId id, const VehicleTelemetry& d) {
+  if (id == UiMenuId::SYSTEM_ROOT) return gDiagnostics.tftOk ? "LOCAL OK" : "DISPLAY ERR";
+  if (!overviewDomainFresh(id, d)) return "STALE";
+  return overviewDomainReady(id, d) ? "READY" : "WAIT";
+}
+
+inline void drawOverviewDomainCard(int slot, UiMenuId id, const VehicleTelemetry& d, bool selected) {
+  const int x = UI_CARD_X0 + slot * (UI_CARD_W + UI_CARD_GAP);
+  const bool ready = overviewDomainReady(id, d);
+  const bool fresh = overviewDomainFresh(id, d);
+  const uint16_t state = domainHealthColor(ready, fresh);
+  const uint16_t border = selected ? C_ACCENT : C_CARD_LINE;
+  if (!gUiDynamicPass) {
+    drawCard(x, OVERVIEW_CARD_Y, UI_CARD_W, OVERVIEW_CARD_H, C_CARD, border, false);
+    if (selected) tft.fillRoundRect(x + 10, OVERVIEW_CARD_Y, UI_CARD_W - 20, 3, 1, C_ACCENT);
+    drawMenuNodeIcon(id, x + UI_CARD_W / 2, OVERVIEW_CARD_Y + 27, selected ? C_ACCENT : state, C_CARD);
+    drawMenuCardTitle(menuTitle(id), x + UI_CARD_W / 2, OVERVIEW_CARD_Y + 45, C_INK, C_CARD);
+  }
+  tft.fillRoundRect(x, OVERVIEW_CARD_Y, 4, OVERVIEW_CARD_H, 2, state);
+  drawStatusDot(x + 14, OVERVIEW_CARD_Y + 80, state, 3);
+  drawMicroTextPadded(overviewDomainStatus(id, d), x + UI_CARD_W / 2 + 5,
+                      OVERVIEW_CARD_Y + 76, state, C_CARD, 72U, TC_DATUM);
+}
+
+inline void drawOverviewHealthRail(const VehicleTelemetry& d) {
+  const UiMenuId ids[4] = {UiMenuId::ESC_ROOT, UiMenuId::PERCEPTION_ROOT,
+                           UiMenuId::NAVIGATION_ROOT, UiMenuId::SYSTEM_ROOT};
+  const int gap = 5;
+  const int segW = 69;
+  for (int i = 0; i < 4; ++i) {
+    const int x = 16 + i * (segW + gap);
+    tft.fillRoundRect(x, OVERVIEW_SUMMARY_Y + OVERVIEW_SUMMARY_H - 6, segW, 3, 1,
+                      domainHealthColor(overviewDomainReady(ids[i], d), overviewDomainFresh(ids[i], d)));
+  }
 }
 
 inline void drawOverview(const UiState& ui, const VehicleTelemetry& d) {
-  (void)ui;
-  drawCard(6, 36, 308, 82, C_PANEL, C_BORDER, false);
-  char line[72];
-  snprintf(line, sizeof(line), "%s  |  %s", modeText(d.mode), systemStatusText(d.systemStatus));
-  drawUiText(line, 16, 46, d.eStop ? C_FAULT : C_TEXT, C_PANEL);
-  snprintf(line, sizeof(line), "%.1f km/h   %s / %u SAT", d.speedKmh, gpsFixText(d.gpsFix), d.satellites);
-  drawSmallText(line, 16, 72, C_TEXT_DIM, C_PANEL);
+  if (!gUiDynamicPass) drawCard(6, OVERVIEW_SUMMARY_Y, 308, OVERVIEW_SUMMARY_H, C_PANEL, C_BORDER, false);
+  char line[76];
+  snprintf(line, sizeof(line), "%s | %s    %.1f km/h", modeText(d.mode),
+           systemStatusText(d.systemStatus), d.speedKmh);
+  drawCompactTextPadded(line, 16, OVERVIEW_SUMMARY_Y + 7,
+                        d.eStop ? C_FAULT : C_TEXT, C_PANEL, 260U);
   const char* target = navigationHasTarget(d) ? d.activeTarget : "NO TARGET";
-  snprintf(line, sizeof(line), "%s | %.22s", navigationStatusText(d.navigationStatus), target);
-  drawMicroText(line, 16, 98, C_TEXT_DIM, C_PANEL);
-  drawStatusDot(292, 54, d.eStop ? C_FAULT : systemStatusColor(d.systemStatus), 5);
+  snprintf(line, sizeof(line), "%s/%u SAT | %s > %.18s", gpsFixText(d.gpsFix), d.satellites,
+           navigationStatusText(d.navigationStatus), target);
+  drawMicroTextPadded(line, 16, OVERVIEW_SUMMARY_Y + 27, C_TEXT_DIM, C_PANEL, 276U);
+  drawStatusDot(297, OVERVIEW_SUMMARY_Y + 14,
+                d.eStop ? C_FAULT : systemStatusColor(d.systemStatus), 5);
+  drawOverviewHealthRail(d);
 
-  drawOverviewDomainCard(0, UiMenuId::ESC_ROOT, d.escReady && d.vescConnected ? "READY" : "WAIT",
-                         d.escReady && d.vescConnected);
-  drawOverviewDomainCard(1, UiMenuId::PERCEPTION_ROOT, d.perceptionReady ? "READY" : "WAIT",
-                         d.perceptionReady);
-  drawOverviewDomainCard(2, UiMenuId::NAVIGATION_ROOT, d.motionReady && d.nav2Ready ? "READY" : "WAIT",
-                         d.motionReady && d.nav2Ready);
+  uint8_t count = 0;
+  const UiMenuId* children = menuChildren(UiMenuId::OVERVIEW, count);
+  const uint8_t first = menuWindowFirst(ui.selectedChild, count);
+  for (uint8_t slot = 0; slot < SUBMENU_VISIBLE_CARDS && first + slot < count; ++slot) {
+    const uint8_t index = static_cast<uint8_t>(first + slot);
+    drawOverviewDomainCard(slot, children[index], d, index == ui.selectedChild);
+  }
 }
 
 inline void drawMenuList(const UiState& ui) {
+  if (gUiDynamicPass) return;
   uint8_t count = 0;
   const UiMenuId* children = menuChildren(ui.menu, count);
   if (children == nullptr || count == 0U) return;
@@ -214,6 +321,7 @@ inline void drawMenuList(const UiState& ui) {
     const uint16_t fill = selected ? C_PANEL_ALT : C_PANEL;
     const uint16_t fg = selected ? C_ACCENT : C_TEXT;
     drawCard(x, SUBMENU_CARD_Y, UI_CARD_W, SUBMENU_CARD_H, fill, border, false);
+    if (selected) tft.fillRoundRect(x, SUBMENU_CARD_Y, 4, SUBMENU_CARD_H, 2, C_ACCENT);
     drawMenuNodeIcon(children[index], x + UI_CARD_W / 2, SUBMENU_CARD_Y + 39, fg, fill);
     drawMenuCardTitle(menuTitle(children[index]), x + UI_CARD_W / 2, SUBMENU_CARD_Y + 72, fg, fill);
     char slotText[12];
@@ -224,18 +332,16 @@ inline void drawMenuList(const UiState& ui) {
 }
 
 inline void drawEditStatus(const VehicleTelemetry& d) {
-  if (d.configPending) {
-    drawMicroText("WAITING ROS ACK / READBACK", 18, 164, C_WARNING, C_CARD);
-  } else if (!d.configLastOk) {
-    drawMicroText(d.configMessage, 18, 164, C_FAULT, C_CARD);
-  } else {
-    drawMicroText("SYNCED WITH ROS", 18, 164, C_READY, C_CARD);
-  }
+  const char* text = d.configPending ? "WAITING ROS ACK / READBACK" :
+                     (!d.configLastOk ? d.configMessage : "SYNCED WITH ROS");
+  const uint16_t color = d.configPending ? C_WARNING : (!d.configLastOk ? C_FAULT : C_READY);
+  if (gUiDynamicPass) drawMicroTextPadded(text, 18, 164, color, C_CARD, 280U);
+  else drawMicroText(text, 18, 164, color, C_CARD);
 }
 
 inline void drawEditor(const UiState& ui, const VehicleTelemetry& d, UiEditKey key) {
   drawContentCard();
-  drawMicroText("EDIT VALUE", 18, 46, C_DISABLED, C_CARD);
+  if (!gUiDynamicPass) drawMicroText("EDIT VALUE", 18, 46, C_DISABLED, C_CARD);
   char value[32];
   const float shown = ui.editing ? ui.editValue :
     (key == UiEditKey::OPERATOR_MODE ? (d.mode == MODE_MANUAL ? 1.0F : 0.0F) :
@@ -247,9 +353,11 @@ inline void drawEditor(const UiState& ui, const VehicleTelemetry& d, UiEditKey k
   else if (key == UiEditKey::DRIVE_SCALE) snprintf(value, sizeof(value), "%.3f", shown);
   else if (key == UiEditKey::OPERATOR_MODE) snprintf(value, sizeof(value), "%s", shown > 0.5F ? "MANUAL" : "AUTO");
   else snprintf(value, sizeof(value), "%s", shown > 0.5F ? "ON" : "OFF");
-  drawHeroText(value, 18, 70, C_INK, C_CARD);
-  drawSmallText("LEFT / RIGHT untuk ubah nilai", 18, 127, C_DISABLED, C_CARD);
-  drawSmallText("OK untuk apply + readback ROS", 18, 147, C_DISABLED, C_CARD);
+  drawHeroTextPadded(value, 18, 70, C_INK, C_CARD, 260U);
+  if (!gUiDynamicPass) {
+    drawSmallText("LEFT / RIGHT untuk ubah nilai", 18, 127, C_DISABLED, C_CARD);
+    drawSmallText("OK untuk apply + readback ROS", 18, 147, C_DISABLED, C_CARD);
+  }
   drawEditStatus(d);
 }
 
@@ -270,18 +378,46 @@ inline void drawManualTestButton(int x, int y, int w, int h, SoftKey key, const 
   drawMicroText(sub, cx, y + h - 12, stop ? C_WHITE : C_TEXT_DIM, fill, TC_DATUM);
 }
 
+struct ManualRenderCache {
+  bool valid{false};
+  bool driveReady{false};
+  bool steerReady{false};
+  uint8_t speedPct{0U};
+  int16_t angleDeg{0};
+};
+inline ManualRenderCache gManualRenderCache{};
+
 inline void drawManualTest(const UiState& ui, const VehicleTelemetry& d) {
   (void)ui;
-  const bool driveReady = d.rosConnected && d.mode == MODE_MANUAL && d.escReady && !d.eStop;
+  const bool driveReady = d.rosConnected && d.escFresh && d.mode == MODE_MANUAL && d.escReady && !d.eStop;
   const bool steerReady = driveReady && d.encoderReady && fabsf(d.driveActualMps) < 0.02F;
+  const int16_t angleDeg = static_cast<int16_t>(lroundf(d.steeringTestAngleDeg));
   char speed[16], angle[16];
   snprintf(speed, sizeof(speed), "%u%%", static_cast<unsigned>(d.manualSpeedPct));
-  snprintf(angle, sizeof(angle), "%.0f deg", d.steeringTestAngleDeg);
-  drawManualTestButton(108, 40, 104, 50, SoftKey::TEST_FORWARD, "FORWARD", speed, driveReady);
-  drawManualTestButton(6, 96, 94, 70, SoftKey::TEST_LEFT, "LEFT", angle, steerReady);
-  drawManualTestButton(108, 96, 104, 70, SoftKey::TEST_STOP, "STOP", "ALL MOTION", true, true);
-  drawManualTestButton(220, 96, 94, 70, SoftKey::TEST_RIGHT, "RIGHT", angle, steerReady);
-  drawManualTestButton(108, 172, 104, 52, SoftKey::TEST_REVERSE, "REVERSE", speed, driveReady);
+  snprintf(angle, sizeof(angle), "%d deg", static_cast<int>(angleDeg));
+
+  const bool full = !gUiDynamicPass || !gManualRenderCache.valid;
+  const bool driveChanged = full || gManualRenderCache.driveReady != driveReady ||
+                            gManualRenderCache.speedPct != d.manualSpeedPct;
+  const bool steerChanged = full || gManualRenderCache.steerReady != steerReady ||
+                            gManualRenderCache.angleDeg != angleDeg;
+  if (driveChanged) {
+    drawManualTestButton(108, 40, 104, 50, SoftKey::TEST_FORWARD, "FORWARD", speed, driveReady);
+    drawManualTestButton(108, 172, 104, 52, SoftKey::TEST_REVERSE, "REVERSE", speed, driveReady);
+  }
+  if (steerChanged) {
+    drawManualTestButton(6, 96, 94, 70, SoftKey::TEST_LEFT, "LEFT", angle, steerReady);
+    drawManualTestButton(220, 96, 94, 70, SoftKey::TEST_RIGHT, "RIGHT", angle, steerReady);
+  }
+  if (full) {
+    drawManualTestButton(108, 96, 104, 70, SoftKey::TEST_STOP, "STOP", "ALL MOTION", true, true);
+    drawMicroText("HOLD 0.6s  |  RELEASE = STOP", W / 2, 229, C_WARNING, C_BG, TC_DATUM);
+  }
+  gManualRenderCache.valid = true;
+  gManualRenderCache.driveReady = driveReady;
+  gManualRenderCache.steerReady = steerReady;
+  gManualRenderCache.speedPct = d.manualSpeedPct;
+  gManualRenderCache.angleDeg = angleDeg;
 }
 
 inline void drawEscLeaf(UiMenuId id, const UiState& ui, const VehicleTelemetry& d) {
@@ -390,6 +526,120 @@ inline void drawPerceptionLeaf(UiMenuId id, const UiState& ui, const VehicleTele
   drawMetricRow(135, "Obstacle gate", d.eStop ? "STOP" : "PASS", d.eStop ? C_FAULT : C_READY);
 }
 
+inline void formatAgeMs(uint32_t ageMs, char* out, size_t outLen) {
+  if (ageMs == 0xFFFFFFFFUL) {
+    snprintf(out, outLen, "NEVER");
+  } else if (ageMs < 1000U) {
+    snprintf(out, outLen, "%lu ms", static_cast<unsigned long>(ageMs));
+  } else {
+    snprintf(out, outLen, "%.1f s", static_cast<double>(ageMs) / 1000.0);
+  }
+}
+
+inline uint16_t ageColor(uint32_t ageMs) {
+  if (ageMs == 0xFFFFFFFFUL || ageMs > DOMAIN_DATA_STALE_MS) return C_DISABLED;
+  if (ageMs > DOMAIN_DATA_STALE_MS / 2U) return C_WARNING;
+  return C_READY;
+}
+
+inline void drawSystemLeaf(UiMenuId id, const UiState& ui, const VehicleTelemetry& d) {
+  (void)ui;
+  drawContentCard();
+  char a[44], b[44];
+  if (id == UiMenuId::SYSTEM_OVERVIEW) {
+    snprintf(a, sizeof(a), "0x%04lX %s",
+             static_cast<unsigned long>(gDiagnostics.tftControllerId & 0xFFFFUL),
+             gDiagnostics.tftOk ? "OK" : "FAULT");
+    drawMetricRow(48, "TFT / display", a, gDiagnostics.tftOk ? C_READY : C_FAULT);
+    snprintf(a, sizeof(a), "%lu / %lu ms",
+             static_cast<unsigned long>(gDiagnostics.uiDrawLastMs),
+             static_cast<unsigned long>(gDiagnostics.uiDrawMaxMs));
+    drawMetricRow(77, "UI last / max", a,
+                  gDiagnostics.uiDrawLastMs <= 50U ? C_READY : C_WARNING);
+    snprintf(a, sizeof(a), "%lu / %lu B",
+             static_cast<unsigned long>(gDiagnostics.displayBytesLastFrame),
+             static_cast<unsigned long>(gDiagnostics.displayBytesMaxFrame));
+    drawMetricRow(106, "Frame last / max", a, C_ACCENT);
+    snprintf(a, sizeof(a), "%lu ms", static_cast<unsigned long>(gDiagnostics.maxServiceGapMs));
+    drawMetricRow(135, "Max service gap", a,
+                  gDiagnostics.maxServiceGapMs <= 10U ? C_READY : C_WARNING);
+    return;
+  }
+  if (id == UiMenuId::SYSTEM_PINS_IO) {
+    snprintf(a, sizeof(a), "%c/%c %s", gDiagnostics.pb6VescTx ? 'H' : 'L',
+             gDiagnostics.pb7VescRx ? 'H' : 'L', gDiagnostics.vescUartOk ? "OK" : "ERR");
+    drawMetricRow(48, "PB6/PB7 VESC", a, gDiagnostics.vescUartOk ? C_READY : C_WARNING);
+    snprintf(a, sizeof(a), "%c/%c %s", gDiagnostics.pa2GnssTx ? 'H' : 'L',
+             gDiagnostics.pa3GnssRx ? 'H' : 'L', gDiagnostics.gnssUartOk ? "OK" : "ERR");
+    drawMetricRow(77, "PA2/PA3 GNSS", a, gDiagnostics.gnssUartOk ? C_READY : C_WARNING);
+    snprintf(a, sizeof(a), "%c/%c %s", gDiagnostics.pb8I2cScl ? 'H' : 'L',
+             gDiagnostics.pb9I2cSda ? 'H' : 'L', gDiagnostics.magOk ? "MAG OK" : "MAG ERR");
+    drawMetricRow(106, "PB8/PB9 I2C1", a, gDiagnostics.magOk ? C_READY : C_WARNING);
+    snprintf(a, sizeof(a), "%s/%c/%c", gDiagnostics.pb12Safety ? "CLR" : "PRESS",
+             gDiagnostics.pb13SafetyLed ? 'H' : 'L', gDiagnostics.pa8Buzzer ? 'H' : 'L');
+    drawMetricRow(135, "PB12/13 + PA8", a,
+                  gDiagnostics.pb12Safety ? C_READY : C_FAULT);
+    return;
+  }
+  if (id == UiMenuId::SYSTEM_PINS_DISPLAY) {
+    snprintf(a, sizeof(a), "S:%c I:%c O:%c", gDiagnostics.pa5SpiSck ? 'H' : 'L',
+             gDiagnostics.pa6SpiMiso ? 'H' : 'L', gDiagnostics.pa7SpiMosi ? 'H' : 'L');
+    drawMetricRow(48, "PA5/6/7 SPI1", a, C_INK);
+    snprintf(a, sizeof(a), "CS:%c DC:%c RST:%c", gDiagnostics.pb0TftCs ? 'H' : 'L',
+             gDiagnostics.pb1TftDc ? 'H' : 'L', gDiagnostics.pb2TftRst ? 'H' : 'L');
+    drawMetricRow(77, "PB0/1/2 TFT", a, gDiagnostics.tftOk ? C_READY : C_FAULT);
+    snprintf(a, sizeof(a), "CS:%c R:%lu F:%lu", gDiagnostics.pa4TouchCs ? 'H' : 'L',
+             static_cast<unsigned long>(gDiagnostics.touchReadCount),
+             static_cast<unsigned long>(gDiagnostics.touchRejectFastCount));
+    drawMetricRow(106, "PA4 TOUCH", a, C_ACCENT);
+    snprintf(a, sizeof(a), "DM:%c DP:%c CDC", gDiagnostics.pa11UsbDm ? 'H' : 'L',
+             gDiagnostics.pa12UsbDp ? 'H' : 'L');
+    drawMetricRow(135, "PA11/12 USB", a, d.rosConnected ? C_READY : C_WARNING);
+    return;
+  }
+  if (id == UiMenuId::SYSTEM_LINKS) {
+    formatAgeMs(gDiagnostics.rosHeartbeatAgeMs, a, sizeof(a));
+    drawMetricRow(48, "ROS heartbeat", a, d.rosConnected ? ageColor(gDiagnostics.rosHeartbeatAgeMs) : C_FAULT);
+    char hostAge[18], f103Age[18];
+    formatAgeMs(d.escAgeMs, hostAge, sizeof(hostAge));
+    formatAgeMs(gDiagnostics.vescLastFrameAgeMs, f103Age, sizeof(f103Age));
+    snprintf(a, sizeof(a), "%s / %s", hostAge, f103Age);
+    drawMetricRow(77, "ESC host / F103", a,
+                  (ageColor(d.escAgeMs) == C_READY && ageColor(gDiagnostics.vescLastFrameAgeMs) == C_READY) ? C_READY : C_WARNING);
+    formatAgeMs(d.perceptionAgeMs, a, sizeof(a));
+    drawMetricRow(106, "Perception stream", a, ageColor(d.perceptionAgeMs));
+    formatAgeMs(d.navigationAgeMs, a, sizeof(a));
+    drawMetricRow(135, "Navigation stream", a, ageColor(d.navigationAgeMs));
+    return;
+  }
+  if (id == UiMenuId::SYSTEM_ERRORS) {
+    snprintf(a, sizeof(a), "E:%lu O:%lu D:%lu", static_cast<unsigned long>(gDiagnostics.vescUartErrors),
+             static_cast<unsigned long>(gDiagnostics.vescUartOverflow),
+             static_cast<unsigned long>(gDiagnostics.vescUartTxDropped));
+    drawMetricRow(48, "VESC UART", a,
+                  (gDiagnostics.vescUartErrors || gDiagnostics.vescUartOverflow || gDiagnostics.vescUartTxDropped) ? C_WARNING : C_READY);
+    snprintf(a, sizeof(a), "E:%lu O:%lu M:%lu", static_cast<unsigned long>(gDiagnostics.gnssUartErrors),
+             static_cast<unsigned long>(gDiagnostics.gnssUartOverflow),
+             static_cast<unsigned long>(gDiagnostics.magErrors));
+    drawMetricRow(77, "GNSS / MAG", a,
+                  (gDiagnostics.gnssUartErrors || gDiagnostics.gnssUartOverflow || gDiagnostics.magErrors) ? C_WARNING : C_READY);
+    snprintf(a, sizeof(a), "T:%lu H:%lu R:%lu B:%lu", static_cast<unsigned long>(gDiagnostics.spiTimeoutCount),
+             static_cast<unsigned long>(gDiagnostics.spiHalErrorCount),
+             static_cast<unsigned long>(gDiagnostics.spiRecoveryCount),
+             static_cast<unsigned long>(gDiagnostics.spiBusConflictCount));
+    drawMetricRow(106, "SPI fault / recovery", a,
+                  (gDiagnostics.spiTimeoutCount || gDiagnostics.spiHalErrorCount || gDiagnostics.spiBusConflictCount) ? C_WARNING : C_READY);
+    snprintf(b, sizeof(b), "VF:%lu/%lu H:%lu/%lu",
+             static_cast<unsigned long>(gDiagnostics.vescFrameErrors),
+             static_cast<unsigned long>(gDiagnostics.vescRecoveryCount),
+             static_cast<unsigned long>(gDiagnostics.unknownCommands),
+             static_cast<unsigned long>(gDiagnostics.overlongCommands));
+    drawMetricRow(135, "VESC frame / host", b,
+                  (gDiagnostics.vescFrameErrors || gDiagnostics.unknownCommands || gDiagnostics.overlongCommands) ? C_WARNING : C_READY);
+    return;
+  }
+}
+
 inline void drawNavigationLeaf(UiMenuId id, const UiState& ui, const VehicleTelemetry& d) {
   drawContentCard();
   char text[40];
@@ -496,8 +746,15 @@ inline bool isPerceptionMenu(UiMenuId id) {
   return value >= static_cast<uint8_t>(UiMenuId::PERCEPTION_ROOT) &&
          value <= static_cast<uint8_t>(UiMenuId::PERCEPTION_TEST);
 }
+inline bool isSystemMenu(UiMenuId id) {
+  const uint8_t value = static_cast<uint8_t>(id);
+  return value >= static_cast<uint8_t>(UiMenuId::SYSTEM_ROOT) &&
+         value <= static_cast<uint8_t>(UiMenuId::SYSTEM_ERRORS);
+}
 inline bool isNavigationMenu(UiMenuId id) {
-  return static_cast<uint8_t>(id) >= static_cast<uint8_t>(UiMenuId::NAVIGATION_ROOT);
+  const uint8_t value = static_cast<uint8_t>(id);
+  return value >= static_cast<uint8_t>(UiMenuId::NAVIGATION_ROOT) &&
+         value <= static_cast<uint8_t>(UiMenuId::NAV_TEST);
 }
 
 inline bool uiNeedsEditFooter(const UiState& ui) {
@@ -506,7 +763,8 @@ inline bool uiNeedsEditFooter(const UiState& ui) {
 }
 
 inline void drawUiContent(const UiState& ui, const VehicleTelemetry& d) {
-  tft.fillRect(0, CONTENT_Y - 1, W, H - CONTENT_Y + 1, C_BG);
+  // Full frames already start with fillScreen(); dynamic frames repaint only
+  // bounded value regions. Never clear the whole content area here.
   if (ui.menu == UiMenuId::OVERVIEW) {
     drawOverview(ui, d);
   } else if (menuEditKey(ui.menu) != UiEditKey::NONE) {
@@ -517,15 +775,28 @@ inline void drawUiContent(const UiState& ui, const VehicleTelemetry& d) {
     drawEscLeaf(ui.menu, ui, d);
   } else if (isPerceptionMenu(ui.menu)) {
     drawPerceptionLeaf(ui.menu, ui, d);
+  } else if (isSystemMenu(ui.menu)) {
+    drawSystemLeaf(ui.menu, ui, d);
   } else if (isNavigationMenu(ui.menu)) {
     drawNavigationLeaf(ui.menu, ui, d);
   }
 }
 
-inline void drawUiFrame(const UiState& ui, const VehicleTelemetry& d, bool full) {
-  if (full) tft.fillScreen(C_BG);
-  drawUiTopBar(ui, d);
-  drawUiContent(ui, d);
-  if (menuHasChildren(ui.menu)) drawCarouselFooter(ui);
-  else if (uiNeedsEditFooter(ui)) drawEditFooter(ui, d);
+inline void drawUiFrame(const UiState& ui, const VehicleTelemetry& d, bool full,
+                        uint8_t dirtyMask = UI_DIRTY_ALL) {
+  gUiDynamicPass = !full;
+  if (full) {
+    resetUiMetricCache();
+    gManualRenderCache = ManualRenderCache{};
+    tft.fillScreen(C_BG);
+  }
+  if (full || (dirtyMask & UI_DIRTY_TOPBAR) != 0U) drawUiTopBar(ui, d);
+  if (full || (dirtyMask & UI_DIRTY_CONTENT) != 0U) drawUiContent(ui, d);
+  if (full) {
+    if (menuHasChildren(ui.menu)) drawCarouselFooter(ui);
+    else if (uiNeedsEditFooter(ui)) drawEditFooter(ui, d);
+  } else if ((dirtyMask & UI_DIRTY_FOOTER) != 0U && uiNeedsEditFooter(ui)) {
+    drawEditFooter(ui, d);
+  }
+  gUiDynamicPass = false;
 }

@@ -25,6 +25,10 @@ public:
   void poll();
   void pollSafetyIo();
   bool safetyPressed() const { return switch_pressed_; }
+  bool gnssUartOk() const { return gnss_uart_ok_; }
+  bool magOk() const { return ist_ok_; }
+  uint32_t gnssUartErrorCount() const { return gnss_uart_error_count_; }
+  uint32_t magErrorCount() const { return ist_error_count_; }
   bool handleHostCommand(const char *command);
 
 private:

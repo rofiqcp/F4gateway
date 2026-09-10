@@ -162,6 +162,26 @@ inline void iconMinus(int cx, int cy, uint16_t c) {
   tft.fillRoundRect(cx - 10, cy - 2, 21, 5, 2, c);
 }
 
+inline void iconChip(int cx, int cy, uint16_t c, uint16_t bg) {
+  tft.fillRoundRect(cx - 8, cy - 8, 17, 17, 3, c);
+  tft.fillRoundRect(cx - 4, cy - 4, 9, 9, 2, bg);
+  for (int i = -6; i <= 6; i += 6) {
+    tft.drawFastHLine(cx - 13, cy + i, 5, c);
+    tft.drawFastHLine(cx + 9, cy + i, 5, c);
+    tft.drawFastVLine(cx + i, cy - 13, 5, c);
+    tft.drawFastVLine(cx + i, cy + 9, 5, c);
+  }
+}
+
+inline void iconPins(int cx, int cy, uint16_t c, uint16_t bg) {
+  tft.drawRoundRect(cx - 12, cy - 9, 24, 18, 3, c);
+  for (int i = -7; i <= 7; i += 7) {
+    tft.fillCircle(cx + i, cy - 4, 2, c);
+    tft.fillCircle(cx + i, cy + 4, 2, c);
+  }
+  tft.fillCircle(cx, cy, 2, bg);
+}
+
 inline void drawVehicleIllustration(int x, int y) {
   tft.pushImage(x, y, VEHICLE_ASSET_W, VEHICLE_ASSET_H, VEHICLE_ASSET);
 }

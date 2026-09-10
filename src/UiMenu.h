@@ -46,6 +46,12 @@ inline const char* menuTitle(UiMenuId id) {
     case UiMenuId::PERCEPTION_OBSTACLE: return "OBSTACLE";
     case UiMenuId::PERCEPTION_PERFORMANCE: return "PERFORMANCE";
     case UiMenuId::PERCEPTION_TEST: return "PER TEST WIZARD";
+    case UiMenuId::SYSTEM_ROOT: return "SYSTEM";
+    case UiMenuId::SYSTEM_OVERVIEW: return "SYSTEM HEALTH";
+    case UiMenuId::SYSTEM_PINS_IO: return "IO PIN MONITOR";
+    case UiMenuId::SYSTEM_PINS_DISPLAY: return "DISPLAY PINS";
+    case UiMenuId::SYSTEM_LINKS: return "LINK DIAGNOSTICS";
+    case UiMenuId::SYSTEM_ERRORS: return "ERROR COUNTERS";
     case UiMenuId::NAVIGATION_ROOT: return "NAVIGATION";
     case UiMenuId::NAVIGATION_OVERVIEW: return "NAV OVERVIEW";
     case UiMenuId::NAV_LOCALIZATION: return "LOCALIZATION";
@@ -73,6 +79,7 @@ inline UiMenuId menuParent(UiMenuId id) {
   switch (id) {
     case UiMenuId::ESC_ROOT:
     case UiMenuId::PERCEPTION_ROOT:
+    case UiMenuId::SYSTEM_ROOT:
     case UiMenuId::NAVIGATION_ROOT: return UiMenuId::OVERVIEW;
     case UiMenuId::ESC_OVERVIEW:
     case UiMenuId::ESC_MODE:
@@ -96,6 +103,11 @@ inline UiMenuId menuParent(UiMenuId id) {
     case UiMenuId::PERCEPTION_TEST: return UiMenuId::PERCEPTION_ROOT;
     case UiMenuId::PERCEPTION_DETECTION_LIVE:
     case UiMenuId::PERCEPTION_INFERENCE: return UiMenuId::PERCEPTION_DETECTION;
+    case UiMenuId::SYSTEM_OVERVIEW:
+    case UiMenuId::SYSTEM_PINS_IO:
+    case UiMenuId::SYSTEM_PINS_DISPLAY:
+    case UiMenuId::SYSTEM_LINKS:
+    case UiMenuId::SYSTEM_ERRORS: return UiMenuId::SYSTEM_ROOT;
     case UiMenuId::NAVIGATION_OVERVIEW:
     case UiMenuId::NAV_LOCALIZATION:
     case UiMenuId::NAV_MISSION:
@@ -121,23 +133,25 @@ inline UiMenuId menuParent(UiMenuId id) {
 }
 
 inline const UiMenuId* menuChildren(UiMenuId id, uint8_t& count) {
-  static const UiMenuId overview[] = {UiMenuId::ESC_ROOT, UiMenuId::PERCEPTION_ROOT, UiMenuId::NAVIGATION_ROOT};
+  static const UiMenuId overview[] = {UiMenuId::ESC_ROOT, UiMenuId::PERCEPTION_ROOT, UiMenuId::NAVIGATION_ROOT, UiMenuId::SYSTEM_ROOT};
   static const UiMenuId esc[] = {UiMenuId::ESC_OVERVIEW, UiMenuId::ESC_MODE, UiMenuId::ESC_STEERING, UiMenuId::ESC_DRIVE, UiMenuId::ESC_POWER, UiMenuId::ESC_LINK, UiMenuId::ESC_MANUAL_TEST};
   static const UiMenuId steering[] = {UiMenuId::ESC_STEERING_LIVE, UiMenuId::ESC_STEERING_TEST_ANGLE, UiMenuId::ESC_STEERING_CAL};
   static const UiMenuId drive[] = {UiMenuId::ESC_DRIVE_LIVE, UiMenuId::ESC_MANUAL_SPEED, UiMenuId::ESC_DRIVE_SCALE};
   static const UiMenuId perception[] = {UiMenuId::PERCEPTION_OVERVIEW, UiMenuId::PERCEPTION_CAMERA, UiMenuId::PERCEPTION_DETECTION, UiMenuId::PERCEPTION_LANE, UiMenuId::PERCEPTION_OBSTACLE, UiMenuId::PERCEPTION_PERFORMANCE, UiMenuId::PERCEPTION_TEST};
   static const UiMenuId detection[] = {UiMenuId::PERCEPTION_DETECTION_LIVE, UiMenuId::PERCEPTION_INFERENCE};
+  static const UiMenuId system[] = {UiMenuId::SYSTEM_OVERVIEW, UiMenuId::SYSTEM_PINS_IO, UiMenuId::SYSTEM_PINS_DISPLAY, UiMenuId::SYSTEM_LINKS, UiMenuId::SYSTEM_ERRORS};
   static const UiMenuId navigation[] = {UiMenuId::NAVIGATION_OVERVIEW, UiMenuId::NAV_LOCALIZATION, UiMenuId::NAV_MISSION, UiMenuId::NAV_NAV2, UiMenuId::NAV_SAFETY, UiMenuId::NAV_TEST};
   static const UiMenuId mission[] = {UiMenuId::NAV_MISSION_GO, UiMenuId::NAV_MISSION_SAVE, UiMenuId::NAV_MISSION_STOP};
   static const UiMenuId localization[] = {UiMenuId::NAV_GNSS, UiMenuId::NAV_IMU, UiMenuId::NAV_MAG, UiMenuId::NAV_EKF_LOCAL, UiMenuId::NAV_EKF_GLOBAL};
   static const UiMenuId nav2[] = {UiMenuId::NAV_PLANNER, UiMenuId::NAV_MPPI, UiMenuId::NAV_SMOOTHER, UiMenuId::NAV_COSTMAP};
   switch (id) {
-    case UiMenuId::OVERVIEW: count = 3; return overview;
+    case UiMenuId::OVERVIEW: count = 4; return overview;
     case UiMenuId::ESC_ROOT: count = 7; return esc;
     case UiMenuId::ESC_STEERING: count = 3; return steering;
     case UiMenuId::ESC_DRIVE: count = 3; return drive;
     case UiMenuId::PERCEPTION_ROOT: count = 7; return perception;
     case UiMenuId::PERCEPTION_DETECTION: count = 2; return detection;
+    case UiMenuId::SYSTEM_ROOT: count = 5; return system;
     case UiMenuId::NAVIGATION_ROOT: count = 6; return navigation;
     case UiMenuId::NAV_MISSION: count = 3; return mission;
     case UiMenuId::NAV_LOCALIZATION: count = 5; return localization;
@@ -175,6 +189,7 @@ inline const char* menuWireName(UiMenuId id) {
     case UiMenuId::OVERVIEW: return "OVERVIEW";
     case UiMenuId::ESC_ROOT: return "ESC";
     case UiMenuId::PERCEPTION_ROOT: return "PERCEPTION";
+    case UiMenuId::SYSTEM_ROOT: return "SYSTEM";
     case UiMenuId::NAVIGATION_ROOT: return "NAVIGATION";
     default: break;
   }

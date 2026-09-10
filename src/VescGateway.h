@@ -14,6 +14,16 @@ class VescGateway {
   bool maintenanceMode() const { return owner_ == Owner::MAINTENANCE; }
   void setSafetyStop(bool active);
   bool safetyStopActive() const { return safety_stop_active_; }
+  bool uartOk() const { return uart_ok_; }
+  uint32_t rxFrames() const { return rx_frames_; }
+  uint32_t frameErrors() const { return rx_frame_errors_; }
+  uint32_t recoveryCount() const { return uart_recovery_count_; }
+  uint32_t usbDropFrames() const { return usb_drop_frames_; }
+  uint32_t runtimeQueueDrops() const { return runtime_queue_drop_; }
+  uint32_t activeBaud() const { return active_baud_; }
+  uint32_t lastValidFrameAgeMs(uint32_t now) const {
+    return ever_valid_frame_ ? static_cast<uint32_t>(now - last_valid_frame_ms_) : 0xFFFFFFFFUL;
+  }
 
  private:
   enum class Owner : uint8_t { RUNTIME = 0, MAINTENANCE = 1 };
@@ -43,10 +53,19 @@ class VescGateway {
   uint32_t rejected_bytes_{0};
   uint32_t rx_frames_{0};
   uint32_t rx_frame_errors_{0};
+  uint32_t rx_frame_prefix_errors_{0};
+  uint32_t rx_frame_crc_errors_{0};
+  uint32_t rx_frame_timeout_bytes_{0};
+  uint32_t rx_frame_oversize_errors_{0};
+  uint8_t rx_last_error_byte_{0};
+  uint32_t last_valid_frame_error_count_{0};
   uint32_t usb_drop_frames_{0};
+  uint32_t usb_p1_drop_frames_{0};
+  uint32_t usb_p3_drop_frames_{0};
   uint32_t runtime_queue_drop_{0};
   uint32_t last_valid_frame_ms_{0};
   uint32_t last_runtime_tx_ms_{0};
+  uint32_t runtime_tx_epoch_ms_{0};
   uint32_t last_recovery_ms_{0};
   uint32_t recovery_tx_marker_{0};
   uint32_t uart_recovery_count_{0};

@@ -17,7 +17,7 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd) {
   gpio.Alternate = GPIO_AF10_OTG_FS;
   HAL_GPIO_Init(GPIOA, &gpio);
 
-  HAL_NVIC_SetPriority(OTG_FS_IRQn, 1U, 0U);
+  HAL_NVIC_SetPriority(OTG_FS_IRQn, 2U, 0U);
   HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
 }
 

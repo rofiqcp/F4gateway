@@ -13,9 +13,11 @@ extern TIM_HandleTypeDef htim11;
 
 void Board_Init();
 void Board_Service();
+uint32_t Board_MaxServiceGapMs();
 void Board_SetRealtimeServiceCallback(void (*callback)());
 void Board_RealtimeService();
 void Board_DelayUs(uint32_t microseconds);
+bool Board_ReinitSpi1();
 void Board_ReinitI2c1();
 void Board_SetWatchdogCallback(void (*callback)());
 void Board_WatchdogStart();
@@ -42,6 +44,11 @@ class HalUartPort {
   uint32_t overflowCount() const { return overflow_count_; }
   uint32_t errorCount() const { return error_count_; }
   uint32_t txDropped() const { return tx_dropped_; }
+  uint32_t txSegmentsStarted() const { return tx_segments_started_; }
+  uint32_t txSegmentsCompleted() const { return tx_segments_completed_; }
+  uint32_t rxIrqBytes() const { return rx_irq_bytes_; }
+  uint32_t lastRxIrqMs() const { return last_rx_irq_ms_; }
+  uint32_t maxQueueBytes() const { return max_queue_bytes_; }
   void irqRxComplete();
   void irqTxComplete();
   void irqError();
@@ -62,6 +69,11 @@ class HalUartPort {
   volatile uint32_t tx_dropped_{0U};
   volatile uint32_t overflow_count_{0U};
   volatile uint32_t error_count_{0U};
+  volatile uint32_t tx_segments_started_{0U};
+  volatile uint32_t tx_segments_completed_{0U};
+  volatile uint32_t rx_irq_bytes_{0U};
+  volatile uint32_t last_rx_irq_ms_{0U};
+  volatile uint32_t max_queue_bytes_{0U};
   volatile bool rx_restart_required_{false};
 };
 

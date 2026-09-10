@@ -35,6 +35,12 @@ enum class UiMenuId : uint8_t {
   PERCEPTION_OBSTACLE,
   PERCEPTION_PERFORMANCE,
   PERCEPTION_TEST,
+  SYSTEM_ROOT,
+  SYSTEM_OVERVIEW,
+  SYSTEM_PINS_IO,
+  SYSTEM_PINS_DISPLAY,
+  SYSTEM_LINKS,
+  SYSTEM_ERRORS,
   NAVIGATION_ROOT,
   NAVIGATION_OVERVIEW,
   NAV_LOCALIZATION,
@@ -127,8 +133,10 @@ static constexpr int CARD_RADIUS = 7;
 static constexpr int UI_CARD_X0 = 6;
 static constexpr int UI_CARD_W = 100;
 static constexpr int UI_CARD_GAP = 4;
-static constexpr int OVERVIEW_CARD_Y = 126;
-static constexpr int OVERVIEW_CARD_H = 108;
+static constexpr int OVERVIEW_SUMMARY_Y = 36;
+static constexpr int OVERVIEW_SUMMARY_H = 47;
+static constexpr int OVERVIEW_CARD_Y = 89;
+static constexpr int OVERVIEW_CARD_H = 94;
 static constexpr int SUBMENU_CARD_Y = 42;
 static constexpr int SUBMENU_CARD_H = 132;
 static constexpr uint8_t SUBMENU_VISIBLE_CARDS = 3;
@@ -164,7 +172,12 @@ static constexpr float DRIVE_SCALE_STEP = 0.01F;
 // Touch dan refresh: parser telemetry tetap jauh lebih cepat dari paint TFT.
 static constexpr uint16_t TOUCH_THRESHOLD = 300;
 static constexpr uint32_t TOUCH_POLL_MS = 20;
+static constexpr uint32_t TOUCH_TAP_MIN_MS = 35;
+static constexpr uint32_t TOUCH_HOLD_ACTION_MS = 650;
+static constexpr uint32_t TOUCH_REPEAT_DELAY_MS = 450;
+static constexpr uint32_t TOUCH_REPEAT_MS = 120;
 static constexpr uint32_t DISPLAY_REFRESH_MS = 100;
+static constexpr uint32_t DOMAIN_DATA_STALE_MS = 3000;
 static constexpr uint32_t ROS_LINK_TIMEOUT_MS = 2500;
 static constexpr uint32_t ROS_LINK_STARTUP_TIMEOUT_MS = 12000;
 static constexpr uint32_t ROS_HEARTBEAT_STABLE_GAP_MS = 1500;

@@ -15,6 +15,7 @@
 
 #include "Config.h"
 #include "Telemetry.h"
+#include "Diagnostics.h"
 #include "Neo3Sensors.h"
 #include "VescGateway.h"
 #include "Theme.h"
@@ -33,6 +34,7 @@ VehicleTelemetry gTelemetry = defaultTelemetry();
 UiState gUi;
 Neo3Sensors gNeo3;
 VescGateway gVesc;
+HmiDiagnostics gDiagnostics{};
 
 static volatile uint32_t gMainLoopHeartbeatMs = 0U;
 static volatile bool gAppWatchdogArmed = false;
@@ -44,10 +46,20 @@ static bool splashReadyText = false;
 static uint32_t splashStartMs = 0;
 static uint32_t splashReadyMs = 0;
 static uint32_t lastFrameMs = 0;
-static bool uiDirty = false;
+static uint8_t uiDirtyMask = UI_DIRTY_NONE;
+static inline void markUiDirty(uint8_t bits = UI_DIRTY_CONTENT) { uiDirtyMask |= bits; }
 static uint32_t lastUiRefreshMs = 0;
 static uint32_t lastRosHeartbeatMs = 0;
 static uint32_t lastTouchPollMs = 0;
+static uint32_t lastDiagnosticsMs = 0;
+static uint32_t lastSystemUiMarkMs = 0;
+static uint32_t lastDisplayRecoveryMs = 0;
+static uint32_t lastEscDomainMs = 0;
+static uint32_t lastPerceptionDomainMs = 0;
+static uint32_t lastNavigationDomainMs = 0;
+static bool seenEscDomain = false;
+static bool seenPerceptionDomain = false;
+static bool seenNavigationDomain = false;
 static uint8_t rosHeartbeatStableCount = 0;
 static bool rosHeartbeatStable = false;
 static bool driveTestRunning = false;
@@ -147,13 +159,13 @@ static void stopDriveTest() {
   driveTestRunning = false;
   driveTestDeadlineMs = 0U;
   gTelemetry.state = STATE_STOPPED;
-  uiDirty = true;
+  markUiDirty();
 }
 
 static void stopSteeringTest() {
   printBoth("CMD:STEER:STOP");
   snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState), "%s", "IDLE");
-  uiDirty = true;
+  markUiDirty();
 }
 
 static void stopAllManualTest() {
@@ -162,11 +174,35 @@ static void stopAllManualTest() {
 }
 
 static float actualEditValue(UiEditKey key);
+static bool gUiDrawActive = false;
+static uint32_t gUiDrawLastMs = 0U;
+static uint32_t gUiDrawMaxMs = 0U;
 
 static void drawUiNow(bool full = true) {
   if (!splashComplete || gUi.menu == UiMenuId::SPLASH) return;
-  drawUiFrame(gUi, gTelemetry, full);
-  uiDirty = false;
+  if (!tft.displayReady() || tft.displayFaulted()) { markUiDirty(UI_DIRTY_ALL); return; }
+  if (gUiDrawActive) { markUiDirty(UI_DIRTY_ALL); return; }
+  uint8_t dirtyMask = full ? static_cast<uint8_t>(UI_DIRTY_ALL) : uiDirtyMask;
+  if (!full && dirtyMask == UI_DIRTY_NONE) dirtyMask = UI_DIRTY_ALL;
+  if (full) uiDirtyMask = UI_DIRTY_NONE;
+  else uiDirtyMask = static_cast<uint8_t>(uiDirtyMask & static_cast<uint8_t>(~dirtyMask));
+
+  gUiDrawActive = true;
+  const uint32_t started_ms = HAL_GetTick();
+  tft.beginFrame();
+  drawUiFrame(gUi, gTelemetry, full, dirtyMask);
+  tft.endFrame();
+  ++gDiagnostics.uiFrames;
+  if (full) ++gDiagnostics.fullUiFrames;
+  else ++gDiagnostics.dirtyUiFrames;
+  const uint32_t elapsed_ms = static_cast<uint32_t>(HAL_GetTick() - started_ms);
+  gUiDrawLastMs = elapsed_ms;
+  if (elapsed_ms > gUiDrawMaxMs) gUiDrawMaxMs = elapsed_ms;
+  gDiagnostics.uiDrawLastMs = gUiDrawLastMs;
+  gDiagnostics.uiDrawMaxMs = gUiDrawMaxMs;
+  gDiagnostics.displayBytesLastFrame = tft.lastFrameBytes();
+  gDiagnostics.displayBytesMaxFrame = tft.maxFrameBytes();
+  gUiDrawActive = false;
   lastUiRefreshMs = HAL_GetTick();
 }
 
@@ -228,11 +264,19 @@ static const char* editWireKey(UiEditKey key) {
   }
 }
 
+static bool editDomainFresh(UiEditKey key) {
+  if (key == UiEditKey::PERCEPTION_INFERENCE) return gTelemetry.perceptionFresh;
+  if (key == UiEditKey::NONE) return false;
+  return gTelemetry.escFresh;
+}
+
 static void requestConfig(UiEditKey key, float value) {
-  if (key == UiEditKey::NONE || gTelemetry.configPending || !gTelemetry.rosConnected) {
-    if (!gTelemetry.rosConnected) {
+  if (key == UiEditKey::NONE || gTelemetry.configPending || !gTelemetry.rosConnected ||
+      !editDomainFresh(key)) {
+    if (!gTelemetry.rosConnected || !editDomainFresh(key)) {
       gTelemetry.configLastOk = false;
-      snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "ROS OFFLINE");
+      snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
+               !gTelemetry.rosConnected ? "ROS OFFLINE" : "DATA STALE");
       drawUiNow(true);
     }
     return;
@@ -282,7 +326,7 @@ static void selectRelative(int direction) {
   if (next < 0) next = count - 1;
   if (next >= count) next = 0;
   gUi.selectedChild = static_cast<uint8_t>(next);
-  drawUiNow(false);
+  drawUiNow(true);
 }
 
 
@@ -291,7 +335,12 @@ static void chooseVisibleCard(uint8_t slot) {
   if (gUi.menu == UiMenuId::OVERVIEW) {
     uint8_t count = 0;
     const UiMenuId* children = menuChildren(UiMenuId::OVERVIEW, count);
-    if (children != nullptr && slot < count) setMenu(children[slot]);
+    if (children == nullptr || count == 0U) return;
+    const uint8_t index = static_cast<uint8_t>(menuWindowFirst(gUi.selectedChild, count) + slot);
+    if (index < count) {
+      gUi.selectedChild = index;
+      setMenu(children[index]);
+    }
     return;
   }
   uint8_t count = 0;
@@ -304,8 +353,9 @@ static void chooseVisibleCard(uint8_t slot) {
 }
 
 static bool steeringTestAllowed() {
-  return gTelemetry.rosConnected && gTelemetry.mode == MODE_MANUAL && gTelemetry.escReady &&
-         gTelemetry.encoderReady && !gTelemetry.eStop && gTelemetry.state == STATE_STOPPED;
+  return gTelemetry.rosConnected && gTelemetry.escFresh && gTelemetry.mode == MODE_MANUAL &&
+         gTelemetry.escReady && gTelemetry.encoderReady && !gTelemetry.eStop &&
+         gTelemetry.state == STATE_STOPPED;
 }
 
 static void runSteeringTest(float targetDeg) {
@@ -322,8 +372,8 @@ static void runSteeringTest(float targetDeg) {
 }
 
 static bool driveTestAllowed() {
-  return gTelemetry.rosConnected && gTelemetry.mode == MODE_MANUAL && gTelemetry.escReady &&
-         !gTelemetry.eStop && gTelemetry.state == STATE_STOPPED;
+  return gTelemetry.rosConnected && gTelemetry.escFresh && gTelemetry.mode == MODE_MANUAL &&
+         gTelemetry.escReady && !gTelemetry.eStop && gTelemetry.state == STATE_STOPPED;
 }
 
 static void runDriveTest(bool forward) {
@@ -344,7 +394,7 @@ static void runDriveTest(bool forward) {
   driveTestRunning = true;
   driveTestDeadlineMs = HAL_GetTick() + DRIVE_TEST_MAX_MS;
   gTelemetry.state = STATE_RUNNING;
-  uiDirty = true;
+  markUiDirty();
 }
 
 static void selectWaypoint(int direction) {
@@ -359,7 +409,7 @@ static void selectWaypoint(int direction) {
 
 static void goSelectedWaypoint() {
   const uint8_t index = gTelemetry.selectedWaypoint < HMI_WAYPOINT_COUNT ? gTelemetry.selectedWaypoint : 0U;
-  if (!gTelemetry.rosConnected || gTelemetry.mode != MODE_AUTO ||
+  if (!gTelemetry.rosConnected || !gTelemetry.navigationFresh || gTelemetry.mode != MODE_AUTO ||
       gTelemetry.systemStatus != SYS_READY || !gTelemetry.waypointSaved[index]) {
     gTelemetry.configLastOk = false;
     snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "MISSION LOCKED");
@@ -373,7 +423,8 @@ static void goSelectedWaypoint() {
 
 static void saveSelectedWaypoint() {
   const uint8_t index = gTelemetry.selectedWaypoint < HMI_WAYPOINT_COUNT ? gTelemetry.selectedWaypoint : 0U;
-  if (!gTelemetry.rosConnected || !gTelemetry.gpsReady || gTelemetry.state != STATE_STOPPED) {
+  if (!gTelemetry.rosConnected || !gTelemetry.navigationFresh || !gTelemetry.gpsReady ||
+      gTelemetry.state != STATE_STOPPED) {
     gTelemetry.configLastOk = false;
     snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "SAVE REQUIRES GPS+STOP");
     drawUiNow(false);
@@ -452,8 +503,40 @@ static void handleSoftKey(SoftKey key) {
 }
 
 static void handleTouch() {
+  if (!tft.displayReady() || tft.displayFaulted()) return;
   const TouchEvent ev = pollTouch(gUi);
-  if (ev.type == TouchEvent::PRESS || ev.type == TouchEvent::REPEAT) handleSoftKey(ev.key);
+  if (ev.key == SoftKey::NONE) return;
+
+  // STOP is intentionally the only control that fires on initial press.
+  if (ev.type == TouchEvent::PRESS) {
+    if (gUi.menu == UiMenuId::ESC_MANUAL_TEST && ev.key == SoftKey::TEST_STOP) {
+      ++gDiagnostics.touchActions;
+      handleSoftKey(ev.key);
+    }
+    return;
+  }
+  if (ev.type == TouchEvent::HOLD) {
+    if (isManualMotionKey(ev.key)) {
+      ++gDiagnostics.touchActions;
+      handleSoftKey(ev.key);
+    }
+    return;
+  }
+  if (ev.type == TouchEvent::REPEAT) {
+    ++gDiagnostics.touchActions;
+    handleSoftKey(ev.key);
+    return;
+  }
+  if (ev.type == TouchEvent::RELEASE) {
+    if (isManualMotionKey(ev.key)) {
+      ++gDiagnostics.touchActions;
+      stopAllManualTest();
+      drawUiNow(false);
+    } else {
+      ++gDiagnostics.touchActions;
+      handleSoftKey(ev.key);
+    }
+  }
 }
 
 static bool eqIgnoreCase(const char* a, const char* b) {
@@ -539,7 +622,7 @@ static void markRosHeartbeat() {
     rosHeartbeatStable = false;
     gTelemetry.rosConnected = true;
     publishLinkState();
-    uiDirty = true;
+    markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
   } else {
     const uint32_t gap = static_cast<uint32_t>(now - lastRosHeartbeatMs);
     if (gap <= ROS_HEARTBEAT_STABLE_GAP_MS) {
@@ -571,12 +654,21 @@ static void forceRosOffline() {
   gTelemetry.perceptionReady = false;
   gTelemetry.motionReady = false;
   gTelemetry.nav2Ready = false;
+  gTelemetry.escFresh = false;
+  gTelemetry.perceptionFresh = false;
+  gTelemetry.navigationFresh = false;
+  gTelemetry.escAgeMs = 0xFFFFFFFFUL;
+  gTelemetry.perceptionAgeMs = 0xFFFFFFFFUL;
+  gTelemetry.navigationAgeMs = 0xFFFFFFFFUL;
+  seenEscDomain = false;
+  seenPerceptionDomain = false;
+  seenNavigationDomain = false;
   if (gTelemetry.configPending) {
     gTelemetry.configPending = false;
     gTelemetry.configLastOk = false;
     snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "ROS LINK LOST");
   }
-  uiDirty = true;
+  markUiDirty(UI_DIRTY_ALL);
   if (wasConnected) publishLinkState();
 }
 
@@ -595,16 +687,149 @@ static void checkConfigTimeout() {
   drawUiNow(true);
 }
 
+static bool startsWithAny(const char* command, const char* const* prefixes, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    const size_t n = strlen(prefixes[i]);
+    if (strncmp(command, prefixes[i], n) == 0) return true;
+  }
+  return false;
+}
+
+static void markDomainForCommand(const char* command) {
+  // A new link epoch must receive fresh domain data after ROS heartbeat.
+  if (!gTelemetry.rosConnected) return;
+  static const char* const escPrefixes[] = {
+    "MODE:", "STATE:", "SPD:", "DRIVE_TGT:", "DRIVE_ACT:", "RPM:", "ERPM:",
+    "STEER_TARGET:", "STEER_ACTUAL:", "STEER_ERR:", "STEERTEST:", "ESC:", "ENC:",
+    "VESC_LINK:", "ESTOP:", "MANUAL_SPEED:", "CFGSTEERTEST:", "CFGDRVSCALE:"
+  };
+  static const char* const perceptionPrefixes[] = {
+    "CFGPERINF:", "CAM:", "PER:", "FPS:", "OBJ:", "DIST:", "CONF:", "DRV:", "OBS:", "LANE:"
+  };
+  static const char* const navigationPrefixes[] = {
+    "GPS:", "FIX:", "LAT:", "LON:", "SAT:", "HDOP:", "HACC:", "GAGE:", "HEAD:",
+    "IMU:", "GYROZ:", "MAG:", "MOTION:", "NAV2:", "LOCSTATE:", "GNSSSTATUS:",
+    "IMUSTATUS:", "EKFLOCAL:", "EKFGLOBAL:", "WPSEL:", "TARGET:", "NAV:", "WP0:",
+    "WP1:", "WP2:", "WP3:"
+  };
+  const uint32_t now = HAL_GetTick();
+  if (startsWithAny(command, escPrefixes, sizeof(escPrefixes) / sizeof(escPrefixes[0]))) {
+    lastEscDomainMs = now; seenEscDomain = true;
+  } else if (startsWithAny(command, perceptionPrefixes,
+                           sizeof(perceptionPrefixes) / sizeof(perceptionPrefixes[0]))) {
+    lastPerceptionDomainMs = now; seenPerceptionDomain = true;
+  } else if (startsWithAny(command, navigationPrefixes,
+                           sizeof(navigationPrefixes) / sizeof(navigationPrefixes[0]))) {
+    lastNavigationDomainMs = now; seenNavigationDomain = true;
+  }
+}
+
+static void markUiForCommand(const char* command) {
+  uint8_t bits = UI_DIRTY_CONTENT;
+  static const char* const topPrefixes[] = {
+    "ROS:", "ESTOP:", "ESC:", "VESC_LINK:", "PER:", "MOTION:", "NAV2:"
+  };
+  if (startsWithAny(command, topPrefixes, sizeof(topPrefixes) / sizeof(topPrefixes[0]))) {
+    bits = static_cast<uint8_t>(bits | UI_DIRTY_TOPBAR);
+  }
+  markUiDirty(bits);
+}
+
+static void updateDomainFreshness(uint32_t now) {
+  const bool oldEsc = gTelemetry.escFresh;
+  const bool oldPer = gTelemetry.perceptionFresh;
+  const bool oldNav = gTelemetry.navigationFresh;
+  gTelemetry.escAgeMs = seenEscDomain ? static_cast<uint32_t>(now - lastEscDomainMs) : 0xFFFFFFFFUL;
+  gTelemetry.perceptionAgeMs = seenPerceptionDomain ? static_cast<uint32_t>(now - lastPerceptionDomainMs) : 0xFFFFFFFFUL;
+  gTelemetry.navigationAgeMs = seenNavigationDomain ? static_cast<uint32_t>(now - lastNavigationDomainMs) : 0xFFFFFFFFUL;
+  gTelemetry.escFresh = gTelemetry.rosConnected && seenEscDomain && gTelemetry.escAgeMs <= DOMAIN_DATA_STALE_MS;
+  gTelemetry.perceptionFresh = gTelemetry.rosConnected && seenPerceptionDomain &&
+                               gTelemetry.perceptionAgeMs <= DOMAIN_DATA_STALE_MS;
+  gTelemetry.navigationFresh = gTelemetry.rosConnected && seenNavigationDomain &&
+                               gTelemetry.navigationAgeMs <= DOMAIN_DATA_STALE_MS;
+  if (oldEsc != gTelemetry.escFresh || oldPer != gTelemetry.perceptionFresh ||
+      oldNav != gTelemetry.navigationFresh) markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
+}
+
+static bool pinHigh(GPIO_TypeDef* port, uint16_t pin) {
+  return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_SET;
+}
+
+static void sampleDiagnostics(uint32_t now) {
+  gDiagnostics.uptimeMs = now;
+  gDiagnostics.tftControllerId = gTftControllerId;
+  gDiagnostics.tftPowerMode = gTftPowerMode;
+  gDiagnostics.tftMadctl = gTftMadctl;
+  gDiagnostics.tftPixelFormat = gTftPixelFormat;
+  const bool oldTftOk = gDiagnostics.tftOk;
+  gDiagnostics.displayReady = tft.displayReady();
+  gDiagnostics.displayFaulted = tft.displayFaulted();
+  gDiagnostics.tftOk = ((gTftControllerId & 0xFFFFU) == 0x9341U) &&
+                       gDiagnostics.displayReady && !gDiagnostics.displayFaulted;
+  gDiagnostics.spiTransactions = tft.spiTransactions();
+  gDiagnostics.spiBytesTx = tft.spiBytesTx();
+  gDiagnostics.spiTimeoutCount = tft.spiTimeoutCount();
+  gDiagnostics.spiHalErrorCount = tft.spiHalErrorCount();
+  gDiagnostics.spiRecoveryCount = tft.spiRecoveryCount();
+  gDiagnostics.spiBusConflictCount = tft.spiBusConflictCount();
+  gDiagnostics.touchReadCount = tft.touchReadCount();
+  gDiagnostics.touchRejectFastCount = tft.touchRejectFastCount();
+  gDiagnostics.displayBytesLastFrame = tft.lastFrameBytes();
+  gDiagnostics.displayBytesMaxFrame = tft.maxFrameBytes();
+  gDiagnostics.uiDrawLastMs = gUiDrawLastMs;
+  gDiagnostics.uiDrawMaxMs = gUiDrawMaxMs;
+  gDiagnostics.maxServiceGapMs = Board_MaxServiceGapMs();
+  if (oldTftOk != gDiagnostics.tftOk) markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
+  gDiagnostics.rosHeartbeatAgeMs = gTelemetry.rosConnected ?
+    static_cast<uint32_t>(now - lastRosHeartbeatMs) : 0xFFFFFFFFUL;
+
+  gDiagnostics.vescUartOk = gVesc.uartOk();
+  gDiagnostics.gnssUartOk = gNeo3.gnssUartOk();
+  gDiagnostics.magOk = gNeo3.magOk();
+  gDiagnostics.vescUartErrors = gVescUart.errorCount();
+  gDiagnostics.vescUartOverflow = gVescUart.overflowCount();
+  gDiagnostics.vescUartTxDropped = gVescUart.txDropped();
+  gDiagnostics.gnssUartErrors = gGnssUart.errorCount();
+  gDiagnostics.gnssUartOverflow = gGnssUart.overflowCount();
+  gDiagnostics.gnssUartTxDropped = gGnssUart.txDropped();
+  gDiagnostics.magErrors = gNeo3.magErrorCount();
+  gDiagnostics.vescFrameErrors = gVesc.frameErrors();
+  gDiagnostics.vescRecoveryCount = gVesc.recoveryCount();
+  gDiagnostics.vescLastFrameAgeMs = gVesc.lastValidFrameAgeMs(now);
+
+  gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_6);
+  gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_7);
+  gDiagnostics.pa2GnssTx = pinHigh(GPIOA, GPIO_PIN_2);
+  gDiagnostics.pa3GnssRx = pinHigh(GPIOA, GPIO_PIN_3);
+  gDiagnostics.pb8I2cScl = pinHigh(GPIOB, GPIO_PIN_8);
+  gDiagnostics.pb9I2cSda = pinHigh(GPIOB, GPIO_PIN_9);
+  gDiagnostics.pb12Safety = pinHigh(GPIOB, GPIO_PIN_12);
+  gDiagnostics.pb13SafetyLed = pinHigh(GPIOB, GPIO_PIN_13);
+  gDiagnostics.pa8Buzzer = pinHigh(GPIOA, GPIO_PIN_8);
+  gDiagnostics.pa5SpiSck = pinHigh(GPIOA, GPIO_PIN_5);
+  gDiagnostics.pa6SpiMiso = pinHigh(GPIOA, GPIO_PIN_6);
+  gDiagnostics.pa7SpiMosi = pinHigh(GPIOA, GPIO_PIN_7);
+  gDiagnostics.pb0TftCs = pinHigh(GPIOB, GPIO_PIN_0);
+  gDiagnostics.pb1TftDc = pinHigh(GPIOB, GPIO_PIN_1);
+  gDiagnostics.pb2TftRst = pinHigh(GPIOB, GPIO_PIN_2);
+  gDiagnostics.pa4TouchCs = pinHigh(GPIOA, GPIO_PIN_4);
+  gDiagnostics.pa11UsbDm = pinHigh(GPIOA, GPIO_PIN_11);
+  gDiagnostics.pa12UsbDp = pinHigh(GPIOA, GPIO_PIN_12);
+}
+
 static void setExternalMenu(const char* name) {
   if (eqIgnoreCase(name, "OVERVIEW")) setMenu(UiMenuId::OVERVIEW);
   else if (eqIgnoreCase(name, "ESC")) setMenu(UiMenuId::ESC_ROOT);
   else if (eqIgnoreCase(name, "PERCEPTION")) setMenu(UiMenuId::PERCEPTION_ROOT);
   else if (eqIgnoreCase(name, "NAVIGATION")) setMenu(UiMenuId::NAVIGATION_ROOT);
+  else if (eqIgnoreCase(name, "SYSTEM")) setMenu(UiMenuId::SYSTEM_ROOT);
 }
 
 static void handleSerialCommand(char* command) {
   while (*command == ' ' || *command == '\t') ++command;
   if (*command == '\0') return;
+  ++gDiagnostics.hostCommands;
+  gDiagnostics.lastHostCommandMs = HAL_GetTick();
 
   // Gateway hardware frame selalu diprioritaskan dan tidak menyentuh UI parser.
   if (!strncmp(command, "VESC:", 5)) {
@@ -633,11 +858,38 @@ static void handleSerialCommand(char* command) {
     char line[96];
     std::snprintf(line, sizeof(line), "TFT:ID:%08lX:MODE=%02X:MADCTL=%02X:PIXFMT=%02X:%s",
                   static_cast<unsigned long>(gTftControllerId), gTftPowerMode, gTftMadctl, gTftPixelFormat,
-                  (gTftControllerId & 0xFFFFU) == 0x9341U ? "OK" : "FAULT");
+                  gDiagnostics.tftOk ? "OK" : "FAULT");
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!strcmp(command, "TFT:DIAG")) {
+    char line[190];
+    sampleDiagnostics(HAL_GetTick());
+    std::snprintf(line, sizeof(line),
+                  "TFT:DIAG:TXN=%lu:BYTES=%lu:TO=%lu:HAL=%lu:REC=%lu:BUS=%lu",
+                  static_cast<unsigned long>(gDiagnostics.spiTransactions),
+                  static_cast<unsigned long>(gDiagnostics.spiBytesTx),
+                  static_cast<unsigned long>(gDiagnostics.spiTimeoutCount),
+                  static_cast<unsigned long>(gDiagnostics.spiHalErrorCount),
+                  static_cast<unsigned long>(gDiagnostics.spiRecoveryCount),
+                  static_cast<unsigned long>(gDiagnostics.spiBusConflictCount));
+    (void)gUsb.writeLineCritical(line, 120U);
+    std::snprintf(line, sizeof(line),
+                  "TFT:FRAME:LAST=%lu:MAX=%lu:UI=%lu/%lu:SVC=%lu:TOUCH=%lu/%lu",
+                  static_cast<unsigned long>(gDiagnostics.displayBytesLastFrame),
+                  static_cast<unsigned long>(gDiagnostics.displayBytesMaxFrame),
+                  static_cast<unsigned long>(gDiagnostics.uiDrawLastMs),
+                  static_cast<unsigned long>(gDiagnostics.uiDrawMaxMs),
+                  static_cast<unsigned long>(gDiagnostics.maxServiceGapMs),
+                  static_cast<unsigned long>(gDiagnostics.touchReadCount),
+                  static_cast<unsigned long>(gDiagnostics.touchRejectFastCount));
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
   if (!strcmp(command, "TFT:TEST")) {
+    if (gUiDrawActive || !splashComplete || !tft.displayReady() || tft.displayFaulted()) {
+      (void)gUsb.writeLineCritical("ERR:TFT:BUSY_OR_FAULT", 120U); return;
+    }
     tft.fillScreen(C_FAULT); HAL_Delay(250U);
     tft.fillScreen(C_READY); HAL_Delay(250U);
     tft.fillScreen(0x001FU); HAL_Delay(250U);
@@ -651,6 +903,7 @@ static void handleSerialCommand(char* command) {
     return;
   }
   if (!strcmp(command, "BOOT:DFU:CONFIRM")) {
+    if (gUiDrawActive) { (void)gUsb.writeLineCritical("ERR:DFU:BUSY", 120U); return; }
     const uint32_t now = HAL_GetTick();
     if (gDfuArmDeadlineMs == 0U || static_cast<int32_t>(gDfuArmDeadlineMs - now) <= 0) {
       gDfuArmDeadlineMs = 0U;
@@ -808,20 +1061,25 @@ static void handleSerialCommand(char* command) {
   }
 
   if (!recognized) {
+    ++gDiagnostics.unknownCommands;
     char line[224];
     std::snprintf(line, sizeof(line), "ERR:UNKNOWN_COMMAND:%s", command);
     (void)gUsb.writeLine(line);
     return;
   }
+  markDomainForCommand(command);
   sanitizeTelemetry();
-  uiDirty = true;
+  updateDomainFreshness(HAL_GetTick());
+  markUiForCommand(command);
 }
 
-static void pollSerialGui() {
+static void pollSerialGui(std::size_t byteBudget = static_cast<std::size_t>(-1)) {
   gUsb.poll();
-  while (gUsb.available() > 0) {
+  std::size_t processed = 0U;
+  while (gUsb.available() > 0 && processed < byteBudget) {
     const int value = gUsb.read();
     if (value < 0) break;
+    ++processed;
     const char c = static_cast<char>(value);
     if (c == '\r') continue;
     if (serialRxDiscarding) {
@@ -837,27 +1095,58 @@ static void pollSerialGui() {
     } else {
       serialRxLen = 0U;
       serialRxDiscarding = true;
+      ++gDiagnostics.overlongCommands;
       (void)gUsb.writeLine("ERR:COMMAND_TOO_LONG");
     }
   }
 }
 
-static void initDisplay() {
+static bool initDisplay() {
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
   gTftControllerId = 0U;
   for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
     tft.init();
     gTftControllerId = tft.readId();
-    if ((gTftControllerId & 0xFFFFU) == 0x9341U) break;
+    if ((gTftControllerId & 0xFFFFU) == 0x9341U && !tft.displayFaulted()) break;
     HAL_Delay(40U);
   }
-  tft.setRotation(1);
-  gTftPowerMode = tft.readRegister8(0x0AU, 0U);
-  gTftMadctl = tft.readRegister8(0x0BU, 0U);
-  gTftPixelFormat = tft.readRegister8(0x0CU, 0U);
+  const bool controllerOk = (gTftControllerId & 0xFFFFU) == 0x9341U && !tft.displayFaulted();
+  if (controllerOk) {
+    tft.setRotation(1);
+    gTftPowerMode = tft.readRegister8(0x0AU, 0U);
+    gTftMadctl = tft.readRegister8(0x0BU, 0U);
+    gTftPixelFormat = tft.readRegister8(0x0CU, 0U);
+  } else {
+    gTftPowerMode = gTftMadctl = gTftPixelFormat = 0U;
+  }
+  const bool ready = controllerOk && !tft.displayFaulted();
+  tft.setDisplayReady(ready);
+  gDiagnostics.tftControllerId = gTftControllerId;
+  gDiagnostics.tftPowerMode = gTftPowerMode;
+  gDiagnostics.tftMadctl = gTftMadctl;
+  gDiagnostics.tftPixelFormat = gTftPixelFormat;
+  gDiagnostics.displayReady = ready;
+  gDiagnostics.displayFaulted = tft.displayFaulted();
+  gDiagnostics.tftOk = ready;
   tft.setSwapBytes(true);
-  tft.fillScreen(C_BG);
-  tft.setTextDatum(MC_DATUM);
+  if (ready) {
+    tft.fillScreen(C_BG);
+    tft.setTextDatum(MC_DATUM);
+  }
+  return ready;
+}
+
+static void serviceDisplayRecovery(uint32_t now) {
+  if (tft.displayReady() && !tft.displayFaulted()) return;
+  if (gUiDrawActive || static_cast<uint32_t>(now - lastDisplayRecoveryMs) < 2000U) return;
+  lastDisplayRecoveryMs = now;
+  if (!initDisplay()) return;
+  if (splashComplete) {
+    markUiDirty(UI_DIRTY_ALL);
+    drawUiNow(true);
+  } else {
+    drawSplashScreen();
+  }
 }
 
 static void restartSplash() {
@@ -869,10 +1158,10 @@ static void restartSplash() {
   splashReadyText = false;
   lastFrameMs = 0U;
   resetTouchState();
-  uiDirty = false;
+  uiDirtyMask = UI_DIRTY_NONE;
   lastUiRefreshMs = 0U;
   gTelemetry.systemStatus = SYS_INITIALIZING;
-  drawSplashScreen();
+  if (tft.displayReady() && !tft.displayFaulted()) drawSplashScreen();
   splashStartMs = HAL_GetTick();
   publishPage();
 }
@@ -883,23 +1172,28 @@ static bool updateProgressBar() {
   if (now - lastFrameMs < FRAME_MS) return true;
   lastFrameMs = now;
   const uint32_t elapsed = now - splashStartMs;
+  const bool canDraw = tft.displayReady() && !tft.displayFaulted();
   if (elapsed < PROGRESS_MS) {
     const uint8_t target = static_cast<uint8_t>((elapsed * 100UL) / PROGRESS_MS);
     if (target != splashProgress) {
       splashProgress = target;
-      const int innerW = PB_W - 4;
-      const int fillW = static_cast<int>((splashProgress * innerW) / 100);
-      tft.fillRoundRect(PB_X + 2, PB_Y + 2, innerW, PB_H - 4, PB_R - 2, C_BG);
-      if (fillW > 0) tft.fillRoundRect(PB_X + 2, PB_Y + 2, fillW, PB_H - 4, PB_R - 2, C_ACCENT);
+      if (canDraw) {
+        const int innerW = PB_W - 4;
+        const int fillW = static_cast<int>((splashProgress * innerW) / 100);
+        tft.fillRoundRect(PB_X + 2, PB_Y + 2, innerW, PB_H - 4, PB_R - 2, C_BG);
+        if (fillW > 0) tft.fillRoundRect(PB_X + 2, PB_Y + 2, fillW, PB_H - 4, PB_R - 2, C_ACCENT);
+      }
     }
     return true;
   }
   if (!splashReadyText) {
     splashReadyText = true;
     splashReadyMs = now;
-    tft.fillRoundRect(PB_X + 2, PB_Y + 2, PB_W - 4, PB_H - 4, PB_R - 2, C_READY);
-    tft.fillRect(70, 186, 180, 18, C_BG);
-    drawUiText("HMI ready", W / 2, 187, C_READY, C_BG, MC_DATUM);
+    if (canDraw) {
+      tft.fillRoundRect(PB_X + 2, PB_Y + 2, PB_W - 4, PB_H - 4, PB_R - 2, C_READY);
+      tft.fillRect(70, 186, 180, 18, C_BG);
+      drawUiText("HMI ready", W / 2, 187, C_READY, C_BG, MC_DATUM);
+    }
   }
   if (now - splashReadyMs >= READY_HOLD) {
     splashComplete = true;
@@ -931,10 +1225,13 @@ int main() {
   Board_SetRealtimeServiceCallback([]() {
     gNeo3.pollSafetyIo();
     gVesc.setSafetyStop(gNeo3.safetyPressed());
+    // During blocking TFT transfers, parse a bounded slice of the USB stream
+    // instead of only filling the CDC ring. This prevents 50-Hz runtime batches
+    // from accumulating for hundreds of milliseconds and bursting into USART1.
+    pollSerialGui(512U);
     gVesc.poll();
-    gUsb.poll();
   });
-  initDisplay();
+  (void)initDisplay();
   restartSplash();
   if (!usbInitOk) gTelemetry.systemStatus = SYS_FAULT;
   startAppWatchdog();
@@ -958,13 +1255,21 @@ int main() {
     gVesc.poll();
 
     if (gVesc.maintenanceMode()) {
+      // Behavioral backport from the proven Arduino gateway: while a Python or
+      // VESC Tool maintenance session owns the motor link, defer GNSS/MAG/TFT
+      // best-effort work. Safety, USB parsing, VESC UART and watchdog heartbeat
+      // keep running at maximum service density; sensor IRQ/rings remain intact
+      // and are consumed again after maintenance exits.
       for (uint8_t i = 0U; i < 4U; ++i) {
+        Board_Service();
         pollSerialGui();
         gNeo3.pollSafetyIo();
         gVesc.setSafetyStop(gNeo3.safetyPressed());
         gVesc.poll();
       }
       gUsb.poll();
+      gMainLoopHeartbeatMs = HAL_GetTick();
+      continue;
     }
 
     gNeo3.poll();
@@ -974,7 +1279,21 @@ int main() {
     pollSerialGui();
     checkRosLinkTimeout();
     checkConfigTimeout();
-    if (driveTestRunning && static_cast<int32_t>(driveTestDeadlineMs - HAL_GetTick()) <= 0) stopDriveTest();
+    const uint32_t serviceNow = HAL_GetTick();
+    updateDomainFreshness(serviceNow);
+    if (static_cast<uint32_t>(serviceNow - lastDiagnosticsMs) >= 100U) {
+      lastDiagnosticsMs = serviceNow;
+      sampleDiagnostics(serviceNow);
+    }
+    serviceDisplayRecovery(serviceNow);
+    if ((gUi.menu == UiMenuId::SYSTEM_OVERVIEW || gUi.menu == UiMenuId::SYSTEM_PINS_IO ||
+         gUi.menu == UiMenuId::SYSTEM_PINS_DISPLAY || gUi.menu == UiMenuId::SYSTEM_LINKS ||
+         gUi.menu == UiMenuId::SYSTEM_ERRORS) &&
+        static_cast<uint32_t>(serviceNow - lastSystemUiMarkMs) >= 500U) {
+      lastSystemUiMarkMs = serviceNow;
+      markUiDirty();
+    }
+    if (driveTestRunning && static_cast<int32_t>(driveTestDeadlineMs - serviceNow) <= 0) stopDriveTest();
 
     if (!splashComplete) {
       (void)updateProgressBar();
@@ -984,7 +1303,7 @@ int main() {
         lastTouchPollMs = now;
         handleTouch();
       }
-      if (uiDirty && !touchWasDown && static_cast<uint32_t>(now - lastUiRefreshMs) >= DISPLAY_REFRESH_MS) {
+      if (uiDirtyMask != UI_DIRTY_NONE && !touchWasDown && static_cast<uint32_t>(now - lastUiRefreshMs) >= DISPLAY_REFRESH_MS) {
         drawUiNow(false);
       }
     }
