@@ -12,6 +12,9 @@ struct HmiDiagnostics {
   uint32_t overlongCommands{0};
   uint32_t deferredCommandDrops{0};
   uint32_t deferredCommandPeak{0};
+  uint32_t extendedTelemetryAccepted{0};
+  uint32_t extendedTelemetryMalformed{0};
+  uint32_t extendedTelemetryOutOfOrder{0};
   uint32_t uiFrames{0};
   uint32_t fullUiFrames{0};
   uint32_t dirtyUiFrames{0};

@@ -4,8 +4,79 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include "Config.h"
+
+struct TelemetryGroupStamp {
+  uint32_t lastRxMs{0U};
+  uint32_t sourceAgeMs{0xFFFFFFFFUL};
+  uint32_t seq{0U};
+  bool valid{false};
+  bool fresh{false};
+};
+
+struct EscExtendedTelemetry {
+  TelemetryGroupStamp power{};
+  TelemetryGroupStamp motors{};
+  TelemetryGroupStamp encoder{};
+  TelemetryGroupStamp link{};
+  TelemetryGroupStamp performance{};
+  float vbusV{0.0F}, motorCurrentA{0.0F}, inputCurrentA{0.0F};
+  float iqA{0.0F}, idA{0.0F}, duty{0.0F}, mosTempC{0.0F}, motorTempC{0.0F};
+  uint8_t faultCode{0U};
+  float leftVbusV{0.0F}, leftCurrentA{0.0F}, leftDuty{0.0F}, leftRpm{0.0F};
+  float rightVbusV{0.0F}, rightCurrentA{0.0F}, rightDuty{0.0F}, rightRpm{0.0F};
+  uint8_t leftFault{0U}, rightFault{0U};
+  int32_t encoderRaw{0}, encoderSpan{0}, encoderTarget{0};
+  bool calibrated{false}, homed{false}, encoderSynced{false}, encoderInverted{false};
+  float encoderPositionDeg{0.0F};
+  uint32_t uartBaud{0U};
+  char owner[12]{"UNKNOWN"};
+  uint32_t commandAgeMs{0xFFFFFFFFUL}, feedbackAgeMs{0xFFFFFFFFUL};
+};
+
+struct PerceptionExtendedTelemetry {
+  TelemetryGroupStamp camera{};
+  TelemetryGroupStamp detection{};
+  TelemetryGroupStamp lane{};
+  TelemetryGroupStamp drivable{};
+  TelemetryGroupStamp obstacle{};
+  TelemetryGroupStamp performance{};
+  float inferenceLatencyMs{0.0F};
+  uint32_t droppedFrames{0U}, recoveryCount{0U};
+  char backend[12]{"UNKNOWN"};
+  uint16_t objectCount{0U}, trackCount{0U}, missedTracks{0U};
+  int32_t nearestTrackId{-1};
+  float nearestLateralM{0.0F};
+  bool laneValid{false};
+  float laneCenterOffsetM{0.0F}, laneConfidencePct{0.0F}, roadWidthM{0.0F};
+  float laneLeftClearanceM{0.0F}, laneRightClearanceM{0.0F}, laneHeadingErrorDeg{0.0F};
+  bool drivableValid{false};
+  float drivableFractionPct{0.0F}, drivableLeftM{0.0F}, drivableRightM{0.0F}, farLookaheadM{0.0F};
+  uint16_t obstacleCount{0U};
+  bool obstacleValid{false}, obstacleBlocked{false};
+  float obstacleDistanceM{0.0F}, obstacleLateralM{0.0F};
+  uint32_t rawDetectionCount{0U}, confirmedObstacleCount{0U};
+};
+
+struct NavigationExtendedTelemetry {
+  TelemetryGroupStamp pose{};
+  TelemetryGroupStamp odom{};
+  TelemetryGroupStamp imuMag{};
+  TelemetryGroupStamp nav2{};
+  TelemetryGroupStamp costmap{};
+  TelemetryGroupStamp control{};
+  float mapX{0.0F}, mapY{0.0F}, mapYawDeg{0.0F};
+  float covarianceX{0.0F}, covarianceY{0.0F}, yawVariance{0.0F};
+  float odomX{0.0F}, odomY{0.0F}, odomYawDeg{0.0F}, odomLinearMps{0.0F}, odomYawRateRps{0.0F};
+  float imuYawDeg{0.0F}, fusedHeadingDeg{0.0F}, headingDisagreementDeg{0.0F};
+  bool pathValid{false}, nav2StackReady{false}, costmapReady{false}, costmapBlocked{false};
+  uint32_t cmdAgeMs{0xFFFFFFFFUL};
+  float commandLinearMps{0.0F}, commandAngularRps{0.0F};
+  uint16_t obstaclePointCount{0U}, pathRelevantCount{0U};
+  char plannerState[12]{"UNKNOWN"}, controllerState[12]{"UNKNOWN"}, smootherState[12]{"UNKNOWN"};
+};
 
 struct VehicleTelemetry {
   SystemStatus systemStatus{SYS_INITIALIZING};
@@ -21,11 +92,17 @@ struct VehicleTelemetry {
   uint32_t perceptionAgeMs{0xFFFFFFFFUL};
   uint32_t navigationAgeMs{0xFFFFFFFFUL};
 
+  EscExtendedTelemetry escx{};
+  PerceptionExtendedTelemetry perx{};
+  NavigationExtendedTelemetry navx{};
+
   float speedKmh{0.0F};
   float driveTargetMps{0.0F};
   float driveActualMps{0.0F};
   float motorErpm{0.0F};
   float motorRpm{0.0F};
+  float vbusV{0.0F};
+  bool vbusValid{false};
   float steeringTargetDeg{0.0F};
   float steeringActualDeg{0.0F};
   float steeringErrorDeg{0.0F};
@@ -82,6 +159,52 @@ struct VehicleTelemetry {
   char configKey[20]{"NONE"};
   char configMessage[32]{"READY"};
 };
+
+inline void updateTelemetryGroupFreshness(TelemetryGroupStamp &g, uint32_t now,
+                                           uint32_t timeoutMs) {
+  if (!g.valid || g.lastRxMs == 0U || g.sourceAgeMs == 0xFFFFFFFFUL) {
+    g.fresh = false;
+    return;
+  }
+  const uint32_t localAge = static_cast<uint32_t>(now - g.lastRxMs);
+  g.fresh = localAge <= timeoutMs && g.sourceAgeMs <= timeoutMs;
+}
+
+inline void updateExtendedFreshness(VehicleTelemetry &t, uint32_t now) {
+  updateTelemetryGroupFreshness(t.escx.power, now, 1500U);
+  updateTelemetryGroupFreshness(t.escx.motors, now, 1500U);
+  updateTelemetryGroupFreshness(t.escx.encoder, now, 2000U);
+  updateTelemetryGroupFreshness(t.escx.link, now, 2500U);
+  updateTelemetryGroupFreshness(t.escx.performance, now, 2500U);
+  updateTelemetryGroupFreshness(t.perx.camera, now, 2000U);
+  updateTelemetryGroupFreshness(t.perx.detection, now, 1500U);
+  updateTelemetryGroupFreshness(t.perx.lane, now, 1500U);
+  updateTelemetryGroupFreshness(t.perx.drivable, now, 1500U);
+  updateTelemetryGroupFreshness(t.perx.obstacle, now, 1500U);
+  updateTelemetryGroupFreshness(t.perx.performance, now, 2500U);
+  updateTelemetryGroupFreshness(t.navx.pose, now, 2500U);
+  updateTelemetryGroupFreshness(t.navx.odom, now, 1500U);
+  updateTelemetryGroupFreshness(t.navx.imuMag, now, 1500U);
+  updateTelemetryGroupFreshness(t.navx.nav2, now, 2500U);
+  updateTelemetryGroupFreshness(t.navx.costmap, now, 2500U);
+  updateTelemetryGroupFreshness(t.navx.control, now, 1500U);
+  t.vbusValid = t.escx.power.valid && t.escx.power.fresh;
+  if (t.vbusValid) t.vbusV = t.escx.vbusV;
+}
+
+inline uint32_t extendedFreshMask(const VehicleTelemetry &t) {
+  uint32_t mask = 0U;
+  const bool flags[] = {
+      t.escx.power.fresh, t.escx.motors.fresh, t.escx.encoder.fresh,
+      t.escx.link.fresh, t.escx.performance.fresh,
+      t.perx.camera.fresh, t.perx.detection.fresh, t.perx.lane.fresh,
+      t.perx.drivable.fresh, t.perx.obstacle.fresh, t.perx.performance.fresh,
+      t.navx.pose.fresh, t.navx.odom.fresh, t.navx.imuMag.fresh,
+      t.navx.nav2.fresh, t.navx.costmap.fresh, t.navx.control.fresh};
+  for (uint8_t i = 0U; i < sizeof(flags) / sizeof(flags[0]); ++i)
+    if (flags[i]) mask |= (1UL << i);
+  return mask;
+}
 
 inline VehicleTelemetry defaultTelemetry() {
   VehicleTelemetry t{};

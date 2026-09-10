@@ -60,7 +60,7 @@ for body in re.findall(r'extern\s+"C"\s+void\s+\w+_IRQHandler\([^)]*\)\s*\{([^}]
     need("HAL_SPI_" not in body and "draw" not in body, "ISR does not render or own SPI")
 
 need("UiDirtyBits" in ui and "uiDirtyMask" in main, "dirty-mask refresh remains active")
-need("UiMetricCacheEntry" in ui and "gUiOverviewCache" in ui, "per-field/overview value caches exist")
+need("UiMetricCacheEntry" in ui and "gUiHomeCache" in ui and "gUiMenuCardCache" in ui, "per-field/home/card value caches exist")
 need("gUiDynamicPass" in ui, "dynamic paint pass is separated from static paint")
 need("clearFullFrameBackground" in ui and "fillScreen(C_BG)" not in ui, "full page avoids unconditional framebuffer clear")
 need("VehicleTelemetry telemetrySnapshot = gTelemetry" in main and "UiState uiSnapshot = gUi" in main,

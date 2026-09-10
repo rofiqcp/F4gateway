@@ -10,56 +10,80 @@ static constexpr int H = 240;
 
 enum class UiMenuId : uint8_t {
   SPLASH = 0,
-  OVERVIEW,
+  OVERVIEW,  // compatibility alias; runtime redirects to HOME
+  HOME,
+  MAIN_MENU,
+
   ESC_ROOT,
   ESC_OVERVIEW,
   ESC_MODE,
   ESC_STEERING,
-  ESC_STEERING_LIVE,
-  ESC_STEERING_TEST_ANGLE,
-  ESC_STEERING_CAL,
   ESC_DRIVE,
-  ESC_DRIVE_LIVE,
-  ESC_MANUAL_SPEED,
-  ESC_DRIVE_SCALE,
   ESC_POWER,
+  ESC_MOTOR_TELEMETRY,
+  ESC_ENCODER,
+  ESC_CALIBRATION,
   ESC_LINK,
+  ESC_FAULT_SAFETY,
+  ESC_PERFORMANCE,
   ESC_MANUAL_TEST,
+
   PERCEPTION_ROOT,
   PERCEPTION_OVERVIEW,
   PERCEPTION_CAMERA,
   PERCEPTION_DETECTION,
-  PERCEPTION_DETECTION_LIVE,
-  PERCEPTION_INFERENCE,
   PERCEPTION_LANE,
+  PERCEPTION_DRIVABLE_AREA,
   PERCEPTION_OBSTACLE,
   PERCEPTION_PERFORMANCE,
+  PERCEPTION_CALIBRATION,
   PERCEPTION_TEST,
+
+  NAVIGATION_ROOT,
+  NAVIGATION_OVERVIEW,
+  NAV_LOCALIZATION,
+  NAV_GNSS,
+  NAV_IMU_MAG,
+  NAV_EKF,
+  NAV_ODOMETRY,
+  NAV_MISSION,
+  NAV_NAV2,
+  NAV_SAFETY,
+  NAV_COSTMAP,
+  NAV_PATH_CONTROL,
+  NAV_TEST,
+
   SYSTEM_ROOT,
   SYSTEM_OVERVIEW,
   SYSTEM_PINS_IO,
   SYSTEM_PINS_DISPLAY,
   SYSTEM_LINKS,
   SYSTEM_ERRORS,
-  NAVIGATION_ROOT,
-  NAVIGATION_OVERVIEW,
-  NAV_LOCALIZATION,
-  NAV_GNSS,
+  SYSTEM_SPI_BUS,
+  SYSTEM_UART_STATUS,
+  SYSTEM_POWER_STATUS,
+  SYSTEM_TOUCH_PANEL,
+  SYSTEM_TFT_TEST,
+
+  // Compatibility IDs retained only for external page/config routing.
+  ESC_STEERING_LIVE,
+  ESC_STEERING_TEST_ANGLE,
+  ESC_STEERING_CAL,
+  ESC_DRIVE_LIVE,
+  ESC_MANUAL_SPEED,
+  ESC_DRIVE_SCALE,
+  PERCEPTION_DETECTION_LIVE,
+  PERCEPTION_INFERENCE,
   NAV_IMU,
   NAV_MAG,
   NAV_EKF_LOCAL,
   NAV_EKF_GLOBAL,
-  NAV_MISSION,
   NAV_MISSION_GO,
   NAV_MISSION_SAVE,
   NAV_MISSION_STOP,
-  NAV_NAV2,
   NAV_PLANNER,
   NAV_MPPI,
-  NAV_SMOOTHER,
-  NAV_COSTMAP,
-  NAV_SAFETY,
-  NAV_TEST
+  NAV_SMOOTHER
 };
 
 enum SystemStatus : uint8_t {
@@ -85,7 +109,7 @@ enum NavigationStatus : uint8_t {
 };
 
 enum class SoftKey : uint8_t {
-  NONE = 0, TOP_LEFT, LEFT, RIGHT, OK, CARD_0, CARD_1, CARD_2,
+  NONE = 0, TOP_LEFT, MENU, LEFT, RIGHT, OK, CARD_0, CARD_1, CARD_2,
   TEST_LEFT, TEST_FORWARD, TEST_STOP, TEST_RIGHT, TEST_REVERSE
 };
 enum class UiEditKey : uint8_t {
@@ -140,6 +164,7 @@ static constexpr int OVERVIEW_CARD_H = 94;
 static constexpr int SUBMENU_CARD_Y = 42;
 static constexpr int SUBMENU_CARD_H = 132;
 static constexpr uint8_t SUBMENU_VISIBLE_CARDS = 3;
+static constexpr uint8_t DOMAIN_PAGE_SIZE = 3;
 
 // Footer carousel: tombol kiri/kanan besar dan indikator posisi di tengah.
 static constexpr int CAROUSEL_NAV_Y = 188;
@@ -155,6 +180,15 @@ static constexpr int HOME_TOUCH_X = 0;
 static constexpr int HOME_TOUCH_Y = 0;
 static constexpr int HOME_TOUCH_W = 52;
 static constexpr int HOME_TOUCH_H = 44;
+
+// HOME: three operator summaries + one large MENU touch target.
+static constexpr int HOME_TILE_Y = 42;
+static constexpr int HOME_TILE_H = 84;
+static constexpr int HOME_HEALTH_Y = 140;
+static constexpr int HOME_MENU_X = 4;
+static constexpr int HOME_MENU_Y = 188;
+static constexpr int HOME_MENU_W = W - 8;
+static constexpr int HOME_MENU_H = 48;
 
 // Parameter operator yang benar-benar aman diedit dari HMI.
 static constexpr int MANUAL_SPEED_DEFAULT = 20;
@@ -174,6 +208,7 @@ static constexpr uint16_t TOUCH_THRESHOLD = 300;
 static constexpr uint32_t TOUCH_POLL_MS = 20;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 35;
 static constexpr uint32_t TOUCH_HOLD_ACTION_MS = 650;
+static constexpr uint32_t SERVICE_HOLD_MS = 800;
 static constexpr uint32_t TOUCH_REPEAT_DELAY_MS = 450;
 static constexpr uint32_t TOUCH_REPEAT_MS = 120;
 static constexpr uint32_t DISPLAY_REFRESH_MS = 100;

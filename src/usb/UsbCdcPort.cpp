@@ -23,34 +23,127 @@ uint16_t RingFree(uint16_t head, uint16_t tail, uint16_t size) {
 }
 } // namespace
 
-bool UsbCdcPort::begin() {
-  rx_head_ = rx_tail_ = tx_head_ = tx_tail_ = 0U;
-  tx_high_head_ = tx_high_tail_ = 0U;
+void UsbCdcPort::resetSessionState(bool drop_queues, bool count_abort) {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (count_abort && tx_busy_)
+    ++tx_abort_on_session_reset_;
   tx_busy_ = false;
   tx_active_high_ = false;
   tx_message_active_ = false;
   tx_message_high_ = false;
   tx_packet_ends_message_ = false;
   tx_pending_ = 0U;
-  rx_dropped_ = tx_dropped_ = 0U;
+  tx_started_ms_ = 0U;
+  tx_stall_reported_ = false;
+#ifdef HMI_TEST_HOOKS
+  test_suppress_tx_until_ms_ = 0U;
+#endif
+  if (drop_queues) {
+    rx_head_ = rx_tail_ = 0U;
+    tx_head_ = tx_tail_ = 0U;
+    tx_high_head_ = tx_high_tail_ = 0U;
+  }
+  if (primask == 0U)
+    __enable_irq();
+}
+
+bool UsbCdcPort::startUsbStack() {
   if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK)
     return false;
   if (USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS) != USBD_OK)
     return false;
-  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) !=
-      USBD_OK)
+  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK)
     return false;
   return USBD_Start(&hUsbDeviceFS) == USBD_OK;
+}
+
+bool UsbCdcPort::begin() {
+  resetSessionState(true, false);
+  rx_dropped_ = tx_dropped_ = 0U;
+  tx_complete_ms_ = HAL_GetTick();
+  usb_session_generation_ = 0U;
+  usb_class_init_count_ = 0U;
+  usb_class_deinit_count_ = 0U;
+  tx_abort_on_session_reset_ = 0U;
+  tx_complete_count_ = 0U;
+  tx_stall_recovery_count_ = 0U;
+  usb_soft_restart_count_ = 0U;
+  last_rx_ms_ = 0U;
+  rx_packet_count_ = 0U;
+  tx_progress_stall_count_ = 0U;
+  last_recovery_reason_ = 0U;
+  last_repair_age_ms_ = 0U;
+  last_repair_pending_ = 0U;
+  last_repair_ep_length_ = 0U;
+  last_repair_flags_ = 0U;
+  tx_stall_reported_ = false;
+  recovery_pending_ = false;
+  return startUsbStack();
 }
 
 void UsbCdcPort::end() {
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
-  tx_busy_ = false;
-  tx_active_high_ = false;
-  tx_message_active_ = false;
-  tx_message_high_ = false;
-  tx_packet_ends_message_ = false;
+  resetSessionState(true, true);
+}
+
+void UsbCdcPort::onUsbClassInit() {
+  ++usb_class_init_count_;
+  ++usb_session_generation_;
+  resetSessionState(true, true);
+  tx_complete_ms_ = HAL_GetTick();
+}
+
+void UsbCdcPort::onUsbClassDeInit() {
+  ++usb_class_deinit_count_;
+  resetSessionState(true, true);
+}
+
+void UsbCdcPort::requestRecovery() {
+  last_recovery_reason_ = 1U;
+  recovery_pending_ = true;
+}
+
+uint32_t UsbCdcPort::txBusyAgeMs() const {
+  return tx_busy_ && tx_started_ms_ != 0U
+             ? static_cast<uint32_t>(HAL_GetTick() - tx_started_ms_)
+             : 0U;
+}
+
+uint32_t UsbCdcPort::lastTxCompleteAgeMs() const {
+  return tx_complete_ms_ != 0U
+             ? static_cast<uint32_t>(HAL_GetTick() - tx_complete_ms_)
+             : 0xFFFFFFFFUL;
+}
+
+uint32_t UsbCdcPort::lastRxAgeMs() const {
+  return last_rx_ms_ != 0U ? static_cast<uint32_t>(HAL_GetTick() - last_rx_ms_)
+                           : 0xFFFFFFFFUL;
+}
+
+uint16_t UsbCdcPort::rxQueueDepth() const {
+  return RingUsed(rx_head_, rx_tail_, kRxSize);
+}
+uint16_t UsbCdcPort::txLowQueueDepth() const {
+  return RingUsed(tx_head_, tx_tail_, kTxSize);
+}
+uint16_t UsbCdcPort::txHighQueueDepth() const {
+  return RingUsed(tx_high_head_, tx_high_tail_, kHighTxSize);
+}
+
+uint32_t UsbCdcPort::cdcTxState() const {
+  auto *hcdc = static_cast<USBD_CDC_HandleTypeDef *>(hUsbDeviceFS.pClassData);
+  return hcdc != nullptr ? hcdc->TxState : 0xFFFFFFFFUL;
+}
+
+bool UsbCdcPort::softRestartUsb() {
+  ++usb_soft_restart_count_;
+  (void)USBD_Stop(&hUsbDeviceFS);
+  (void)USBD_DeInit(&hUsbDeviceFS);
+  resetSessionState(true, true);
+  HAL_Delay(10U);
+  return startUsbStack();
 }
 
 bool UsbCdcPort::connected() const {
@@ -194,7 +287,59 @@ bool UsbCdcPort::writeLineCritical(const char *line, uint32_t timeout_ms) {
   return false;
 }
 
+#ifdef HMI_TEST_HOOKS
+void UsbCdcPort::testSuppressTx(uint32_t duration_ms) {
+  test_suppress_tx_until_ms_ = HAL_GetTick() + duration_ms;
+}
+#endif
+
+void UsbCdcPort::service() {
+  const bool explicit_recovery = recovery_pending_;
+  recovery_pending_ = false;
+
+  // TX-complete runs in USB IRQ context. Revalidate wrapper + ST class state
+  // atomically; otherwise the ISR can complete between the first tx_busy read
+  // and the TxState check, producing a false split-brain recovery.
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (connected() && tx_busy_ && tx_started_ms_ != 0U) {
+    const uint32_t age = static_cast<uint32_t>(HAL_GetTick() - tx_started_ms_);
+    if (age >= kTxStallRepairMs) {
+      if (!tx_stall_reported_) {
+        tx_stall_reported_ = true;
+        ++tx_progress_stall_count_;
+      }
+      auto *hcdc = static_cast<USBD_CDC_HandleTypeDef *>(hUsbDeviceFS.pClassData);
+      // Only repair an impossible split-brain state: wrapper busy while the ST
+      // CDC class is already idle. TxState==1 is legitimate host backpressure.
+      if (hcdc != nullptr && hcdc->TxState == 0U && tx_busy_) {
+        ++tx_stall_recovery_count_;
+        last_recovery_reason_ = 2U;
+        last_repair_age_ms_ = age;
+        last_repair_pending_ = tx_pending_;
+        last_repair_ep_length_ = hUsbDeviceFS.ep_in[CDC_IN_EP & 0x0FU].total_length;
+        last_repair_flags_ = static_cast<uint8_t>((tx_active_high_ ? 1U : 0U) |
+                                                  (tx_packet_ends_message_ ? 2U : 0U));
+        resetSessionState(true, true);
+      }
+    }
+  }
+  if (primask == 0U)
+    __enable_irq();
+
+  if (explicit_recovery)
+    (void)softRestartUsb();
+  poll();
+}
+
 void UsbCdcPort::poll() {
+#ifdef HMI_TEST_HOOKS
+  if (test_suppress_tx_until_ms_ != 0U) {
+    if (static_cast<int32_t>(test_suppress_tx_until_ms_ - HAL_GetTick()) > 0)
+      return;
+    test_suppress_tx_until_ms_ = 0U;
+  }
+#endif
   if (!connected() || tx_busy_)
     return;
   const bool high_ready = tx_high_head_ != tx_high_tail_;
@@ -245,9 +390,11 @@ void UsbCdcPort::poll() {
   tx_active_high_ = use_high;
   tx_packet_ends_message_ = ends_message;
   tx_busy_ = true;
+  tx_started_ms_ = HAL_GetTick();
   if (USBD_CDC_TransmitPacket(&hUsbDeviceFS) != USBD_OK) {
     tx_busy_ = false;
     tx_pending_ = 0U;
+    tx_started_ms_ = 0U;
     tx_active_high_ = false;
     tx_packet_ends_message_ = false;
   }
@@ -264,6 +411,8 @@ void UsbCdcPort::flush(uint32_t timeout_ms) {
 void UsbCdcPort::onReceive(const uint8_t *data, uint32_t length) {
   if (data == nullptr)
     return;
+  last_rx_ms_ = HAL_GetTick();
+  ++rx_packet_count_;
   for (uint32_t i = 0; i < length; ++i) {
     const uint16_t next = static_cast<uint16_t>((rx_head_ + 1U) % kRxSize);
     if (next == rx_tail_) {
@@ -287,6 +436,10 @@ void UsbCdcPort::onTransmitComplete() {
   const bool message_done = tx_packet_ends_message_;
   tx_pending_ = 0U;
   tx_busy_ = false;
+  tx_started_ms_ = 0U;
+  tx_stall_reported_ = false;
+  tx_complete_ms_ = HAL_GetTick();
+  ++tx_complete_count_;
   tx_active_high_ = false;
   tx_packet_ends_message_ = false;
   if (message_done)

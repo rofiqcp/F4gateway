@@ -21,12 +21,16 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS = {
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
 static int8_t CDC_Init_FS(void) {
+  gUsb.onUsbClassInit();
   (void)USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0U);
   (void)USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
   return (int8_t)USBD_OK;
 }
 
-static int8_t CDC_DeInit_FS(void) { return (int8_t)USBD_OK; }
+static int8_t CDC_DeInit_FS(void) {
+  gUsb.onUsbClassDeInit();
+  return (int8_t)USBD_OK;
+}
 
 static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length) {
   // CDC ACM line coding is informational for USB CDC (the transport itself is

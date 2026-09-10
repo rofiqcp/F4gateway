@@ -1,6 +1,6 @@
 // ============================================================================
 // ADV HMI Firmware — STM32F411CEU6 + ILI9341 320x240 + XPT2046
-// Native STM32Cube production: OVERVIEW -> ESC / PERCEPTION / NAVIGATION.
+// Native STM32Cube production: HOME -> MAIN MENU -> ESC / PERCEPTION / NAVIGATION.
 // ============================================================================
 
 #include "BoardSupport.h"
@@ -20,6 +20,7 @@
 #include "Neo3Sensors.h"
 #include "SplashScreen.h"
 #include "Telemetry.h"
+#include "TelemetryProtocol.h"
 #include "Theme.h"
 #include "TouchButtons.h"
 #include "UiMenu.h"
@@ -39,6 +40,7 @@ HmiDiagnostics gDiagnostics{};
 
 static volatile uint32_t gMainLoopHeartbeatMs = 0U;
 static volatile bool gAppWatchdogArmed = false;
+static uint32_t gResetCauseFlags = 0U;
 static constexpr uint32_t APP_WATCHDOG_TIMEOUT_MS = 3500U;
 
 static bool splashComplete = false;
@@ -72,6 +74,7 @@ static bool seenNavigationDomain = false;
 static uint8_t rosHeartbeatStableCount = 0;
 static bool rosHeartbeatStable = false;
 static bool driveTestRunning = false;
+static bool steeringTestRunning = false;
 static uint32_t driveTestDeadlineMs = 0U;
 static volatile uint32_t gTftControllerId = 0U;
 static volatile uint8_t gTftPowerMode = 0U;
@@ -215,6 +218,7 @@ static void stopDriveTest() {
 
 static void stopSteeringTest() {
   printBoth("CMD:STEER:STOP");
+  steeringTestRunning = false;
   snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
            "%s", "IDLE");
   markUiDirty();
@@ -225,6 +229,8 @@ static void stopAllManualTest() {
   stopSteeringTest();
 }
 
+static bool motionSafeForHeavyMaintenance();
+static bool runTftSelfTest();
 static float actualEditValue(UiEditKey key);
 static bool gUiDrawActive = false;
 static uint32_t gUiDrawLastMs = 0U;
@@ -277,16 +283,56 @@ static void drawUiNow(bool full = true) {
   lastUiRefreshMs = HAL_GetTick();
 }
 
+static bool manualMotionGateValid(bool steering) {
+  if (!gTelemetry.rosConnected || !gTelemetry.escFresh ||
+      gTelemetry.mode != MODE_MANUAL || !gTelemetry.escReady || gTelemetry.eStop)
+    return false;
+  if (steering)
+    return gTelemetry.encoderReady && gTelemetry.state == STATE_STOPPED;
+  return gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_RUNNING;
+}
+
+static void enforceManualMotionGate() {
+  if (driveTestRunning && !manualMotionGateValid(false))
+    stopDriveTest();
+  if (steeringTestRunning && !manualMotionGateValid(true))
+    stopSteeringTest();
+}
+
+static bool serviceEntryAllowed() {
+  const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
+                         gTelemetry.navigationStatus == NAV_NAVIGATING;
+  const bool stationary =
+      (gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY) &&
+      std::fabs(gTelemetry.speedKmh) <= 0.2F &&
+      std::fabs(gTelemetry.driveActualMps) <= 0.02F;
+  return stationary && !navActive && !driveTestRunning && !steeringTestRunning;
+}
+
 static void setMenu(UiMenuId next) {
   if (next == UiMenuId::SPLASH)
     return;
+  if (next == UiMenuId::OVERVIEW)
+    next = UiMenuId::HOME;
+
   lastUiInteractionMs = HAL_GetTick();
-  if (gUi.menu == UiMenuId::ESC_MANUAL_TEST &&
-      next != UiMenuId::ESC_MANUAL_TEST)
+  const UiMenuId previous = gUi.menu;
+  if ((driveTestRunning || steeringTestRunning || previous == UiMenuId::ESC_MANUAL_TEST) &&
+      next != previous)
     stopAllManualTest();
+
+  const UiDomain previousDomain = menuDomain(previous);
+  const UiDomain nextDomain = menuDomain(next);
+  const bool keepDomainPage =
+      previousDomain != UiDomain::NONE && previousDomain == nextDomain;
+  if (!keepDomainPage)
+    gUi.pageIndex = 0U;
+  gUi.detailViewIndex = 0U;
   invalidateTouchGeneration();
   gUi.menu = next;
-  gUi.selectedChild = 0;
+  if (next != UiMenuId::SYSTEM_ROOT && menuDomain(next) != UiDomain::SYSTEM)
+    gUi.serviceSession = false;
+
   const UiEditKey editKey = menuEditKey(next);
   gUi.editing = editKey != UiEditKey::NONE;
   if (gUi.editing)
@@ -295,10 +341,22 @@ static void setMenu(UiMenuId next) {
   publishPage();
 }
 
-static void goOverview() {
-  if (gUi.menu == UiMenuId::ESC_MANUAL_TEST)
-    stopAllManualTest();
-  setMenu(UiMenuId::OVERVIEW);
+static void goHome() { setMenu(UiMenuId::HOME); }
+static void goMainMenu() { setMenu(UiMenuId::MAIN_MENU); }
+
+static void enterServiceMode() {
+  if (!serviceEntryAllowed()) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
+             "SERVICE REQUIRES STOP");
+    markUiDirty(UI_DIRTY_CONTENT);
+    drawUiNow(false);
+    return;
+  }
+  gUi.serviceSession = true;
+  setMenu(UiMenuId::SYSTEM_ROOT);
+  gUi.serviceSession = true;
+  suppressTouchUntilRelease();
 }
 
 static float actualEditValue(UiEditKey key) {
@@ -419,47 +477,47 @@ static void applyEditor() {
 }
 
 static void selectRelative(int direction) {
-  if (direction == 0 || !menuHasChildren(gUi.menu))
+  if (direction == 0)
     return;
-  uint8_t count = 0;
-  const UiMenuId *children = menuChildren(gUi.menu, count);
-  if (children == nullptr || count == 0U)
+  if (menuHasChildren(gUi.menu) && gUi.menu != UiMenuId::MAIN_MENU) {
+    uint8_t count = 0U;
+    (void)menuChildren(gUi.menu, count);
+    const uint8_t pages = menuPageCount(count);
+    if (pages <= 1U)
+      return;
+    int next = static_cast<int>(gUi.pageIndex) + direction;
+    if (next < 0) next = pages - 1;
+    if (next >= pages) next = 0;
+    invalidateTouchGeneration();
+    gUi.pageIndex = static_cast<uint8_t>(next);
+    drawUiNow(true);
     return;
-  int next = static_cast<int>(gUi.selectedChild) + direction;
-  if (next < 0)
-    next = count - 1;
-  if (next >= count)
-    next = 0;
-  gUi.selectedChild = static_cast<uint8_t>(next);
+  }
+  const uint8_t views = menuViewCount(gUi.menu);
+  if (views <= 1U)
+    return;
+  int next = static_cast<int>(gUi.detailViewIndex) + direction;
+  if (next < 0) next = views - 1;
+  if (next >= views) next = 0;
+  invalidateTouchGeneration();
+  gUi.detailViewIndex = static_cast<uint8_t>(next);
   drawUiNow(true);
 }
 
 static void chooseVisibleCard(uint8_t slot) {
-  if (slot >= SUBMENU_VISIBLE_CARDS)
+  if (slot >= DOMAIN_PAGE_SIZE)
     return;
-  if (gUi.menu == UiMenuId::OVERVIEW) {
-    uint8_t count = 0;
-    const UiMenuId *children = menuChildren(UiMenuId::OVERVIEW, count);
-    if (children == nullptr || count == 0U)
-      return;
-    const uint8_t index =
-        static_cast<uint8_t>(menuWindowFirst(gUi.selectedChild, count) + slot);
-    if (index < count) {
-      gUi.selectedChild = index;
-      setMenu(children[index]);
-    }
+  if (gUi.menu == UiMenuId::MAIN_MENU) {
+    const UiMenuId id = menuCardAt(UiMenuId::MAIN_MENU, 0U, slot);
+    if (id != UiMenuId::SPLASH)
+      setMenu(id);
     return;
   }
-  uint8_t count = 0;
-  const UiMenuId *children = menuChildren(gUi.menu, count);
-  if (children == nullptr || count == 0U)
+  if (!menuHasChildren(gUi.menu))
     return;
-  const uint8_t index =
-      static_cast<uint8_t>(menuWindowFirst(gUi.selectedChild, count) + slot);
-  if (index >= count)
-    return;
-  gUi.selectedChild = index;
-  setMenu(children[index]);
+  const UiMenuId id = menuCardAt(gUi.menu, gUi.pageIndex, slot);
+  if (id != UiMenuId::SPLASH)
+    setMenu(id);
 }
 
 static bool steeringTestAllowed() {
@@ -482,6 +540,10 @@ static void runSteeringTest(float targetDeg) {
                                    STEER_TEST_ANGLE_MAX_DEG);
   snprintf(line, sizeof(line), "CMD:STEER:%.1f", limited);
   printBoth(line);
+  steeringTestRunning = true;
+  snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
+           "%s", "RUNNING");
+  markUiDirty();
 }
 
 static bool driveTestAllowed() {
@@ -566,8 +628,27 @@ static void stopNavigation() { printBoth("CMD:NAV:STOP"); }
 static void handleOk() {
   if (gTelemetry.configPending)
     return;
+  if (gUi.menu == UiMenuId::SYSTEM_TFT_TEST) {
+    (void)runTftSelfTest();
+    return;
+  }
+  const UiMenuId contextualTarget =
+      menuDetailActionTarget(gUi.menu, gUi.detailViewIndex);
+  if (contextualTarget != UiMenuId::SPLASH) {
+    setMenu(contextualTarget);
+    return;
+  }
   if (menuEditKey(gUi.menu) != UiEditKey::NONE) {
     applyEditor();
+    return;
+  }
+  if (gUi.menu == UiMenuId::NAV_MISSION) {
+    if (gUi.detailViewIndex == 0U)
+      goSelectedWaypoint();
+    else if (gUi.detailViewIndex == 1U)
+      saveSelectedWaypoint();
+    else
+      stopNavigation();
     return;
   }
   if (gUi.menu == UiMenuId::NAV_MISSION_GO) {
@@ -588,13 +669,21 @@ static void handleSoftKey(SoftKey key) {
   if (key == SoftKey::NONE)
     return;
 
+  if (key == SoftKey::MENU) {
+    goMainMenu();
+    return;
+  }
+
   if (key == SoftKey::TOP_LEFT) {
-    if (gUi.menu == UiMenuId::ESC_MANUAL_TEST)
-      stopAllManualTest();
-    if (uiIsDomainRoot(gUi.menu))
-      goOverview();
-    else if (gUi.menu != UiMenuId::OVERVIEW)
+    if (gUi.menu == UiMenuId::MAIN_MENU) {
+      goHome();
+    } else if (menuIsOperatorDomainRoot(gUi.menu)) {
+      goMainMenu();
+    } else if (gUi.menu == UiMenuId::SYSTEM_ROOT) {
+      goHome();
+    } else if (gUi.menu != UiMenuId::HOME && gUi.menu != UiMenuId::OVERVIEW) {
       setMenu(menuParent(gUi.menu));
+    }
     return;
   }
 
@@ -658,6 +747,13 @@ static void handleSoftKey(SoftKey key) {
     return;
   }
 
+  if ((gUi.menu == UiMenuId::NAV_MISSION ||
+       menuDetailActionTarget(gUi.menu, gUi.detailViewIndex) != UiMenuId::SPLASH) &&
+      key == SoftKey::OK) {
+    handleOk();
+    return;
+  }
+
   if (gUi.menu == UiMenuId::NAV_MISSION_GO ||
       gUi.menu == UiMenuId::NAV_MISSION_SAVE) {
     if (key == SoftKey::LEFT)
@@ -668,8 +764,15 @@ static void handleSoftKey(SoftKey key) {
       handleOk();
     return;
   }
-  if (gUi.menu == UiMenuId::NAV_MISSION_STOP && key == SoftKey::OK)
+  if (gUi.menu == UiMenuId::NAV_MISSION_STOP && key == SoftKey::OK) {
     handleOk();
+    return;
+  }
+
+  if (key == SoftKey::LEFT)
+    selectRelative(-1);
+  else if (key == SoftKey::RIGHT)
+    selectRelative(+1);
 }
 
 static void handleTouch() {
@@ -680,7 +783,7 @@ static void handleTouch() {
     return;
   lastUiInteractionMs = HAL_GetTick();
 
-  // STOP is intentionally the only control that fires on initial press.
+  // STOP remains the only normal control that executes on initial press.
   if (ev.type == TouchEvent::PRESS) {
     if (gUi.menu == UiMenuId::ESC_MANUAL_TEST && ev.key == SoftKey::TEST_STOP) {
       ++gDiagnostics.touchActions;
@@ -689,6 +792,12 @@ static void handleTouch() {
     return;
   }
   if (ev.type == TouchEvent::HOLD) {
+    if (ev.key == SoftKey::MENU &&
+        (gUi.menu == UiMenuId::HOME || gUi.menu == UiMenuId::OVERVIEW)) {
+      ++gDiagnostics.touchActions;
+      enterServiceMode();
+      return;
+    }
     if (isManualMotionKey(ev.key)) {
       ++gDiagnostics.touchActions;
       handleSoftKey(ev.key);
@@ -755,8 +864,6 @@ static void parseVehicleState(const char *s) {
     gTelemetry.state = STATE_STOPPED;
   else if (eqIgnoreCase(s, "FAULT"))
     gTelemetry.state = STATE_FAULT;
-  if (gTelemetry.state != STATE_RUNNING)
-    driveTestRunning = false;
 }
 
 static void sanitizeTelemetry() {
@@ -767,6 +874,10 @@ static void sanitizeTelemetry() {
     gTelemetry.driveTargetMps = 0.0F;
   if (!std::isfinite(gTelemetry.driveActualMps))
     gTelemetry.driveActualMps = 0.0F;
+  if (!std::isfinite(gTelemetry.vbusV) || gTelemetry.vbusV <= 0.0F) {
+    gTelemetry.vbusV = 0.0F;
+    gTelemetry.vbusValid = false;
+  }
   if (!std::isfinite(gTelemetry.headingDeg))
     gTelemetry.headingDeg = 0.0F;
   gTelemetry.headingDeg = fmodf(gTelemetry.headingDeg, 360.0F);
@@ -861,6 +972,7 @@ static void forceRosOffline() {
   gTelemetry.escReady = false;
   gTelemetry.encoderReady = false;
   gTelemetry.vescConnected = false;
+  gTelemetry.vbusValid = false;
   gTelemetry.gpsReady = false;
   gTelemetry.imuReady = false;
   gTelemetry.magReady = false;
@@ -874,6 +986,10 @@ static void forceRosOffline() {
   gTelemetry.escAgeMs = 0xFFFFFFFFUL;
   gTelemetry.perceptionAgeMs = 0xFFFFFFFFUL;
   gTelemetry.navigationAgeMs = 0xFFFFFFFFUL;
+  gTelemetry.escx = EscExtendedTelemetry{};
+  gTelemetry.perx = PerceptionExtendedTelemetry{};
+  gTelemetry.navx = NavigationExtendedTelemetry{};
+  gTelemetry.vbusValid = false;
   seenEscDomain = false;
   seenPerceptionDomain = false;
   seenNavigationDomain = false;
@@ -926,7 +1042,8 @@ static void markDomainForCommand(const char *command) {
     return;
   static const char *const escPrefixes[] = {
       "MODE:",         "STATE:",      "SPD:",       "DRIVE_TGT:",
-      "DRIVE_ACT:",    "RPM:",        "ERPM:",      "STEER_TARGET:",
+      "DRIVE_ACT:",    "RPM:",        "ERPM:",      "VBUS:",
+      "STEER_TARGET:",
       "STEER_ACTUAL:", "STEER_ERR:",  "STEERTEST:", "ESC:",
       "ENC:",          "VESC_LINK:",  "ESTOP:",     "MANUAL_SPEED:",
       "CFGSTEERTEST:", "CFGDRVSCALE:"};
@@ -971,6 +1088,8 @@ static void markUiForCommand(const char *command) {
 
 static void updateDomainFreshness(uint32_t now) {
   const bool oldEsc = gTelemetry.escFresh;
+  const uint32_t oldExtendedMask = extendedFreshMask(gTelemetry);
+  const bool oldVbusValid = gTelemetry.vbusValid;
   const bool oldPer = gTelemetry.perceptionFresh;
   const bool oldNav = gTelemetry.navigationFresh;
   gTelemetry.escAgeMs = seenEscDomain
@@ -990,8 +1109,12 @@ static void updateDomainFreshness(uint32_t now) {
   gTelemetry.navigationFresh =
       gTelemetry.rosConnected && seenNavigationDomain &&
       gTelemetry.navigationAgeMs <= DOMAIN_DATA_STALE_MS;
+  if (oldEsc && !gTelemetry.escFresh && (driveTestRunning || steeringTestRunning))
+    stopAllManualTest();
+  updateExtendedFreshness(gTelemetry, now);
   if (oldEsc != gTelemetry.escFresh || oldPer != gTelemetry.perceptionFresh ||
-      oldNav != gTelemetry.navigationFresh)
+      oldNav != gTelemetry.navigationFresh || oldExtendedMask != extendedFreshMask(gTelemetry) ||
+      oldVbusValid != gTelemetry.vbusValid)
     markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
 }
 
@@ -1073,16 +1196,22 @@ static void sampleDiagnostics(uint32_t now) {
 }
 
 static void setExternalMenu(const char *name) {
-  if (eqIgnoreCase(name, "OVERVIEW"))
-    setMenu(UiMenuId::OVERVIEW);
-  else if (eqIgnoreCase(name, "ESC"))
+  if (eqIgnoreCase(name, "OVERVIEW") || eqIgnoreCase(name, "HOME")) {
+    setMenu(UiMenuId::HOME);
+  } else if (eqIgnoreCase(name, "MAIN") || eqIgnoreCase(name, "MAIN_MENU") ||
+             eqIgnoreCase(name, "MENU")) {
+    setMenu(UiMenuId::MAIN_MENU);
+  } else if (eqIgnoreCase(name, "ESC")) {
     setMenu(UiMenuId::ESC_ROOT);
-  else if (eqIgnoreCase(name, "PERCEPTION"))
+  } else if (eqIgnoreCase(name, "PERCEPTION")) {
     setMenu(UiMenuId::PERCEPTION_ROOT);
-  else if (eqIgnoreCase(name, "NAVIGATION"))
+  } else if (eqIgnoreCase(name, "NAVIGATION")) {
     setMenu(UiMenuId::NAVIGATION_ROOT);
-  else if (eqIgnoreCase(name, "SYSTEM"))
+  } else if (eqIgnoreCase(name, "SYSTEM") || eqIgnoreCase(name, "SERVICE")) {
+    gUi.serviceSession = true;
     setMenu(UiMenuId::SYSTEM_ROOT);
+    gUi.serviceSession = true;
+  }
 }
 
 static void handleSerialCommand(char *command);
@@ -1096,7 +1225,33 @@ static bool motionSafeForHeavyMaintenance() {
       gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY;
   return stateSafe && std::fabs(gTelemetry.speedKmh) <= 0.2F &&
          std::fabs(gTelemetry.driveActualMps) <= 0.02F && !navActive &&
-         !driveTestRunning && !gTelemetry.eStop && !gNeo3.safetyPressed();
+         !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop &&
+         !gNeo3.safetyPressed();
+}
+
+static bool runTftSelfTest() {
+  if (gUiDrawActive || !splashComplete || !tft.displayReady() ||
+      tft.displayFaulted() || !motionSafeForHeavyMaintenance()) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
+             "TFT TEST LOCKED");
+    markUiDirty(UI_DIRTY_ALL);
+    return false;
+  }
+  invalidateTouchGeneration();
+  const uint16_t colors[3] = {C_FAULT, C_READY, 0x001FU};
+  for (uint8_t i = 0U; i < 3U; ++i) {
+    if (!motionSafeForHeavyMaintenance()) {
+      markUiDirty(UI_DIRTY_ALL);
+      drawUiNow(true);
+      return false;
+    }
+    tft.fillScreen(colors[i]);
+    Board_RealtimeDelayMs(200U);
+  }
+  markUiDirty(UI_DIRTY_ALL);
+  drawUiNow(true);
+  return true;
 }
 
 static void handleSerialCommand(char *command) {
@@ -1134,6 +1289,47 @@ static void handleSerialCommand(char *command) {
   if (!strcmp(command, "GET:STATE")) {
     publishPage();
     publishLinkState();
+    return;
+  }
+  if (!strcmp(command, "USB:RECOVER")) {
+    // No ACK dependency: a host may issue this specifically because CDC TX is
+    // wedged. Recovery executes from the outer main loop via gUsb.service().
+    gUsb.requestRecovery();
+    return;
+  }
+  if (!strcmp(command, "USB:STATUS")) {
+    char line[420];
+    std::snprintf(line, sizeof(line),
+                  "USB:STAT:session=%lu,init=%lu,deinit=%lu,abort=%lu,"
+                  "tx_complete=%lu,stall_recover=%lu,soft_restart=%lu,"
+                  "tx_busy=%u,busy_age_ms=%lu,last_tx_age_ms=%lu,last_rx_age_ms=%lu,"
+                  "rx_pkts=%lu,rx_q=%u,tx_q=%u,tx_hi_q=%u,st_tx=%lu,"
+                  "progress_stall=%lu,recovery_reason=%lu,repair_age_ms=%lu,"
+                  "repair_pending=%u,repair_ep_len=%lu,repair_flags=%u,reset_csr=%08lX",
+                  static_cast<unsigned long>(gUsb.sessionGeneration()),
+                  static_cast<unsigned long>(gUsb.classInitCount()),
+                  static_cast<unsigned long>(gUsb.classDeInitCount()),
+                  static_cast<unsigned long>(gUsb.txAbortCount()),
+                  static_cast<unsigned long>(gUsb.txCompleteCount()),
+                  static_cast<unsigned long>(gUsb.txStallRecoveryCount()),
+                  static_cast<unsigned long>(gUsb.softRestartCount()),
+                  gUsb.txBusy() ? 1U : 0U,
+                  static_cast<unsigned long>(gUsb.txBusyAgeMs()),
+                  static_cast<unsigned long>(gUsb.lastTxCompleteAgeMs()),
+                  static_cast<unsigned long>(gUsb.lastRxAgeMs()),
+                  static_cast<unsigned long>(gUsb.rxPacketCount()),
+                  static_cast<unsigned>(gUsb.rxQueueDepth()),
+                  static_cast<unsigned>(gUsb.txLowQueueDepth()),
+                  static_cast<unsigned>(gUsb.txHighQueueDepth()),
+                  static_cast<unsigned long>(gUsb.cdcTxState()),
+                  static_cast<unsigned long>(gUsb.txProgressStallCount()),
+                  static_cast<unsigned long>(gUsb.lastRecoveryReason()),
+                  static_cast<unsigned long>(gUsb.lastRepairAgeMs()),
+                  static_cast<unsigned>(gUsb.lastRepairPending()),
+                  static_cast<unsigned long>(gUsb.lastRepairEpLength()),
+                  static_cast<unsigned>(gUsb.lastRepairFlags()),
+                  static_cast<unsigned long>(gResetCauseFlags));
+    (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
   if (!strcmp(command, "PING")) {
@@ -1206,6 +1402,16 @@ static void handleSerialCommand(char *command) {
     return;
   }
 #ifdef HMI_TEST_HOOKS
+  if (!strcmp(command, "TEST:USB:TX_SILENT")) {
+    if (!motionSafeForHeavyMaintenance()) {
+      (void)gUsb.writeLineCritical("ERR:TEST:WAIT_SAFE", 120U);
+      return;
+    }
+    // Fault injection only: RX remains active, TX is withheld for at most 8 s.
+    // A USB session reset clears this immediately. No actuator command is sent.
+    gUsb.testSuppressTx(8000U);
+    return;
+  }
   if (!strcmp(command, "TEST:SPI:REINIT_FAIL")) {
     if (!motionSafeForHeavyMaintenance()) {
       (void)gUsb.writeLineCritical("ERR:TEST:WAIT_SAFE", 120U);
@@ -1260,25 +1466,8 @@ static void handleSerialCommand(char *command) {
       (void)gUsb.writeLineCritical("ERR:TFT:MOTION_OR_NAV_ACTIVE", 120U);
       return;
     }
-    resetTouchState();
-    tft.fillScreen(C_FAULT);
-    Board_RealtimeDelayMs(250U);
-    if (!motionSafeForHeavyMaintenance()) {
-      markUiDirty(UI_DIRTY_ALL);
-      drawUiNow(true);
-      return;
-    }
-    tft.fillScreen(C_READY);
-    Board_RealtimeDelayMs(250U);
-    if (!motionSafeForHeavyMaintenance()) {
-      markUiDirty(UI_DIRTY_ALL);
-      drawUiNow(true);
-      return;
-    }
-    tft.fillScreen(0x001FU);
-    Board_RealtimeDelayMs(250U);
-    drawUiNow(true);
-    (void)gUsb.writeLineCritical("ACK:TFT:TEST", 120U);
+    const bool ok = runTftSelfTest();
+    (void)gUsb.writeLineCritical(ok ? "ACK:TFT:TEST" : "ERR:TFT:ABORTED", 120U);
     return;
   }
   if (!strcmp(command, "BOOT:DFU:ARM")) {
@@ -1320,6 +1509,29 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
+  const uint32_t telemetryNow = HAL_GetTick();
+  const ExtendedTelemetryParseResult extended =
+      parseExtendedTelemetryLine(command, gTelemetry, telemetryNow);
+  if (extended.recognized) {
+    if (!extended.accepted) {
+      if (extended.outOfOrder) ++gDiagnostics.extendedTelemetryOutOfOrder;
+      else ++gDiagnostics.extendedTelemetryMalformed;
+      return;
+    }
+    ++gDiagnostics.extendedTelemetryAccepted;
+    if (extended.domain == ExtendedTelemetryDomain::ESC) {
+      lastEscDomainMs = telemetryNow; seenEscDomain = true;
+    } else if (extended.domain == ExtendedTelemetryDomain::PERCEPTION) {
+      lastPerceptionDomainMs = telemetryNow; seenPerceptionDomain = true;
+    } else if (extended.domain == ExtendedTelemetryDomain::NAVIGATION) {
+      lastNavigationDomainMs = telemetryNow; seenNavigationDomain = true;
+    }
+    updateExtendedFreshness(gTelemetry, telemetryNow);
+    markUiDirty(UI_DIRTY_CONTENT | UI_DIRTY_TOPBAR);
+    enforceManualMotionGate();
+    return;
+  }
+
   bool recognized = true;
   if (!strncmp(command, "ROS:", 4)) {
     if (parseBool(command + 4))
@@ -1343,6 +1555,9 @@ static void handleSerialCommand(char *command) {
     gTelemetry.motorRpm = static_cast<float>(atof(command + 4));
   } else if (!strncmp(command, "ERPM:", 5)) {
     gTelemetry.motorErpm = static_cast<float>(atof(command + 5));
+  } else if (!strncmp(command, "VBUS:", 5)) {
+    gTelemetry.vbusV = static_cast<float>(atof(command + 5));
+    gTelemetry.vbusValid = std::isfinite(gTelemetry.vbusV) && gTelemetry.vbusV > 0.0F;
   } else if (!strncmp(command, "STEER_TARGET:", 13)) {
     gTelemetry.steeringTargetDeg = static_cast<float>(atof(command + 13));
     gTelemetry.steeringErrorDeg =
@@ -1364,8 +1579,8 @@ static void handleSerialCommand(char *command) {
     gTelemetry.vescConnected = parseBool(command + 10);
   } else if (!strncmp(command, "ESTOP:", 6)) {
     gTelemetry.eStop = parseBool(command + 6);
-    if (gTelemetry.eStop)
-      stopDriveTest();
+    if (gTelemetry.eStop && (driveTestRunning || steeringTestRunning))
+      stopAllManualTest();
   } else if (!strncmp(command, "MANUAL_SPEED:", 13)) {
     gTelemetry.manualSpeedPct = static_cast<uint8_t>(
         std::clamp(atoi(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
@@ -1495,6 +1710,7 @@ static void handleSerialCommand(char *command) {
   markDomainForCommand(command);
   sanitizeTelemetry();
   updateDomainFreshness(HAL_GetTick());
+  enforceManualMotionGate();
   markUiForCommand(command);
 }
 
@@ -1650,7 +1866,8 @@ static void serviceDisplayRecovery(uint32_t now) {
    */
   invalidateTouchGeneration();
   invalidateUiChromeCaches();
-  if (driveTestRunning || gUi.menu == UiMenuId::ESC_MANUAL_TEST)
+  if (driveTestRunning || steeringTestRunning ||
+      gUi.menu == UiMenuId::ESC_MANUAL_TEST)
     stopAllManualTest();
   beginDisplayInitialization();
 }
@@ -1716,8 +1933,10 @@ static bool updateProgressBar() {
     beginTouch();
     if (gTelemetry.systemStatus == SYS_INITIALIZING)
       gTelemetry.systemStatus = SYS_NOT_READY;
-    gUi.menu = UiMenuId::OVERVIEW;
-    gUi.selectedChild = 0U;
+    gUi.menu = UiMenuId::HOME;
+    gUi.pageIndex = 0U;
+    gUi.detailViewIndex = 0U;
+    gUi.serviceSession = false;
     drawUiNow(true);
     publishPage();
     return false;
@@ -1726,6 +1945,9 @@ static bool updateProgressBar() {
 }
 
 int main() {
+  // Capture reset flags before board/HAL initialization mutates clock/reset state.
+  gResetCauseFlags = RCC->CSR;
+  __HAL_RCC_CLEAR_RESET_FLAGS();
   Board_Init();
   bool usbInitOk = false;
   for (uint8_t attempt = 0U; attempt < 3U && !usbInitOk; ++attempt) {
@@ -1762,6 +1984,7 @@ int main() {
      * chains in its ISR, so this is a fallback rather than the realtime clock.
      */
     Board_Service();
+    gUsb.service();
     if (!gCrashCounterCleared &&
         static_cast<uint32_t>(HAL_GetTick() - gWatchdogHealthySinceMs) >=
             kCrashCounterClearMs) {
@@ -1792,7 +2015,7 @@ int main() {
         gVesc.setSafetyStop(gNeo3.safetyPressed());
         gVesc.poll();
       }
-      gUsb.poll();
+      gUsb.service();
       gMainLoopHeartbeatMs = HAL_GetTick();
       continue;
     }
@@ -1824,7 +2047,7 @@ int main() {
     if (splashComplete && isSystemMenu(gUi.menu) && !touchWasDown &&
         static_cast<uint32_t>(serviceNow - lastUiInteractionMs) >=
             DIAGNOSTIC_AUTO_RETURN_MS) {
-      setMenu(UiMenuId::OVERVIEW);
+      setMenu(UiMenuId::HOME);
     }
     if (driveTestRunning &&
         static_cast<int32_t>(driveTestDeadlineMs - serviceNow) <= 0)

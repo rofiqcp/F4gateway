@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <cstring>
 #include "Config.h"
-#include "VisualAssets.h"
 
 extern HmiDisplay tft;
 
@@ -182,14 +181,18 @@ inline void iconPins(int cx, int cy, uint16_t c, uint16_t bg) {
   tft.fillCircle(cx, cy, 2, bg);
 }
 
+
 inline void drawVehicleIllustration(int x, int y) {
-  tft.pushImage(x, y, VEHICLE_ASSET_W, VEHICLE_ASSET_H, VEHICLE_ASSET);
-}
-
-inline void drawCameraIllustration(int x, int y) {
-  tft.pushImage(x, y, CAMERA_ASSET_W, CAMERA_ASSET_H, CAMERA_ASSET);
-}
-
-inline void drawGpsIllustration(int x, int y) {
-  tft.pushImage(x, y, GPS_ASSET_W, GPS_ASSET_H, GPS_ASSET);
+  const int cx = x + 39;
+  const int cy = y + 38;
+  tft.fillRoundRect(cx - 27, cy - 15, 54, 31, 7, C_PANEL_ALT);
+  tft.drawRoundRect(cx - 27, cy - 15, 54, 31, 7, C_ACCENT);
+  tft.fillRoundRect(cx - 15, cy - 25, 30, 13, 4, C_PANEL);
+  tft.drawRoundRect(cx - 15, cy - 25, 30, 13, 4, C_ACCENT);
+  tft.fillCircle(cx - 22, cy + 19, 7, C_INK);
+  tft.fillCircle(cx + 22, cy + 19, 7, C_INK);
+  tft.fillCircle(cx - 22, cy + 19, 3, C_ACCENT);
+  tft.fillCircle(cx + 22, cy + 19, 3, C_ACCENT);
+  iconAutoArrow(cx, cy, C_ACCENT, C_PANEL_ALT);
+  tft.drawFastHLine(cx - 14, cy + 30, 28, C_BORDER);
 }
