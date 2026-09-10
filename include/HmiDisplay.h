@@ -27,16 +27,27 @@ extern const GFXfont FreeSansBold12pt7b;
 extern const GFXfont FreeSansBold24pt7b;
 
 enum TextDatum : uint8_t {
-  TL_DATUM = 0U, TC_DATUM, TR_DATUM,
-  ML_DATUM, MC_DATUM, MR_DATUM,
-  BL_DATUM, BC_DATUM, BR_DATUM
+  TL_DATUM = 0U,
+  TC_DATUM,
+  TR_DATUM,
+  ML_DATUM,
+  MC_DATUM,
+  MR_DATUM,
+  BL_DATUM,
+  BC_DATUM,
+  BR_DATUM
 };
 
 class HmiDisplay {
- public:
-  void init();
+public:
+  void beginInit();
+  bool serviceInit();
+  bool initBusy() const;
   uint8_t readRegister8(uint8_t command, uint8_t index = 0U);
   uint32_t readId();
+  uint16_t readPixel565(int32_t x, int32_t y);
+  bool validateFastWriteClock();
+  bool verifyCurrentWriteClock();
   void setRotation(uint8_t rotation);
   void setSwapBytes(bool swap) { swap_bytes_ = swap; }
   void fillScreen(uint16_t color);
@@ -46,17 +57,23 @@ class HmiDisplay {
   void drawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint16_t color);
   void drawCircle(int32_t x0, int32_t y0, int32_t r, uint16_t color);
   void fillCircle(int32_t x0, int32_t y0, int32_t r, uint16_t color);
-  void drawRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color);
-  void fillRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color);
-  void fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                    int32_t x2, int32_t y2, uint16_t color);
-  void pushImage(int32_t x, int32_t y, int32_t w, int32_t h, const uint16_t *pixels);
+  void drawRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r,
+                     uint16_t color);
+  void fillRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r,
+                     uint16_t color);
+  void fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1, int32_t x2,
+                    int32_t y2, uint16_t color);
+  void pushImage(int32_t x, int32_t y, int32_t w, int32_t h,
+                 const uint16_t *pixels);
 
   void setFreeFont(const GFXfont *font) { font_ = font; }
   void setTextFont(uint8_t font) { builtin_font_ = font; }
   void setTextSize(uint8_t size) { text_size_ = size == 0U ? 1U : size; }
   void setTextDatum(uint8_t datum) { datum_ = datum; }
-  void setTextColor(uint16_t fg, uint16_t bg) { text_fg_ = fg; text_bg_ = bg; }
+  void setTextColor(uint16_t fg, uint16_t bg) {
+    text_fg_ = fg;
+    text_bg_ = bg;
+  }
   void setTextPadding(uint16_t padding) { padding_ = padding; }
   int16_t drawString(const char *text, int32_t x, int32_t y);
   int16_t textWidth(const char *text) const;
@@ -66,7 +83,11 @@ class HmiDisplay {
 
   void beginFrame();
   void endFrame();
-  void setDisplayReady(bool ready) { display_ready_ = ready; if (ready) display_faulted_ = false; }
+  void setDisplayReady(bool ready) {
+    display_ready_ = ready;
+    if (ready)
+      display_faulted_ = false;
+  }
   bool displayReady() const { return display_ready_; }
   bool displayFaulted() const { return display_faulted_; }
   uint32_t spiTransactions() const { return spi_transactions_; }
@@ -79,12 +100,22 @@ class HmiDisplay {
   uint32_t touchRejectFastCount() const { return touch_reject_fast_count_; }
   uint32_t lastFrameBytes() const { return last_frame_bytes_; }
   uint32_t maxFrameBytes() const { return max_frame_bytes_; }
+  uint32_t writeClockHz() const;
+  bool fastWriteValidated() const { return fast_write_validated_; }
+  bool ultraFastWriteValidated() const { return ultra_fast_write_validated_; }
+#ifdef HMI_TEST_HOOKS
+  void testInjectTxFailureOnce() { test_tx_failure_once_ = true; }
+  bool testForceRuntimeSpiReinit() { return recoverSpi(); }
+#endif
 
- private:
+private:
   enum class SpiOwner : uint8_t { IDLE = 0U, TFT_WRITE, TFT_READ, TOUCH };
   static constexpr uint32_t kSpiWaitTimeoutUs = 2500U;
   static constexpr uint32_t kSpiHalTimeoutMs = 8U;
-  static constexpr uint32_t kTftPrescaler = SPI_BAUDRATEPRESCALER_16;
+  static constexpr uint32_t kTftReadPrescaler = SPI_BAUDRATEPRESCALER_16;
+  static constexpr uint32_t kTftSafePrescaler = SPI_BAUDRATEPRESCALER_16;
+  static constexpr uint32_t kTftFastPrescaler = SPI_BAUDRATEPRESCALER_8;
+  static constexpr uint32_t kTftUltraFastPrescaler = SPI_BAUDRATEPRESCALER_4;
   static constexpr uint32_t kTouchPrescaler = SPI_BAUDRATEPRESCALER_64;
   static constexpr uint8_t kTextTileRows = 8U;
 
@@ -95,7 +126,10 @@ class HmiDisplay {
   bool endTransaction();
   bool tx(const uint8_t *bytes, uint16_t length);
   bool txrx(const uint8_t *txBytes, uint8_t *rxBytes, uint16_t length);
-  bool writeRegister(uint8_t command, const uint8_t *bytes = nullptr, uint16_t length = 0U);
+  bool writeRegister(uint8_t command, const uint8_t *bytes = nullptr,
+                     uint16_t length = 0U);
+  bool configureControllerRegisters();
+  bool verifyWriteProfile(uint32_t prescaler);
   bool commandTx(uint8_t value);
   bool dataTx(const uint8_t *bytes, uint16_t length);
   bool setWindowTx(int32_t x, int32_t y, int32_t w, int32_t h);
@@ -112,6 +146,9 @@ class HmiDisplay {
   int32_t height_{240};
   uint8_t rotation_{1U};
   bool swap_bytes_{false};
+  uint32_t tft_write_prescaler_{kTftSafePrescaler};
+  bool fast_write_validated_{false};
+  bool ultra_fast_write_validated_{false};
   const GFXfont *font_{nullptr};
   uint8_t builtin_font_{1U};
   uint8_t text_size_{1U};
@@ -128,6 +165,19 @@ class HmiDisplay {
   bool touch_invert_y_{false};
   uint32_t press_time_ms_{0U};
 
+  enum class InitPhase : uint8_t {
+    IDLE = 0U,
+    RESET_HIGH_WAIT,
+    RESET_LOW_WAIT,
+    RESET_RELEASE_WAIT,
+    SLEEP_OUT_WAIT,
+    DISPLAY_ON_WAIT,
+    DONE,
+    FAILED
+  };
+  InitPhase init_phase_{InitPhase::IDLE};
+  uint32_t init_deadline_ms_{0U};
+
   SpiOwner spi_owner_{SpiOwner::IDLE};
   bool display_ready_{false};
   bool display_faulted_{false};
@@ -139,7 +189,11 @@ class HmiDisplay {
   uint32_t spi_bus_conflict_count_{0U};
   uint32_t touch_read_count_{0U};
   uint32_t touch_reject_fast_count_{0U};
+#ifdef HMI_TEST_HOOKS
+  bool test_tx_failure_once_{false};
+#endif
   bool frame_active_{false};
+  bool frame_transaction_active_{false};
   uint32_t frame_start_bytes_{0U};
   uint32_t last_frame_bytes_{0U};
   uint32_t max_frame_bytes_{0U};

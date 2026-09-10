@@ -24,6 +24,8 @@ static uint32_t touchLastRepeatMs = 0;
 static bool touchCanceled = false;
 static bool touchHoldSent = false;
 static bool touchDidRepeat = false;
+static uint32_t touchGeneration = 1U;
+static uint32_t touchPressGeneration = 0U;
 
 inline void resetTouchState() {
   touchWasDown = false;
@@ -33,13 +35,20 @@ inline void resetTouchState() {
   touchCanceled = false;
   touchHoldSent = false;
   touchDidRepeat = false;
+  touchPressGeneration = 0U;
+}
+
+inline void invalidateTouchGeneration() {
+  ++touchGeneration;
+  if (touchGeneration == 0U) touchGeneration = 1U;
+  resetTouchState();
 }
 
 inline void beginTouch() {
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
   uint16_t calData[5] = {300, 3600, 300, 3600, 1};
   tft.setTouch(calData);
-  resetTouchState();
+  invalidateTouchGeneration();
 }
 
 inline void correctTouchXY(uint16_t sx, uint16_t sy, uint16_t& tx, uint16_t& ty) {
@@ -118,6 +127,10 @@ inline TouchEvent pollTouch(const UiState& ui) {
     if (touchWasDown) {
       const uint32_t heldMs = static_cast<uint32_t>(now - touchPressMs);
       ev.type = TouchEvent::RELEASE;
+      if (touchPressGeneration != touchGeneration) {
+        resetTouchState();
+        return TouchEvent{};
+      }
       if (isManualMotionKey(touchActiveKey) && touchHoldSent) {
         ev.key = touchActiveKey;  // dead-man release must always stop motion
       } else if (!isManualMotionKey(touchActiveKey) && !touchCanceled &&
@@ -129,6 +142,11 @@ inline TouchEvent pollTouch(const UiState& ui) {
     return ev;
   }
 
+  if (touchWasDown && touchPressGeneration != touchGeneration) {
+    resetTouchState();
+    return ev;
+  }
+
   uint16_t tx = 0, ty = 0;
   correctTouchXY(sx, sy, tx, ty);
   const SoftKey key = touchKeyAt(ui, tx, ty);
@@ -136,6 +154,7 @@ inline TouchEvent pollTouch(const UiState& ui) {
   if (!touchWasDown) {
     touchWasDown = true;
     touchActiveKey = key;
+    touchPressGeneration = touchGeneration;
     touchPressMs = now;
     touchLastRepeatMs = now;
     touchCanceled = key == SoftKey::NONE;

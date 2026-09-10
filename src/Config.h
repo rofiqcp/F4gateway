@@ -177,6 +177,7 @@ static constexpr uint32_t TOUCH_HOLD_ACTION_MS = 650;
 static constexpr uint32_t TOUCH_REPEAT_DELAY_MS = 450;
 static constexpr uint32_t TOUCH_REPEAT_MS = 120;
 static constexpr uint32_t DISPLAY_REFRESH_MS = 100;
+static constexpr uint32_t DIAGNOSTIC_AUTO_RETURN_MS = 60000;
 static constexpr uint32_t DOMAIN_DATA_STALE_MS = 3000;
 static constexpr uint32_t ROS_LINK_TIMEOUT_MS = 2500;
 static constexpr uint32_t ROS_LINK_STARTUP_TIMEOUT_MS = 12000;

@@ -13,6 +13,8 @@ TIM_HandleTypeDef htim11{};
 HalUartPort gVescUart(&huart1, USART1);
 HalUartPort gGnssUart(&huart2, USART2);
 
+extern "C" uint8_t _end;
+
 namespace {
 void (*g_watchdog_callback)() = nullptr;
 void (*g_realtime_service_callback)() = nullptr;
@@ -20,12 +22,24 @@ bool g_realtime_service_active = false;
 uint32_t g_realtime_service_last_ms = 0U;
 uint32_t g_board_last_service_ms = 0U;
 uint32_t g_board_max_service_gap_ms = 0U;
+uint32_t g_board_steady_max_service_gap_ms = 0U;
+static constexpr uint8_t kServiceGapSampleCount = 64U;
+uint16_t g_board_service_gap_samples[kServiceGapSampleCount]{};
+uint8_t g_board_service_gap_head = 0U;
+uint8_t g_board_service_gap_count = 0U;
+bool g_board_service_gap_stats_enabled = false;
+uint32_t g_board_min_stack_headroom_bytes = 0xFFFFFFFFUL;
 uint32_t g_buzzer_deadline_ms = 0U;
 bool g_buzzer_active = false;
+#ifdef HMI_TEST_HOOKS
+bool g_test_spi_init_fail_once = false;
+#endif
 
 [[noreturn]] void FatalError() {
   __disable_irq();
-  while (true) { __NOP(); }
+  while (true) {
+    __NOP();
+  }
 }
 
 void SystemClock_Config() {
@@ -39,7 +53,8 @@ void SystemClock_Config() {
   osc.PLL.PLLN = 96U;
   osc.PLL.PLLP = RCC_PLLP_DIV2;
   osc.PLL.PLLQ = 4U;
-  if (HAL_RCC_OscConfig(&osc) != HAL_OK) FatalError();
+  if (HAL_RCC_OscConfig(&osc) != HAL_OK)
+    FatalError();
 
   RCC_ClkInitTypeDef clk{};
   clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
@@ -48,7 +63,8 @@ void SystemClock_Config() {
   clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
   clk.APB1CLKDivider = RCC_HCLK_DIV2;
   clk.APB2CLKDivider = RCC_HCLK_DIV1;
-  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK) FatalError();
+  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK)
+    FatalError();
 }
 
 void Gpio_Init() {
@@ -89,7 +105,13 @@ void Gpio_Init() {
   HAL_GPIO_Init(GPIOC, &gpio);
 }
 
-void Spi1_Init() {
+bool Spi1_Configure() {
+#ifdef HMI_TEST_HOOKS
+  if (g_test_spi_init_fail_once) {
+    g_test_spi_init_fail_once = false;
+    return false;
+  }
+#endif
   __HAL_RCC_SPI1_CLK_ENABLE();
   GPIO_InitTypeDef gpio{};
   gpio.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
@@ -111,7 +133,12 @@ void Spi1_Init() {
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 7U;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK) FatalError();
+  return HAL_SPI_Init(&hspi1) == HAL_OK;
+}
+
+void Spi1_InitBootOrFatal() {
+  if (!Spi1_Configure())
+    FatalError();
 }
 
 void I2c1_Init() {
@@ -133,7 +160,8 @@ void I2c1_Init() {
   hi2c1.Init.OwnAddress2 = 0U;
   hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
   hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK) FatalError();
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    FatalError();
 }
 
 void Timers_Init() {
@@ -147,7 +175,8 @@ void Timers_Init() {
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0U;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK) FatalError();
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+    FatalError();
   TIM_OC_InitTypeDef oc{};
   oc.OCMode = TIM_OCMODE_PWM1;
   oc.Pulse = 0U;
@@ -156,7 +185,8 @@ void Timers_Init() {
   oc.OCFastMode = TIM_OCFAST_DISABLE;
   oc.OCIdleState = TIM_OCIDLESTATE_RESET;
   oc.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim1, &oc, TIM_CHANNEL_1) != HAL_OK) FatalError();
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &oc, TIM_CHANNEL_1) != HAL_OK)
+    FatalError();
 
   GPIO_InitTypeDef gpio{};
   gpio.Pin = GPIO_PIN_8;
@@ -172,7 +202,8 @@ void Timers_Init() {
   htim11.Init.Period = 999U;
   htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim11) != HAL_OK) FatalError();
+  if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
+    FatalError();
   HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 3U, 0U);
   HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
 }
@@ -200,7 +231,7 @@ void UartPinsInit(UART_HandleTypeDef *huart) {
     HAL_NVIC_EnableIRQ(USART2_IRQn);
   }
 }
-}
+} // namespace
 
 void Board_Init() {
   HAL_Init();
@@ -208,7 +239,7 @@ void Board_Init() {
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
   SystemClock_Config();
   Gpio_Init();
-  Spi1_Init();
+  Spi1_InitBootOrFatal();
   I2c1_Init();
   Timers_Init();
   if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
@@ -220,47 +251,136 @@ void Board_Init() {
 
 void Board_Service() {
   const uint32_t now = HAL_GetTick();
+  uint32_t sp = 0U;
+  __asm volatile("mov %0, sp" : "=r"(sp));
+  const uint32_t ramFloor = reinterpret_cast<uint32_t>(&_end);
+  const uint32_t stackHeadroom = sp > ramFloor ? sp - ramFloor : 0U;
+  if (stackHeadroom < g_board_min_stack_headroom_bytes)
+    g_board_min_stack_headroom_bytes = stackHeadroom;
   if (g_board_last_service_ms != 0U) {
     const uint32_t gap = static_cast<uint32_t>(now - g_board_last_service_ms);
-    if (gap > g_board_max_service_gap_ms) g_board_max_service_gap_ms = gap;
+    if (gap > g_board_max_service_gap_ms)
+      g_board_max_service_gap_ms = gap;
+    if (g_board_service_gap_stats_enabled && gap > 0U) {
+      if (gap > g_board_steady_max_service_gap_ms)
+        g_board_steady_max_service_gap_ms = gap;
+      g_board_service_gap_samples[g_board_service_gap_head] =
+          static_cast<uint16_t>(std::min<uint32_t>(gap, 0xFFFFU));
+      g_board_service_gap_head = static_cast<uint8_t>(
+          (g_board_service_gap_head + 1U) % kServiceGapSampleCount);
+      if (g_board_service_gap_count < kServiceGapSampleCount)
+        ++g_board_service_gap_count;
+    }
   }
   g_board_last_service_ms = now;
   (void)gVescUart.service();
   (void)gGnssUart.service();
-  if (g_buzzer_active && static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
+  if (g_buzzer_active &&
+      static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
     Board_BuzzerStop();
   }
 }
 
 uint32_t Board_MaxServiceGapMs() { return g_board_max_service_gap_ms; }
+uint32_t Board_SteadyMaxServiceGapMs() {
+  return g_board_steady_max_service_gap_ms;
+}
 
-void Board_SetRealtimeServiceCallback(void (*callback)()) { g_realtime_service_callback = callback; }
+static uint32_t ServiceGapPercentile(uint8_t percentile) {
+  if (g_board_service_gap_count == 0U)
+    return 0U;
+  uint16_t values[kServiceGapSampleCount];
+  for (uint8_t i = 0U; i < g_board_service_gap_count; ++i)
+    values[i] = g_board_service_gap_samples[i];
+  for (uint8_t i = 1U; i < g_board_service_gap_count; ++i) {
+    const uint16_t value = values[i];
+    uint8_t j = i;
+    while (j > 0U && values[j - 1U] > value) {
+      values[j] = values[j - 1U];
+      --j;
+    }
+    values[j] = value;
+  }
+  const uint32_t numerator =
+      static_cast<uint32_t>(g_board_service_gap_count - 1U) * percentile;
+  const uint8_t index = static_cast<uint8_t>((numerator + 99U) / 100U);
+  return values[std::min<uint8_t>(
+      index, static_cast<uint8_t>(g_board_service_gap_count - 1U))];
+}
+
+uint32_t Board_ServiceGapP95Ms() { return ServiceGapPercentile(95U); }
+uint32_t Board_ServiceGapP99Ms() { return ServiceGapPercentile(99U); }
+
+void Board_ResetServiceGapStats() {
+  g_board_steady_max_service_gap_ms = 0U;
+  g_board_service_gap_head = 0U;
+  g_board_service_gap_count = 0U;
+  std::fill_n(g_board_service_gap_samples, kServiceGapSampleCount, 0U);
+  g_board_last_service_ms = HAL_GetTick();
+  g_board_service_gap_stats_enabled = true;
+}
+
+uint32_t Board_StackHeadroomBytes() {
+  uint32_t sp = 0U;
+  __asm volatile("mov %0, sp" : "=r"(sp));
+  const uint32_t ramFloor = reinterpret_cast<uint32_t>(&_end);
+  return sp > ramFloor ? sp - ramFloor : 0U;
+}
+
+uint32_t Board_MinStackHeadroomBytes() {
+  return g_board_min_stack_headroom_bytes == 0xFFFFFFFFUL
+             ? Board_StackHeadroomBytes()
+             : g_board_min_stack_headroom_bytes;
+}
+
+void Board_SetRealtimeServiceCallback(void (*callback)()) {
+  g_realtime_service_callback = callback;
+}
 
 void Board_RealtimeService() {
   /* Long TFT draws are main-context blocking work. Yield at most once per ms
    * into the motor-link service without permitting recursive entry. */
   const uint32_t now = HAL_GetTick();
-  if (g_realtime_service_active || now == g_realtime_service_last_ms) return;
+  if (g_realtime_service_active || now == g_realtime_service_last_ms)
+    return;
   g_realtime_service_last_ms = now;
   g_realtime_service_active = true;
   Board_Service();
-  if (g_realtime_service_callback != nullptr) g_realtime_service_callback();
+  if (g_realtime_service_callback != nullptr)
+    g_realtime_service_callback();
   g_realtime_service_active = false;
 }
 
 void Board_DelayUs(uint32_t microseconds) {
   const uint32_t start = DWT->CYCCNT;
   const uint32_t cycles = microseconds * (HAL_RCC_GetHCLKFreq() / 1000000U);
-  while (static_cast<uint32_t>(DWT->CYCCNT - start) < cycles) { __NOP(); }
+  while (static_cast<uint32_t>(DWT->CYCCNT - start) < cycles) {
+    __NOP();
+  }
 }
 
+#ifdef HMI_TEST_HOOKS
+void Board_TestInjectSpiInitFailureOnce() { g_test_spi_init_fail_once = true; }
+#endif
+
 bool Board_ReinitSpi1() {
+  /* Runtime display recovery must never enter the boot-fatal path. A failed
+   * SPI reconfiguration is reported to HmiDisplay, which degrades the display
+   * while USART1/safety/watchdog interrupts remain alive. */
   (void)HAL_SPI_DeInit(&hspi1);
   __HAL_RCC_SPI1_FORCE_RESET();
-  __NOP(); __NOP();
+  __NOP();
+  __NOP();
   __HAL_RCC_SPI1_RELEASE_RESET();
-  Spi1_Init();
-  return hspi1.State == HAL_SPI_STATE_READY;
+  return Spi1_Configure() && hspi1.State == HAL_SPI_STATE_READY;
+}
+
+void Board_RealtimeDelayMs(uint32_t duration_ms) {
+  const uint32_t deadline = HAL_GetTick() + duration_ms;
+  while (static_cast<int32_t>(deadline - HAL_GetTick()) > 0) {
+    Board_RealtimeService();
+    __WFI();
+  }
 }
 
 void Board_ReinitI2c1() {
@@ -268,12 +388,18 @@ void Board_ReinitI2c1() {
   I2c1_Init();
 }
 
-void Board_SetWatchdogCallback(void (*callback)()) { g_watchdog_callback = callback; }
-void Board_WatchdogStart() { __HAL_TIM_SET_COUNTER(&htim11, 0U); (void)HAL_TIM_Base_Start_IT(&htim11); }
+void Board_SetWatchdogCallback(void (*callback)()) {
+  g_watchdog_callback = callback;
+}
+void Board_WatchdogStart() {
+  __HAL_TIM_SET_COUNTER(&htim11, 0U);
+  (void)HAL_TIM_Base_Start_IT(&htim11);
+}
 void Board_WatchdogStop() { (void)HAL_TIM_Base_Stop_IT(&htim11); }
 
 void Board_BuzzerStart(uint16_t frequency_hz, uint16_t duration_ms) {
-  if (frequency_hz < 20U) return;
+  if (frequency_hz < 20U)
+    return;
   const uint32_t period = std::max<uint32_t>(2U, 1000000U / frequency_hz);
   __HAL_TIM_DISABLE(&htim1);
   __HAL_TIM_SET_AUTORELOAD(&htim1, period - 1U);
@@ -303,7 +429,8 @@ bool HalUartPort::begin(uint32_t baudrate) {
   handle_->Init.HwFlowCtl = UART_HWCONTROL_NONE;
   handle_->Init.OverSampling = UART_OVERSAMPLING_16;
   UartPinsInit(handle_);
-  if (HAL_UART_Init(handle_) != HAL_OK) return false;
+  if (HAL_UART_Init(handle_) != HAL_OK)
+    return false;
   rx_head_ = rx_tail_ = 0U;
   tx_head_ = tx_tail_ = tx_pending_ = 0U;
   tx_busy_ = false;
@@ -327,7 +454,8 @@ void HalUartPort::end() {
   if (handle_->Instance != nullptr && handle_->gState != HAL_UART_STATE_RESET) {
     /* Recovery is a main-context operation and must finish before begin().
      * HAL_UART_Abort_IT() completes asynchronously and can race the following
-     * HAL_UART_Init/Receive_IT, corrupting gState/RxState or tx_busy ownership. */
+     * HAL_UART_Init/Receive_IT, corrupting gState/RxState or tx_busy ownership.
+     */
     (void)HAL_UART_Abort(handle_);
     (void)HAL_UART_DeInit(handle_);
   }
@@ -347,7 +475,8 @@ int HalUartPort::available() const {
 }
 
 int HalUartPort::read() {
-  if (rx_tail_ == rx_head_) return -1;
+  if (rx_tail_ == rx_head_)
+    return -1;
   const uint8_t value = rx_buffer_[rx_tail_];
   rx_tail_ = static_cast<uint16_t>((rx_tail_ + 1U) % kRxSize);
   return value;
@@ -356,8 +485,9 @@ int HalUartPort::read() {
 int HalUartPort::availableForWrite() const {
   const uint16_t head = tx_head_;
   const uint16_t tail = tx_tail_;
-  const uint16_t used = head >= tail ? static_cast<uint16_t>(head - tail)
-                                     : static_cast<uint16_t>(kTxSize - tail + head);
+  const uint16_t used = head >= tail
+                            ? static_cast<uint16_t>(head - tail)
+                            : static_cast<uint16_t>(kTxSize - tail + head);
   return static_cast<int>(kTxSize - used - 1U);
 }
 
@@ -376,7 +506,8 @@ void HalUartPort::discardPendingTx() {
   (void)HAL_UART_AbortTransmit(handle_);
   tx_head_ = tx_tail_ = tx_pending_ = 0U;
   tx_busy_ = false;
-  if (primask == 0U) __enable_irq();
+  if (primask == 0U)
+    __enable_irq();
 }
 
 void HalUartPort::dropQueuedAfterActiveTx() {
@@ -390,21 +521,25 @@ void HalUartPort::dropQueuedAfterActiveTx() {
   } else {
     tx_head_ = tx_tail_;
   }
-  if (primask == 0U) __enable_irq();
+  if (primask == 0U)
+    __enable_irq();
 }
 
 std::size_t HalUartPort::write(const uint8_t *data, std::size_t length) {
-  if (data == nullptr || length == 0U || length >= kTxSize) return 0U;
+  if (data == nullptr || length == 0U || length >= kTxSize)
+    return 0U;
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   const uint16_t head = tx_head_;
   const uint16_t tail = tx_tail_;
-  const uint16_t used = head >= tail ? static_cast<uint16_t>(head - tail)
-                                     : static_cast<uint16_t>(kTxSize - tail + head);
+  const uint16_t used = head >= tail
+                            ? static_cast<uint16_t>(head - tail)
+                            : static_cast<uint16_t>(kTxSize - tail + head);
   const uint16_t free = static_cast<uint16_t>(kTxSize - used - 1U);
   if (free < length) {
     ++tx_dropped_;
-    if (primask == 0U) __enable_irq();
+    if (primask == 0U)
+      __enable_irq();
     return 0U;
   }
   for (std::size_t i = 0U; i < length; ++i) {
@@ -412,8 +547,10 @@ std::size_t HalUartPort::write(const uint8_t *data, std::size_t length) {
     tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
   }
   const uint16_t queued_now = static_cast<uint16_t>(used + length);
-  if (queued_now > max_queue_bytes_) max_queue_bytes_ = queued_now;
-  if (primask == 0U) __enable_irq();
+  if (queued_now > max_queue_bytes_)
+    max_queue_bytes_ = queued_now;
+  if (primask == 0U)
+    __enable_irq();
   (void)service();
   return length;
 }
@@ -434,7 +571,8 @@ bool HalUartPort::service() {
     __HAL_UART_CLEAR_OREFLAG(handle_);
     __HAL_UART_CLEAR_NEFLAG(handle_);
     __HAL_UART_CLEAR_FEFLAG(handle_);
-    const bool restarted = HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) == HAL_OK;
+    const bool restarted =
+        HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) == HAL_OK;
     rx_restart_required_ = !restarted;
     ok = restarted;
   }
@@ -451,7 +589,8 @@ bool HalUartPort::service() {
       tx_pending_ = count;
       tx_busy_ = true;
     }
-    if (primask == 0U) __enable_irq();
+    if (primask == 0U)
+      __enable_irq();
     if (count > 0U) {
       if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
         const uint32_t retry_primask = __get_PRIMASK();
@@ -459,7 +598,8 @@ bool HalUartPort::service() {
         tx_pending_ = 0U;
         tx_busy_ = false;
         ++error_count_;
-        if (retry_primask == 0U) __enable_irq();
+        if (retry_primask == 0U)
+          __enable_irq();
         ok = false;
       } else {
         ++tx_segments_started_;
@@ -479,11 +619,13 @@ void HalUartPort::irqRxComplete() {
   } else {
     ++overflow_count_;
   }
-  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK) rx_restart_required_ = true;
+  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK)
+    rx_restart_required_ = true;
 }
 
 void HalUartPort::irqTxComplete() {
-  if (!tx_busy_) return;
+  if (!tx_busy_)
+    return;
   ++tx_segments_completed_;
   tx_tail_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
   tx_pending_ = 0U;
@@ -495,8 +637,9 @@ void HalUartPort::irqTxComplete() {
    * UI/I2C/GNSS main-loop latency to drain the motor command ring. */
   if (tx_head_ != tx_tail_) {
     const uint16_t tail = tx_tail_;
-    const uint16_t count = tx_head_ > tx_tail_ ? static_cast<uint16_t>(tx_head_ - tx_tail_)
-                                                : static_cast<uint16_t>(kTxSize - tx_tail_);
+    const uint16_t count = tx_head_ > tx_tail_
+                               ? static_cast<uint16_t>(tx_head_ - tx_tail_)
+                               : static_cast<uint16_t>(kTxSize - tx_tail_);
     tx_pending_ = count;
     tx_busy_ = true;
     if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
@@ -514,7 +657,8 @@ void HalUartPort::irqError() {
   __HAL_UART_CLEAR_OREFLAG(handle_);
   __HAL_UART_CLEAR_NEFLAG(handle_);
   __HAL_UART_CLEAR_FEFLAG(handle_);
-  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK) rx_restart_required_ = true;
+  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK)
+    rx_restart_required_ = true;
 }
 
 // HAL_Init() enables the Cortex-M SysTick timebase. The STM32Cube startup file
@@ -530,23 +674,38 @@ extern "C" void USART1_IRQHandler() { HAL_UART_IRQHandler(&huart1); }
 extern "C" void USART2_IRQHandler() { HAL_UART_IRQHandler(&huart2); }
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
 
+// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
+// handle pointer.
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart1) gVescUart.irqRxComplete();
-  else if (huart == &huart2) gGnssUart.irqRxComplete();
+  if (huart == &huart1)
+    gVescUart.irqRxComplete();
+  else if (huart == &huart2)
+    gGnssUart.irqRxComplete();
 }
 
+// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
+// handle pointer.
 extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart1) gVescUart.irqTxComplete();
-  else if (huart == &huart2) gGnssUart.irqTxComplete();
+  if (huart == &huart1)
+    gVescUart.irqTxComplete();
+  else if (huart == &huart2)
+    gGnssUart.irqTxComplete();
 }
 
+// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
+// handle pointer.
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart1) gVescUart.irqError();
-  else if (huart == &huart2) gGnssUart.irqError();
+  if (huart == &huart1)
+    gVescUart.irqError();
+  else if (huart == &huart2)
+    gGnssUart.irqError();
 }
 
+// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
+// handle pointer.
 extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-  if (htim == &htim11 && g_watchdog_callback != nullptr) g_watchdog_callback();
+  if (htim == &htim11 && g_watchdog_callback != nullptr)
+    g_watchdog_callback();
 }
 
 extern "C" void Error_Handler() { FatalError(); }

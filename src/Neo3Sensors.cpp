@@ -20,6 +20,20 @@ inline void ubxChecksumAdd(uint8_t byte, uint8_t &a, uint8_t &b) {
 }
 
 
+constexpr uint16_t SENSOR_PROTOCOL_VERSION = 2U;
+
+uint16_t sensorCrc16Ccitt(const char *data, std::size_t length) {
+  uint16_t crc = 0xFFFFU;
+  for (std::size_t i = 0; i < length; ++i) {
+    crc ^= static_cast<uint16_t>(static_cast<uint8_t>(data[i])) << 8U;
+    for (uint8_t bit = 0; bit < 8U; ++bit) {
+      crc = (crc & 0x8000U) != 0U ? static_cast<uint16_t>((crc << 1U) ^ 0x1021U)
+                                  : static_cast<uint16_t>(crc << 1U);
+    }
+  }
+  return crc;
+}
+
 // Native fixed-capacity formatter. It never allocates and emits each sensor record
 // as one atomic USB CDC write, keeping VESC traffic deterministic.
 class CdcLineBuffer {
@@ -47,6 +61,8 @@ class CdcLineBuffer {
     if (gUsb.availableForWrite() < static_cast<int>(length_)) return false;
     return gUsb.write(reinterpret_cast<const uint8_t *>(buffer_), length_) == length_;
   }
+  const char *data() const { return buffer_; }
+  std::size_t size() const { return length_; }
  private:
   void endLine() { print('\r'); print('\n'); }
   void appendFloat(double number, int digits) {
@@ -354,7 +370,13 @@ void Neo3Sensors::publishPvt() {
   out.print(pvt_.pdop, 2); out.print(',');
   out.print(pvt_.rate_hz, 2); out.print(',');
   out.print(pvt_.flags2); out.print(',');
-  out.println(pvt_.flags3);
+  out.print(pvt_.flags3);
+  // Protocol v2 trailer protects the complete legacy numeric payload. Sequence
+  // remains field 0 so host can detect drops/duplicates independently of CRC.
+  constexpr std::size_t prefix_len = sizeof("SENS:GNSS:") - 1U;
+  const uint16_t crc = sensorCrc16Ccitt(out.data() + prefix_len, out.size() - prefix_len);
+  out.print(','); out.print(static_cast<unsigned int>(SENSOR_PROTOCOL_VERSION)); out.print(',');
+  out.println(static_cast<unsigned int>(crc));
   (void)out.flushToUsb();
 }
 
@@ -476,7 +498,11 @@ void Neo3Sensors::publishNmeaFallback() {
   out.print(nmea_.altitude_m, 3); out.print(',');
   out.print(nmea_.hdop, 2); out.print(',');
   out.print(rmc_fresh ? nmea_.speed_mps : -1.0f, 4); out.print(',');
-  out.println(rmc_fresh ? nmea_.course_deg_ned : -1.0f, 3);
+  out.print(rmc_fresh ? nmea_.course_deg_ned : -1.0f, 3);
+  constexpr std::size_t prefix_len = sizeof("SENS:GNSSF:") - 1U;
+  const uint16_t crc = sensorCrc16Ccitt(out.data() + prefix_len, out.size() - prefix_len);
+  out.print(','); out.print(static_cast<unsigned int>(SENSOR_PROTOCOL_VERSION)); out.print(',');
+  out.println(static_cast<unsigned int>(crc));
   (void)out.flushToUsb();
 }
 

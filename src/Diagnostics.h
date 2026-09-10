@@ -10,6 +10,8 @@ struct HmiDiagnostics {
   uint32_t hostCommands{0};
   uint32_t unknownCommands{0};
   uint32_t overlongCommands{0};
+  uint32_t deferredCommandDrops{0};
+  uint32_t deferredCommandPeak{0};
   uint32_t uiFrames{0};
   uint32_t fullUiFrames{0};
   uint32_t dirtyUiFrames{0};
@@ -17,6 +19,11 @@ struct HmiDiagnostics {
   uint32_t uiDrawLastMs{0};
   uint32_t uiDrawMaxMs{0};
   uint32_t maxServiceGapMs{0};
+  uint32_t serviceGapLifetimeMaxMs{0};
+  uint32_t serviceGapP95Ms{0};
+  uint32_t serviceGapP99Ms{0};
+  uint32_t stackHeadroomBytes{0};
+  uint32_t minStackHeadroomBytes{0};
   uint32_t displayBytesLastFrame{0};
   uint32_t displayBytesMaxFrame{0};
   uint32_t spiTransactions{0};
@@ -25,6 +32,9 @@ struct HmiDiagnostics {
   uint32_t spiHalErrorCount{0};
   uint32_t spiRecoveryCount{0};
   uint32_t spiBusConflictCount{0};
+  uint32_t tftWriteClockHz{0};
+  bool tftFastWriteValidated{false};
+  bool tftUltraFastWriteValidated{false};
   uint32_t touchReadCount{0};
   uint32_t touchRejectFastCount{0};
   uint32_t lastHostCommandMs{0};
