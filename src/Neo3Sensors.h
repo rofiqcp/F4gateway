@@ -1,3 +1,4 @@
+#ifdef NEO3
 #pragma once
 
 #include "BoardSupport.h"
@@ -190,3 +191,5 @@ private:
   bool last_ready_{false};
   uint32_t last_hw_publish_ms_{0};
 };
+
+#endif // NEO3

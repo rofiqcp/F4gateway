@@ -32,12 +32,14 @@ static void fatal_reset(void) { NVIC_SystemReset(); while (1) {} }
 
 static void system_clock_config(void) {
   RCC_OscInitTypeDef osc = {0};
-  osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  osc.HSIState = RCC_HSI_ON;
-  osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  /* Use the board's proven 25 MHz HSE so the recovery CDC also gets an
+   * accurate 48 MHz PLLQ clock. Keep bootloader and application clock trees
+   * identical to avoid USB behavior changing across recovery transitions. */
+  osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  osc.HSEState = RCC_HSE_ON;
   osc.PLL.PLLState = RCC_PLL_ON;
-  osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  osc.PLL.PLLM = 8U; osc.PLL.PLLN = 96U; osc.PLL.PLLP = RCC_PLLP_DIV2; osc.PLL.PLLQ = 4U;
+  osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  osc.PLL.PLLM = 25U; osc.PLL.PLLN = 192U; osc.PLL.PLLP = RCC_PLLP_DIV2; osc.PLL.PLLQ = 4U;
   if (HAL_RCC_OscConfig(&osc) != HAL_OK) fatal_reset();
   RCC_ClkInitTypeDef clk = {0};
   clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;

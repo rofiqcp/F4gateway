@@ -1,3 +1,4 @@
+#ifdef NEO3
 #include "Neo3Sensors.h"
 
 #include <algorithm>
@@ -853,3 +854,5 @@ float Neo3Sensors::normalize360(float deg) {
   while (deg < 0.0f) deg += 360.0f;
   return deg;
 }
+
+#endif // NEO3

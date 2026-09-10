@@ -57,6 +57,14 @@ struct HmiDiagnostics {
   uint32_t vescFrameErrors{0};
   uint32_t vescRecoveryCount{0};
   uint32_t vescLastFrameAgeMs{0xFFFFFFFFUL};
+  uint32_t canSpiErrors{0};
+  uint32_t canRxFrames{0};
+  uint32_t canTransfers{0};
+  uint32_t canDecodeErrors{0};
+  uint32_t canRecoveries{0};
+  uint32_t canOverflows{0};
+  uint32_t canLastFrameAgeMs{0xFFFFFFFFUL};
+  uint8_t canOscillatorMhz{0};
 
   bool tftOk{false};
   bool displayReady{false};
@@ -64,6 +72,7 @@ struct HmiDiagnostics {
   bool vescUartOk{false};
   bool gnssUartOk{false};
   bool magOk{false};
+  bool canOk{false};
   bool pb6VescTx{false};
   bool pb7VescRx{false};
   bool pa2GnssTx{false};

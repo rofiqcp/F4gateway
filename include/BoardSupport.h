@@ -11,6 +11,20 @@ extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim11;
 
+enum class BoardSpiOwner : uint8_t {
+  NONE = 0U,
+  HMI_TFT,
+  HMI_TOUCH,
+  NEO3PRO_MCP2515
+};
+
+bool Board_SpiAcquire(BoardSpiOwner owner, uint32_t prescaler);
+void Board_SpiRelease(BoardSpiOwner owner);
+void Board_SpiDeselectAll();
+BoardSpiOwner Board_SpiOwner();
+uint32_t Board_SpiContentionCount();
+uint32_t Board_SpiRecoveryCount();
+
 void Board_Init();
 void Board_Service();
 uint32_t Board_MaxServiceGapMs();

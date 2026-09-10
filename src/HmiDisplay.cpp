@@ -89,18 +89,19 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
     ++spi_bus_conflict_count_;
     return false;
   }
+  const BoardSpiOwner board_owner = owner == SpiOwner::TOUCH
+      ? BoardSpiOwner::HMI_TOUCH : BoardSpiOwner::HMI_TFT;
   for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
     TftCs(true);
     TouchCs(true);
-    if (!waitSpiIdle()) {
-      if (!recoverSpi())
-        return false;
-      continue;
+    // Bus ownership is shared with MCP2515 in NEO3PRO builds. Acquiring it
+    // atomically deasserts every slave CS and restores SPI mode 0 + requested
+    // clock before this HMI slave is selected.
+    if (!Board_SpiAcquire(board_owner, prescaler)) {
+      ++spi_bus_conflict_count_;
+      return false;
     }
     drainSpiRx();
-    CLEAR_BIT(SPI1->CR1, SPI_CR1_SPE);
-    MODIFY_REG(SPI1->CR1, SPI_CR1_BR, prescaler);
-    SET_BIT(SPI1->CR1, SPI_CR1_SPE);
     spi_owner_ = owner;
     if (owner == SpiOwner::TOUCH)
       TouchCs(false);
@@ -117,11 +118,15 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
 bool HmiDisplay::endTransaction() {
   if (spi_owner_ == SpiOwner::IDLE)
     return true;
+  const SpiOwner finishing_owner = spi_owner_;
+  const BoardSpiOwner board_owner = finishing_owner == SpiOwner::TOUCH
+      ? BoardSpiOwner::HMI_TOUCH : BoardSpiOwner::HMI_TFT;
   const bool idle = waitSpiIdle();
   TftCs(true);
   TouchCs(true);
   drainSpiRx();
   spi_owner_ = SpiOwner::IDLE;
+  Board_SpiRelease(board_owner);
   if (!idle)
     return recoverSpi();
   return true;

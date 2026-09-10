@@ -34,6 +34,9 @@ bool g_buzzer_active = false;
 #ifdef HMI_TEST_HOOKS
 bool g_test_spi_init_fail_once = false;
 #endif
+BoardSpiOwner g_spi_owner = BoardSpiOwner::NONE;
+uint32_t g_spi_contention_count = 0U;
+uint32_t g_spi_recovery_count = 0U;
 
 [[noreturn]] void FatalError() {
   __disable_irq();
@@ -44,13 +47,16 @@ bool g_test_spi_init_fail_once = false;
 
 void SystemClock_Config() {
   RCC_OscInitTypeDef osc{};
-  osc.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  osc.HSIState = RCC_HSI_ON;
-  osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  // BlackPill F411CE V2.0 has a stable 25 MHz HSE. Use it as the PLL
+  // reference so PLLQ is an accurate 48 MHz USB clock. The previous HSI-based
+  // 48 MHz clock could be outside USB FS tolerance and cause intermittent or
+  // missing CDC enumeration. This matches the previously proven Arduino build.
+  osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  osc.HSEState = RCC_HSE_ON;
   osc.PLL.PLLState = RCC_PLL_ON;
-  osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  osc.PLL.PLLM = 8U;
-  osc.PLL.PLLN = 96U;
+  osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  osc.PLL.PLLM = 25U;
+  osc.PLL.PLLN = 192U;
   osc.PLL.PLLP = RCC_PLLP_DIV2;
   osc.PLL.PLLQ = 4U;
   if (HAL_RCC_OscConfig(&osc) != HAL_OK)
@@ -87,6 +93,23 @@ void Gpio_Init() {
 
   gpio.Pin = GPIO_PIN_4;
   HAL_GPIO_Init(GPIOA, &gpio);
+
+#ifdef NEO3PRO
+  // MCP2515 shares SPI1 with ILI9341/XPT2046. PB6/PB7 are the former
+  // USART1 VESC pins and are intentionally repurposed now that ESC is direct
+  // to the ROS esc package: PB6=CS (active-low), PB7=INT (active-low).
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
+  gpio.Pin = GPIO_PIN_6;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(GPIOB, &gpio);
+  gpio.Pin = GPIO_PIN_7;
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_PULLUP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &gpio);
+#endif
 
   gpio.Pin = GPIO_PIN_13;
   gpio.Mode = GPIO_MODE_OUTPUT_OD;
@@ -240,8 +263,11 @@ void Board_Init() {
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootOrFatal();
+#ifdef NEO3
   I2c1_Init();
+#endif
   Timers_Init();
+  Board_SpiDeselectAll();
   if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CYCCNT = 0U;
@@ -273,8 +299,9 @@ void Board_Service() {
     }
   }
   g_board_last_service_ms = now;
-  (void)gVescUart.service();
+#ifdef NEO3
   (void)gGnssUart.service();
+#endif
   if (g_buzzer_active &&
       static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
     Board_BuzzerStop();
@@ -363,10 +390,71 @@ void Board_DelayUs(uint32_t microseconds) {
 void Board_TestInjectSpiInitFailureOnce() { g_test_spi_init_fail_once = true; }
 #endif
 
+void Board_SpiDeselectAll() {
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);  // TFT CS
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);  // XPT2046 CS
+#ifdef NEO3PRO
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);  // MCP2515 CS
+#endif
+}
+
+BoardSpiOwner Board_SpiOwner() { return g_spi_owner; }
+uint32_t Board_SpiContentionCount() { return g_spi_contention_count; }
+uint32_t Board_SpiRecoveryCount() { return g_spi_recovery_count; }
+
+bool Board_SpiAcquire(BoardSpiOwner owner, uint32_t prescaler) {
+  if (owner == BoardSpiOwner::NONE)
+    return false;
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (g_spi_owner != BoardSpiOwner::NONE) {
+    ++g_spi_contention_count;
+    if (primask == 0U) __enable_irq();
+    return false;
+  }
+  g_spi_owner = owner;
+  if (primask == 0U) __enable_irq();
+
+  Board_SpiDeselectAll();
+  const uint32_t cycles_per_us = std::max<uint32_t>(1U, HAL_RCC_GetHCLKFreq() / 1000000U);
+  const uint32_t start = DWT->CYCCNT;
+  while ((SPI1->SR & SPI_SR_BSY) != 0U) {
+    if (static_cast<uint32_t>(DWT->CYCCNT - start) >= 2500U * cycles_per_us) {
+      Board_SpiRelease(owner);
+      return false;
+    }
+  }
+  while ((SPI1->SR & SPI_SR_RXNE) != 0U)
+    (void)*reinterpret_cast<volatile uint8_t *>(&SPI1->DR);
+  if ((SPI1->SR & SPI_SR_OVR) != 0U) {
+    (void)SPI1->DR;
+    (void)SPI1->SR;
+  }
+  CLEAR_BIT(SPI1->CR1, SPI_CR1_SPE);
+  // ILI9341, XPT2046 and MCP2515 all use SPI mode 0. Reassert mode on every
+  // owner handoff so a recovery or future peripheral cannot leak CPOL/CPHA.
+  CLEAR_BIT(SPI1->CR1, SPI_CR1_CPOL | SPI_CR1_CPHA);
+  MODIFY_REG(SPI1->CR1, SPI_CR1_BR, prescaler);
+  SET_BIT(SPI1->CR1, SPI_CR1_SPE);
+  return true;
+}
+
+void Board_SpiRelease(BoardSpiOwner owner) {
+  Board_SpiDeselectAll();
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (g_spi_owner == owner || owner == BoardSpiOwner::NONE)
+    g_spi_owner = BoardSpiOwner::NONE;
+  if (primask == 0U) __enable_irq();
+}
+
 bool Board_ReinitSpi1() {
-  /* Runtime display recovery must never enter the boot-fatal path. A failed
-   * SPI reconfiguration is reported to HmiDisplay, which degrades the display
-   * while USART1/safety/watchdog interrupts remain alive. */
+  /* A peripheral-level recovery is a bus-wide transaction. First put every CS
+   * inactive and clear the software owner so TFT/touch/MCP can recover from a
+   * partially completed transfer without two slaves driving MISO together. */
+  Board_SpiDeselectAll();
+  g_spi_owner = BoardSpiOwner::NONE;
+  ++g_spi_recovery_count;
   (void)HAL_SPI_DeInit(&hspi1);
   __HAL_RCC_SPI1_FORCE_RESET();
   __NOP();

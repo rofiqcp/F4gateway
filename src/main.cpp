@@ -17,7 +17,16 @@
 #include "Config.h"
 #include "Diagnostics.h"
 #include "Icons.h"
+#if defined(NEO3) && defined(NEO3PRO)
+#error "Select exactly one GNSS profile: NEO3 or NEO3PRO"
+#elif !defined(NEO3) && !defined(NEO3PRO)
+#error "GNSS profile missing: build with NEO3 or NEO3PRO"
+#endif
+#ifdef NEO3PRO
+#include "Neo3ProSensors.h"
+#else
 #include "Neo3Sensors.h"
+#endif
 #include "SplashScreen.h"
 #include "Telemetry.h"
 #include "TelemetryProtocol.h"
@@ -25,7 +34,12 @@
 #include "TouchButtons.h"
 #include "UiMenu.h"
 #include "UiShell.h"
+#ifndef F4_ESC_GATEWAY
+#define F4_ESC_GATEWAY 0
+#endif
+#if F4_ESC_GATEWAY
 #include "VescGateway.h"
+#endif
 
 #ifndef HMI_LEGACY_UART
 #define HMI_LEGACY_UART 0
@@ -34,8 +48,28 @@
 HmiDisplay tft;
 VehicleTelemetry gTelemetry = defaultTelemetry();
 UiState gUi;
+#ifdef NEO3PRO
+Neo3ProSensors gNeo3;
+#else
 Neo3Sensors gNeo3;
+#endif
+
+#if F4_ESC_GATEWAY
 VescGateway gVesc;
+#else
+struct DisabledVescGateway {
+  void begin() {}
+  void poll() {}
+  void setSafetyStop(bool) {}
+  bool maintenanceMode() const { return false; }
+  bool handleHostCommand(const char *) { return false; }
+  bool uartOk() const { return false; }
+  uint32_t frameErrors() const { return 0U; }
+  uint32_t recoveryCount() const { return 0U; }
+  uint32_t lastValidFrameAgeMs(uint32_t) const { return 0xFFFFFFFFUL; }
+};
+DisabledVescGateway gVesc;
+#endif
 HmiDiagnostics gDiagnostics{};
 
 static volatile uint32_t gMainLoopHeartbeatMs = 0U;
@@ -1139,7 +1173,7 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.spiTimeoutCount = tft.spiTimeoutCount();
   gDiagnostics.spiHalErrorCount = tft.spiHalErrorCount();
   gDiagnostics.spiRecoveryCount = tft.spiRecoveryCount();
-  gDiagnostics.spiBusConflictCount = tft.spiBusConflictCount();
+  gDiagnostics.spiBusConflictCount = tft.spiBusConflictCount() + Board_SpiContentionCount();
   gDiagnostics.tftWriteClockHz = tft.writeClockHz();
   gDiagnostics.tftFastWriteValidated = tft.fastWriteValidated();
   gDiagnostics.tftUltraFastWriteValidated = tft.ultraFastWriteValidated();
@@ -1161,19 +1195,54 @@ static void sampleDiagnostics(uint32_t now) {
       gTelemetry.rosConnected ? static_cast<uint32_t>(now - lastRosHeartbeatMs)
                               : 0xFFFFFFFFUL;
 
-  gDiagnostics.vescUartOk = gVesc.uartOk();
   gDiagnostics.gnssUartOk = gNeo3.gnssUartOk();
   gDiagnostics.magOk = gNeo3.magOk();
+#if F4_ESC_GATEWAY
+  gDiagnostics.vescUartOk = gVesc.uartOk();
   gDiagnostics.vescUartErrors = gVescUart.errorCount();
   gDiagnostics.vescUartOverflow = gVescUart.overflowCount();
   gDiagnostics.vescUartTxDropped = gVescUart.txDropped();
+  gDiagnostics.vescFrameErrors = gVesc.frameErrors();
+  gDiagnostics.vescRecoveryCount = gVesc.recoveryCount();
+  gDiagnostics.vescLastFrameAgeMs = gVesc.lastValidFrameAgeMs(now);
+#else
+  gDiagnostics.vescUartOk = false;
+  gDiagnostics.vescUartErrors = 0U;
+  gDiagnostics.vescUartOverflow = 0U;
+  gDiagnostics.vescUartTxDropped = 0U;
+  gDiagnostics.vescFrameErrors = 0U;
+  gDiagnostics.vescRecoveryCount = 0U;
+  gDiagnostics.vescLastFrameAgeMs = 0xFFFFFFFFUL;
+#endif
+#ifdef NEO3PRO
+  gDiagnostics.gnssUartErrors = 0U;
+  gDiagnostics.gnssUartOverflow = 0U;
+  gDiagnostics.gnssUartTxDropped = 0U;
+  gDiagnostics.magErrors = gNeo3.canDecodeErrors();
+  gDiagnostics.canOk = gNeo3.canOk();
+  gDiagnostics.canSpiErrors = gNeo3.canSpiErrors();
+  gDiagnostics.canRxFrames = gNeo3.canRxFrames();
+  gDiagnostics.canTransfers = gNeo3.canTransfers();
+  gDiagnostics.canDecodeErrors = gNeo3.canDecodeErrors();
+  gDiagnostics.canRecoveries = gNeo3.canRecoveries();
+  gDiagnostics.canOverflows = gNeo3.canOverflows();
+  gDiagnostics.canOscillatorMhz = gNeo3.canOscillatorMhz();
+  gDiagnostics.canLastFrameAgeMs = gNeo3.lastCanFrameAgeMs(now);
+#else
   gDiagnostics.gnssUartErrors = gGnssUart.errorCount();
   gDiagnostics.gnssUartOverflow = gGnssUart.overflowCount();
   gDiagnostics.gnssUartTxDropped = gGnssUart.txDropped();
   gDiagnostics.magErrors = gNeo3.magErrorCount();
-  gDiagnostics.vescFrameErrors = gVesc.frameErrors();
-  gDiagnostics.vescRecoveryCount = gVesc.recoveryCount();
-  gDiagnostics.vescLastFrameAgeMs = gVesc.lastValidFrameAgeMs(now);
+  gDiagnostics.canOk = false;
+  gDiagnostics.canSpiErrors = 0U;
+  gDiagnostics.canRxFrames = 0U;
+  gDiagnostics.canTransfers = 0U;
+  gDiagnostics.canDecodeErrors = 0U;
+  gDiagnostics.canRecoveries = 0U;
+  gDiagnostics.canOverflows = 0U;
+  gDiagnostics.canOscillatorMhz = 0U;
+  gDiagnostics.canLastFrameAgeMs = 0xFFFFFFFFUL;
+#endif
 
   gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_6);
   gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_7);
@@ -1270,7 +1339,11 @@ static void handleSerialCommand(char *command) {
 
   // Gateway hardware frame selalu diprioritaskan dan tidak menyentuh UI parser.
   if (!strncmp(command, "VESC:", 5)) {
+#if F4_ESC_GATEWAY
     (void)gVesc.handleHostCommand(command);
+#else
+    (void)gUsb.writeLineCritical("ERR:VESC:DIRECT_ESC_ONLY", 120U);
+#endif
     return;
   }
   if (!strncmp(command, "NEO:", 4)) {
@@ -1964,12 +2037,18 @@ int main() {
   Board_SetRealtimeServiceCallback([]() {
     gNeo3.pollSafetyIo();
     gVesc.setSafetyStop(gNeo3.safetyPressed());
-    // Keep motor/sensor transport live during TFT bursts. UI/config commands
-    // are queued by handleSerialCommand() while this realtime context is active
-    // and are applied only by the outer main loop.
+    // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
+    // deliberately NOT polled here because the display can own the shared SPI1
+    // bus in this callback context.
     gRealtimeParserActive = true;
     pollSerialGui(512U);
     gRealtimeParserActive = false;
+#ifdef NEO3PRO
+    // HMI display writes yield here between bounded SPI chunks/transactions.
+    // Drain MCP2515 only when SPI1 is free; the driver never resets/probes the
+    // shared bus from this realtime path.
+    gNeo3.pollRealtime();
+#endif
     gVesc.poll();
   });
   (void)initDisplayBlockingAtBoot();

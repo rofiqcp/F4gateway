@@ -1296,10 +1296,17 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
     return;
   }
   if (id == UiMenuId::SYSTEM_PINS_IO) {
-    snprintf(a,sizeof(a),"%c/%c %s",gDiagnostics.pb6VescTx?'H':'L',gDiagnostics.pb7VescRx?'H':'L',gDiagnostics.vescUartOk?"OK":"ERR");drawMetricRow(48,"PB6/PB7 VESC",a,gDiagnostics.vescUartOk?C_READY:C_WARNING);
+#ifdef NEO3PRO
+    snprintf(a,sizeof(a),"CS:%c INT:%c %s",gDiagnostics.pb6VescTx?'H':'L',gDiagnostics.pb7VescRx?'H':'L',gDiagnostics.canOk?"OK":"ERR");drawMetricRow(48,"PB6/PB7 MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
+    snprintf(a,sizeof(a),"%u MHz / 1 Mbps",(unsigned)gDiagnostics.canOscillatorMhz);drawMetricRow(77,"CAN clock / bitrate",a,gDiagnostics.canOk?C_READY:C_WARNING);
+    snprintf(a,sizeof(a),"RX:%lu D:%lu",(unsigned long)gDiagnostics.canRxFrames,(unsigned long)gDiagnostics.canTransfers);drawMetricRow(106,"DroneCAN raw / msg",a,gDiagnostics.canRxFrames?C_READY:C_WARNING);
+    drawMetricRow(135,"F4 <-> ESC","DISCONNECTED",C_READY);
+#else
+    drawMetricRow(48,"PB6/PB7","FREE (NO ESC)",C_READY);
     snprintf(a,sizeof(a),"%c/%c %s",gDiagnostics.pa2GnssTx?'H':'L',gDiagnostics.pa3GnssRx?'H':'L',gDiagnostics.gnssUartOk?"OK":"ERR");drawMetricRow(77,"PA2/PA3 GNSS",a,gDiagnostics.gnssUartOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"%c/%c %s",gDiagnostics.pb8I2cScl?'H':'L',gDiagnostics.pb9I2cSda?'H':'L',gDiagnostics.magOk?"MAG OK":"MAG ERR");drawMetricRow(106,"PB8/PB9 I2C1",a,gDiagnostics.magOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"%s/%c/%c",gDiagnostics.pb12Safety?"CLR":"PRESS",gDiagnostics.pb13SafetyLed?'H':'L',gDiagnostics.pa8Buzzer?'H':'L');drawMetricRow(135,"PB12/13 + PA8",a,gDiagnostics.pb12Safety?C_READY:C_FAULT);
+#endif
     return;
   }
   if (id == UiMenuId::SYSTEM_PINS_DISPLAY) {
@@ -1311,23 +1318,32 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
   }
   if (id == UiMenuId::SYSTEM_LINKS) {
     formatAgeMs(gDiagnostics.rosHeartbeatAgeMs,a,sizeof(a));drawMetricRow(48,"ROS heartbeat",a,d.rosConnected?ageColor(gDiagnostics.rosHeartbeatAgeMs):C_FAULT);
-    char b[20];formatAgeMs(d.escAgeMs,a,sizeof(a));formatAgeMs(gDiagnostics.vescLastFrameAgeMs,b,sizeof(b));char both[48];snprintf(both,sizeof(b),"%s / %s",a,b);drawMetricRow(77,"ESC host / F103",both,(ageColor(d.escAgeMs)==C_READY&&ageColor(gDiagnostics.vescLastFrameAgeMs)==C_READY)?C_READY:C_WARNING);
+    formatAgeMs(d.escAgeMs,a,sizeof(a));drawMetricRow(77,"ESC direct host",a,ageColor(d.escAgeMs));
     formatAgeMs(d.perceptionAgeMs,a,sizeof(a));drawMetricRow(106,"Perception stream",a,ageColor(d.perceptionAgeMs));
     formatAgeMs(d.navigationAgeMs,a,sizeof(a));drawMetricRow(135,"Navigation stream",a,ageColor(d.navigationAgeMs));
     return;
   }
   if (id == UiMenuId::SYSTEM_ERRORS) {
-    snprintf(a,sizeof(a),"E:%lu O:%lu D:%lu",(unsigned long)gDiagnostics.vescUartErrors,(unsigned long)gDiagnostics.vescUartOverflow,(unsigned long)gDiagnostics.vescUartTxDropped);drawMetricRow(48,"VESC UART",a,(gDiagnostics.vescUartErrors||gDiagnostics.vescUartOverflow||gDiagnostics.vescUartTxDropped)?C_WARNING:C_READY);
-    snprintf(a,sizeof(a),"E:%lu O:%lu M:%lu",(unsigned long)gDiagnostics.gnssUartErrors,(unsigned long)gDiagnostics.gnssUartOverflow,(unsigned long)gDiagnostics.magErrors);drawMetricRow(77,"GNSS / MAG",a,(gDiagnostics.gnssUartErrors||gDiagnostics.gnssUartOverflow||gDiagnostics.magErrors)?C_WARNING:C_READY);
-    snprintf(a,sizeof(a),"T:%lu H:%lu R:%lu B:%lu",(unsigned long)gDiagnostics.spiTimeoutCount,(unsigned long)gDiagnostics.spiHalErrorCount,(unsigned long)gDiagnostics.spiRecoveryCount,(unsigned long)gDiagnostics.spiBusConflictCount);drawMetricRow(106,"SPI fault / recovery",a,(gDiagnostics.spiTimeoutCount||gDiagnostics.spiHalErrorCount||gDiagnostics.spiBusConflictCount)?C_WARNING:C_READY);
-    snprintf(a,sizeof(a),"VF:%lu R:%lu U:%lu O:%lu",(unsigned long)gDiagnostics.vescFrameErrors,(unsigned long)gDiagnostics.vescRecoveryCount,(unsigned long)gDiagnostics.unknownCommands,(unsigned long)gDiagnostics.overlongCommands);drawMetricRow(135,"VESC frame / host",a,(gDiagnostics.vescFrameErrors||gDiagnostics.unknownCommands||gDiagnostics.overlongCommands)?C_WARNING:C_READY);
+#ifdef NEO3PRO
+    snprintf(a,sizeof(a),"SPI:%lu D:%lu O:%lu",(unsigned long)gDiagnostics.canSpiErrors,(unsigned long)gDiagnostics.canDecodeErrors,(unsigned long)gDiagnostics.canOverflows);drawMetricRow(48,"MCP/CAN errors",a,(gDiagnostics.canSpiErrors||gDiagnostics.canDecodeErrors||gDiagnostics.canOverflows)?C_WARNING:C_READY);
+    snprintf(a,sizeof(a),"REC:%lu AGE:%lums",(unsigned long)gDiagnostics.canRecoveries,(unsigned long)gDiagnostics.canLastFrameAgeMs);drawMetricRow(77,"DroneCAN recovery",a,gDiagnostics.canOk?C_READY:C_WARNING);
+#else
+    snprintf(a,sizeof(a),"E:%lu O:%lu M:%lu",(unsigned long)gDiagnostics.gnssUartErrors,(unsigned long)gDiagnostics.gnssUartOverflow,(unsigned long)gDiagnostics.magErrors);drawMetricRow(48,"GNSS / MAG",a,(gDiagnostics.gnssUartErrors||gDiagnostics.gnssUartOverflow||gDiagnostics.magErrors)?C_WARNING:C_READY);
+    drawMetricRow(77,"ESC F4 bridge","DISABLED",C_READY);
+#endif
+    snprintf(a,sizeof(a),"T:%lu H:%lu R:%lu B:%lu",(unsigned long)gDiagnostics.spiTimeoutCount,(unsigned long)gDiagnostics.spiHalErrorCount,(unsigned long)gDiagnostics.spiRecoveryCount,(unsigned long)gDiagnostics.spiBusConflictCount);drawMetricRow(106,"Shared SPI",a,(gDiagnostics.spiTimeoutCount||gDiagnostics.spiHalErrorCount||gDiagnostics.spiBusConflictCount)?C_WARNING:C_READY);
+    snprintf(a,sizeof(a),"U:%lu O:%lu",(unsigned long)gDiagnostics.unknownCommands,(unsigned long)gDiagnostics.overlongCommands);drawMetricRow(135,"Host parser",a,(gDiagnostics.unknownCommands||gDiagnostics.overlongCommands)?C_WARNING:C_READY);
     return;
   }
   if (id == UiMenuId::SYSTEM_SPI_BUS) {
     snprintf(a,sizeof(a),"%lu Hz",(unsigned long)gDiagnostics.tftWriteClockHz);drawMetricRow(48,"TFT SPI clock",a,gDiagnostics.tftFastWriteValidated?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"%lu / %lu",(unsigned long)gDiagnostics.spiTransactions,(unsigned long)gDiagnostics.spiBytesTx);drawMetricRow(77,"Transactions / bytes",a,C_INK);
     snprintf(a,sizeof(a),"TO:%lu HAL:%lu BUS:%lu",(unsigned long)gDiagnostics.spiTimeoutCount,(unsigned long)gDiagnostics.spiHalErrorCount,(unsigned long)gDiagnostics.spiBusConflictCount);drawMetricRow(106,"Errors",a,(gDiagnostics.spiTimeoutCount||gDiagnostics.spiHalErrorCount||gDiagnostics.spiBusConflictCount)?C_WARNING:C_READY);
+#ifdef NEO3PRO
+    snprintf(a,sizeof(a),"MCP:%s RX:%lu",gDiagnostics.canOk?"OK":"ERR",(unsigned long)gDiagnostics.canRxFrames);drawMetricRow(135,"Shared SPI MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
+#else
     snprintf(a,sizeof(a),"REC:%lu F:%u U:%u",(unsigned long)gDiagnostics.spiRecoveryCount,gDiagnostics.tftFastWriteValidated?1U:0U,gDiagnostics.tftUltraFastWriteValidated?1U:0U);drawMetricRow(135,"Recovery / profiles",a,C_ACCENT);
+#endif
     return;
   }
   if (id == UiMenuId::SYSTEM_UART_STATUS) {
@@ -1405,11 +1421,30 @@ inline void drawNavigationLeaf(UiMenuId id, const UiState &ui,
   if (id == UiMenuId::NAV_GNSS) {
     if(view==0U){snprintf(text,sizeof(text),"%s / %u SAT",gpsFixText(d.gpsFix),d.satellites);drawMetricRow(48,"Fix",text,gpsFixColor(d.gpsFix));drawMetricFloat(77,"hAcc",d.haccM,"m",2,d.haccM<2.5F?C_READY:C_WARNING);drawMetricFloat(106,"HDOP",d.hdop,"",2,d.hdop<2.5F?C_READY:C_WARNING);drawMetricRow(135,"GNSS",d.gpsReady?"READY":"OFFLINE",healthColor(d.gpsReady));}
     else if(view==1U){snprintf(text,sizeof(text),"%.7f",d.latitude);drawMetricRow(48,"Latitude",text,C_INK);snprintf(text,sizeof(text),"%.7f",d.longitude);drawMetricRow(77,"Longitude",text,C_INK);drawMetricFloat(106,"Heading",d.headingDeg,"deg",1,C_ACCENT);drawMetricRow(135,"Status",d.gnssStatus,C_INK);}
-    else{drawMetricFloat(48,"GNSS age",d.gnssAgeSec,"s",2,d.gnssAgeSec<0.5F?C_READY:C_WARNING);drawMetricRow(77,"Fix state",gpsFixText(d.gpsFix),gpsFixColor(d.gpsFix));drawMetricRow(106,"Domain",d.navigationFresh?"FRESH":"STALE",d.navigationFresh?C_READY:C_DISABLED);drawMetricRow(135,"Source","NEO3 / F411",C_INK);}return;
+    else {
+      drawMetricFloat(48,"GNSS age",d.gnssAgeSec,"s",2,d.gnssAgeSec<0.5F?C_READY:C_WARNING);
+      drawMetricRow(77,"Fix state",gpsFixText(d.gpsFix),gpsFixColor(d.gpsFix));
+      drawMetricRow(106,"Domain",d.navigationFresh?"FRESH":"STALE",d.navigationFresh?C_READY:C_DISABLED);
+#ifdef NEO3PRO
+      drawMetricRow(135,"Source","NEO3 PRO / DRONECAN",C_INK);
+#else
+      drawMetricRow(135,"Source","NEO3 / F411",C_INK);
+#endif
+    } return;
   }
   if (id == UiMenuId::NAV_IMU_MAG) {
     if(view==0U){drawMetricRow(48,"IMU",d.imuStatus,healthColor(d.imuReady));drawMetricFloat(77,"Gyro Z",d.gyroZRps,"rad/s",2,C_INK);if(d.navx.imuMag.valid)drawMetricFloat(106,"IMU yaw",d.navx.imuYawDeg,"deg",1,C_ACCENT);else drawNaRow(106,"IMU yaw");drawMetricRow(135,"Data",d.navx.imuMag.valid?groupStatus(d.navx.imuMag):(d.navigationFresh?"LEGACY":"STALE"),d.navx.imuMag.valid?menuCardStatusColor(groupStatus(d.navx.imuMag)):(d.navigationFresh?C_WARNING:C_DISABLED));}
-    else if(view==1U){drawMetricRow(48,"IST8310",d.magReady?"READY":"OFFLINE",healthColor(d.magReady));if(d.navx.imuMag.valid)drawMetricFloat(77,"Fused heading",d.navx.fusedHeadingDeg,"deg",1,C_ACCENT);else drawMetricFloat(77,"Fused heading",d.headingDeg,"deg",1,C_ACCENT);drawNaRow(106,"Raw magnetic field");drawMetricRow(135,"Calibration",d.magReady?"AVAILABLE":"REQUIRED",d.magReady?C_READY:C_WARNING);}
+    else if(view==1U) {
+#ifdef NEO3PRO
+      drawMetricRow(48,"RM3100 DroneCAN",d.magReady?"READY":"OFFLINE",healthColor(d.magReady));
+#else
+      drawMetricRow(48,"IST8310",d.magReady?"READY":"OFFLINE",healthColor(d.magReady));
+#endif
+      if(d.navx.imuMag.valid) drawMetricFloat(77,"Fused heading",d.navx.fusedHeadingDeg,"deg",1,C_ACCENT);
+      else drawMetricFloat(77,"Fused heading",d.headingDeg,"deg",1,C_ACCENT);
+      drawNaRow(106,"Raw magnetic field");
+      drawMetricRow(135,"Calibration",d.magReady?"AVAILABLE":"REQUIRED",d.magReady?C_READY:C_WARNING);
+    }
     else{drawMetricRow(48,"GNSS",d.gpsReady?"VALID":"WAIT",healthColor(d.gpsReady));drawMetricRow(77,"IMU",d.imuReady?"VALID":"WAIT",healthColor(d.imuReady));drawMetricRow(106,"MAG",d.magReady?"VALID":"WAIT",healthColor(d.magReady));if(d.navx.imuMag.valid)drawMetricFloat(135,"Heading disagreement",d.navx.headingDisagreementDeg,"deg",1,d.navx.headingDisagreementDeg<15.0F?C_READY:C_WARNING);else drawNaRow(135,"Heading disagreement");}return;
   }
   if (id == UiMenuId::NAV_EKF) {
