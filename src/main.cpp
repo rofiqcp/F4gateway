@@ -162,7 +162,7 @@ static bool serial1RxDiscarding = false;
 static uint32_t gDfuArmDeadlineMs = 0U;
 static constexpr uint32_t kBootRequestMagic = 0x42465544UL; // DFUB
 static constexpr uint32_t kAppCrashMagic = 0x48535243UL;    // CRSH
-static constexpr uint32_t kCrashCounterClearMs = 10000U;
+static constexpr uint32_t kCrashCounterClearMs = 30000U;
 static bool gCrashCounterCleared = false;
 static uint32_t gWatchdogHealthySinceMs = 0U;
 
@@ -177,6 +177,9 @@ static void appWatchdogIsr() {
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
     RTC->BKP1R = kAppCrashMagic;
+    RTC->BKP3R = 0x100U; // application main-loop watchdog
+    RTC->BKP4R = SCB->CFSR;
+    RTC->BKP5R = SCB->HFSR;
     __DSB();
     NVIC_SystemReset();
   }
@@ -1244,14 +1247,26 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.canLastFrameAgeMs = 0xFFFFFFFFUL;
 #endif
 
+#ifdef NEO3PRO
+  // Reuse legacy diagnostic fields to display the compact MCP2515 GPIO block.
+  gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_12); // MCP CS
+  gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_10); // MCP INT
+#else
   gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_6);
   gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_7);
+#endif
   gDiagnostics.pa2GnssTx = pinHigh(GPIOA, GPIO_PIN_2);
   gDiagnostics.pa3GnssRx = pinHigh(GPIOA, GPIO_PIN_3);
   gDiagnostics.pb8I2cScl = pinHigh(GPIOB, GPIO_PIN_8);
   gDiagnostics.pb9I2cSda = pinHigh(GPIOB, GPIO_PIN_9);
+#ifdef NEO3
   gDiagnostics.pb12Safety = pinHigh(GPIOB, GPIO_PIN_12);
   gDiagnostics.pb13SafetyLed = pinHigh(GPIOB, GPIO_PIN_13);
+#else
+  // NEO3PRO reuses PB12/PB13 for MCP2515 SPI2 block; legacy safety diagnostics are not applicable.
+  gDiagnostics.pb12Safety = true;
+  gDiagnostics.pb13SafetyLed = pinHigh(GPIOB, GPIO_PIN_13);
+#endif
   gDiagnostics.pa8Buzzer = pinHigh(GPIOA, GPIO_PIN_8);
   gDiagnostics.pa5SpiSck = pinHigh(GPIOA, GPIO_PIN_5);
   gDiagnostics.pa6SpiMiso = pinHigh(GPIOA, GPIO_PIN_6);
@@ -1359,6 +1374,27 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
+  if (!std::strncmp(command, "HOST:HELLO:", 11)) {
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(command + 11, &end, 10);
+    if (end == command + 11 || (end != nullptr && *end != '\0')) {
+      (void)gUsb.writeLineHighPriority("ERR:HOST:SESSION:ARGS");
+      return;
+    }
+    const uint32_t token = static_cast<uint32_t>(parsed);
+    gUsb.beginHostSession(token);
+    char ack[96];
+    std::snprintf(ack, sizeof(ack), "ACK:HOST:SESSION:%lu:%lu",
+                  static_cast<unsigned long>(token),
+                  static_cast<unsigned long>(gUsb.sessionGeneration()));
+    (void)gUsb.writeLineHighPriority(ack);
+    // Snapshot after the ACK is queued. Sensor streams are latest-value based;
+    // old session history is never replayed to this host.
+    publishPage();
+    publishLinkState();
+    (void)gNeo3.handleHostCommand("NEO:STATUS");
+    return;
+  }
   if (!strcmp(command, "GET:STATE")) {
     publishPage();
     publishLinkState();
@@ -1371,14 +1407,16 @@ static void handleSerialCommand(char *command) {
     return;
   }
   if (!strcmp(command, "USB:STATUS")) {
-    char line[420];
+    char line[620];
     std::snprintf(line, sizeof(line),
                   "USB:STAT:session=%lu,init=%lu,deinit=%lu,abort=%lu,"
                   "tx_complete=%lu,stall_recover=%lu,soft_restart=%lu,"
                   "tx_busy=%u,busy_age_ms=%lu,last_tx_age_ms=%lu,last_rx_age_ms=%lu,"
                   "rx_pkts=%lu,rx_q=%u,tx_q=%u,tx_hi_q=%u,st_tx=%lu,"
+                  "rx_hwm=%u,tx_hwm=%u,tx_hi_hwm=%u,drop_lo=%lu,drop_hi=%lu,kick=%u,"
                   "progress_stall=%lu,recovery_reason=%lu,repair_age_ms=%lu,"
-                  "repair_pending=%u,repair_ep_len=%lu,repair_flags=%u,reset_csr=%08lX",
+                  "repair_pending=%u,repair_ep_len=%lu,repair_flags=%u,"
+                  "host_token=%lu,host_sessions=%lu,low_purges=%lu,purge_pending=%u,reset_csr=%08lX",
                   static_cast<unsigned long>(gUsb.sessionGeneration()),
                   static_cast<unsigned long>(gUsb.classInitCount()),
                   static_cast<unsigned long>(gUsb.classDeInitCount()),
@@ -1395,12 +1433,39 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned>(gUsb.txLowQueueDepth()),
                   static_cast<unsigned>(gUsb.txHighQueueDepth()),
                   static_cast<unsigned long>(gUsb.cdcTxState()),
+                  static_cast<unsigned>(gUsb.rxHighWater()),
+                  static_cast<unsigned>(gUsb.txLowHighWater()),
+                  static_cast<unsigned>(gUsb.txHighHighWater()),
+                  static_cast<unsigned long>(gUsb.txLowDropped()),
+                  static_cast<unsigned long>(gUsb.txHighDropped()),
+                  gUsb.txServicePending() ? 1U : 0U,
                   static_cast<unsigned long>(gUsb.txProgressStallCount()),
                   static_cast<unsigned long>(gUsb.lastRecoveryReason()),
                   static_cast<unsigned long>(gUsb.lastRepairAgeMs()),
                   static_cast<unsigned>(gUsb.lastRepairPending()),
                   static_cast<unsigned long>(gUsb.lastRepairEpLength()),
                   static_cast<unsigned>(gUsb.lastRepairFlags()),
+                  static_cast<unsigned long>(gUsb.hostSessionToken()),
+                  static_cast<unsigned long>(gUsb.hostSessionCount()),
+                  static_cast<unsigned long>(gUsb.lowSessionPurgeCount()),
+                  gUsb.lowSessionPurgePending() ? 1U : 0U,
+                  static_cast<unsigned long>(gResetCauseFlags));
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!strcmp(command, "FAULT:STATUS")) {
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+    char line[260];
+    std::snprintf(line, sizeof(line),
+                  "FAULT:STAT:reason=%08lX:cfsr=%08lX:hfsr=%08lX:pc=%08lX:lr=%08lX:mmfar=%08lX:bfar=%08lX:reset=%08lX",
+                  static_cast<unsigned long>(RTC->BKP3R),
+                  static_cast<unsigned long>(RTC->BKP4R),
+                  static_cast<unsigned long>(RTC->BKP5R),
+                  static_cast<unsigned long>(RTC->BKP6R),
+                  static_cast<unsigned long>(RTC->BKP7R),
+                  static_cast<unsigned long>(RTC->BKP8R),
+                  static_cast<unsigned long>(RTC->BKP9R),
                   static_cast<unsigned long>(gResetCauseFlags));
     (void)gUsb.writeLineCritical(line, 120U);
     return;
@@ -1430,6 +1495,24 @@ static void handleSerialCommand(char *command) {
         line, sizeof(line), "TFT:ID:%08lX:MODE=%02X:MADCTL=%02X:PIXFMT=%02X:%s",
         static_cast<unsigned long>(gTftControllerId), gTftPowerMode, gTftMadctl,
         gTftPixelFormat, gDiagnostics.tftOk ? "OK" : "FAULT");
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!strcmp(command, "TOUCH:STATUS")) {
+    char line[190];
+    sampleDiagnostics(HAL_GetTick());
+    std::snprintf(line, sizeof(line),
+                  "TOUCH:STATUS:READ=%lu:REJECT=%lu:Z=%u:RAW=%u,%u:XY=%u,%u:CS=%u:BUS=%lu:PAGE=%s",
+                  static_cast<unsigned long>(gDiagnostics.touchReadCount),
+                  static_cast<unsigned long>(gDiagnostics.touchRejectFastCount),
+                  static_cast<unsigned>(tft.touchCurrentZ()),
+                  static_cast<unsigned>(tft.touchLastRawX()),
+                  static_cast<unsigned>(tft.touchLastRawY()),
+                  static_cast<unsigned>(tft.touchLastX()),
+                  static_cast<unsigned>(tft.touchLastY()),
+                  gDiagnostics.pa4TouchCs ? 1U : 0U,
+                  static_cast<unsigned long>(gDiagnostics.spiBusConflictCount),
+                  menuWireName(gUi.menu));
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
@@ -1589,9 +1672,14 @@ static void handleSerialCommand(char *command) {
     if (!extended.accepted) {
       if (extended.outOfOrder) ++gDiagnostics.extendedTelemetryOutOfOrder;
       else ++gDiagnostics.extendedTelemetryMalformed;
+      if (extended.crcError) ++gDiagnostics.extendedTelemetryCrcErrors;
+      if (extended.lengthError) ++gDiagnostics.extendedTelemetryLengthErrors;
+      if (extended.versionError) ++gDiagnostics.extendedTelemetryVersionErrors;
       return;
     }
     ++gDiagnostics.extendedTelemetryAccepted;
+    if (extended.v3) ++gDiagnostics.extendedTelemetryV3Accepted;
+    else ++gDiagnostics.extendedTelemetryLegacyAccepted;
     if (extended.domain == ExtendedTelemetryDomain::ESC) {
       lastEscDomainMs = telemetryNow; seenEscDomain = true;
     } else if (extended.domain == ExtendedTelemetryDomain::PERCEPTION) {
@@ -1797,18 +1885,33 @@ static void serviceDeferredCommands(uint8_t budget = 8U) {
     gDeferredCommandTail = static_cast<uint8_t>((gDeferredCommandTail + 1U) %
                                                 kDeferredCommandSlots);
     handleSerialCommand(command);
+#ifdef NEO3PRO
+    // Dedicated SPI2 allows sensor RX to preempt host command bursts safely.
+    gNeo3.pollRealtime();
+#endif
+    gMainLoopHeartbeatMs = HAL_GetTick();
   }
 }
 
 static void
-pollSerialGui(std::size_t byteBudget = static_cast<std::size_t>(-1)) {
+pollSerialGui(std::size_t byteBudget = 256U) {
+  // Host traffic is untrusted with respect to realtime scheduling. Bound both
+  // bytes and complete commands per service pass so a PC flood cannot starve
+  // MCP2515 RX, watchdog heartbeat, touch, or UI refresh.
   gUsb.poll();
   std::size_t processed = 0U;
-  while (gUsb.available() > 0 && processed < byteBudget) {
+  uint8_t commandBudget = 4U;
+  while (gUsb.available() > 0 && processed < byteBudget && commandBudget > 0U) {
     const int value = gUsb.read();
     if (value < 0)
       break;
     ++processed;
+#ifdef NEO3PRO
+    if ((processed & 0x1FU) == 0U) {
+      gNeo3.pollRealtime();
+      gMainLoopHeartbeatMs = HAL_GetTick();
+    }
+#endif
     const char c = static_cast<char>(value);
     if (c == '\r')
       continue;
@@ -1819,8 +1922,14 @@ pollSerialGui(std::size_t byteBudget = static_cast<std::size_t>(-1)) {
     }
     if (c == '\n') {
       serialRx[serialRxLen] = '\0';
-      if (serialRxLen > 0U)
+      if (serialRxLen > 0U) {
         handleSerialCommand(serialRx);
+        --commandBudget;
+#ifdef NEO3PRO
+        gNeo3.pollRealtime();
+#endif
+        gMainLoopHeartbeatMs = HAL_GetTick();
+      }
       serialRxLen = 0U;
     } else if (serialRxLen + 1U < sizeof(serialRx)) {
       serialRx[serialRxLen++] = c;
@@ -2035,18 +2144,20 @@ int main() {
   gNeo3.begin();
   gVesc.begin();
   Board_SetRealtimeServiceCallback([]() {
+    // USB completion IRQ never starts the next packet. Service it here in
+    // thread context so long TFT transfers cannot starve CDC progress.
+    gUsb.service();
     gNeo3.pollSafetyIo();
     gVesc.setSafetyStop(gNeo3.safetyPressed());
     // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
-    // deliberately NOT polled here because the display can own the shared SPI1
-    // bus in this callback context.
+    // on dedicated SPI2, so bounded receive draining can safely run from the
+    // cooperative realtime-yield path without touching the HMI SPI1 bus.
     gRealtimeParserActive = true;
     pollSerialGui(512U);
     gRealtimeParserActive = false;
 #ifdef NEO3PRO
-    // HMI display writes yield here between bounded SPI chunks/transactions.
-    // Drain MCP2515 only when SPI1 is free; the driver never resets/probes the
-    // shared bus from this realtime path.
+    // HMI display writes yield here between bounded chunks. Drain MCP2515 on
+    // its dedicated SPI2; the realtime path never resets/probes the CAN bus.
     gNeo3.pollRealtime();
 #endif
     gVesc.poll();

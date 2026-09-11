@@ -14,6 +14,11 @@ struct ExtendedTelemetryParseResult {
   bool recognized{false};
   bool accepted{false};
   bool outOfOrder{false};
+  bool v3{false};
+  bool crcError{false};
+  bool lengthError{false};
+  bool versionError{false};
+  bool sessionChanged{false};
   ExtendedTelemetryDomain domain{ExtendedTelemetryDomain::NONE};
 };
 

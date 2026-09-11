@@ -4,6 +4,9 @@
 #include <cstring>
 
 SPI_HandleTypeDef hspi1{};
+#ifdef NEO3PRO
+SPI_HandleTypeDef hspi2{};
+#endif
 I2C_HandleTypeDef hi2c1{};
 UART_HandleTypeDef huart1{};
 UART_HandleTypeDef huart2{};
@@ -14,6 +17,7 @@ HalUartPort gVescUart(&huart1, USART1);
 HalUartPort gGnssUart(&huart2, USART2);
 
 extern "C" uint8_t _end;
+extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason);
 
 namespace {
 void (*g_watchdog_callback)() = nullptr;
@@ -29,6 +33,8 @@ uint8_t g_board_service_gap_head = 0U;
 uint8_t g_board_service_gap_count = 0U;
 bool g_board_service_gap_stats_enabled = false;
 uint32_t g_board_min_stack_headroom_bytes = 0xFFFFFFFFUL;
+volatile uint32_t g_dwt_last_cycles = 0U;
+volatile uint32_t g_dwt_wrap_count = 0U;
 uint32_t g_buzzer_deadline_ms = 0U;
 bool g_buzzer_active = false;
 #ifdef HMI_TEST_HOOKS
@@ -37,12 +43,18 @@ bool g_test_spi_init_fail_once = false;
 BoardSpiOwner g_spi_owner = BoardSpiOwner::NONE;
 uint32_t g_spi_contention_count = 0U;
 uint32_t g_spi_recovery_count = 0U;
+#ifdef NEO3PRO
+volatile bool g_mcp_int_pending = false;
+volatile uint32_t g_mcp_int_count = 0U;
+void (*g_mcp_fast_irq_callback)() = nullptr;
+#endif
+
+static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with recovery bootloader
 
 [[noreturn]] void FatalError() {
-  __disable_irq();
-  while (true) {
-    __NOP();
-  }
+  // Generic HAL/init failure. The common reset path records reset diagnostics
+  // and marks the application crash for the resident recovery bootloader.
+  Board_FaultReset(nullptr, 5U);
 }
 
 void SystemClock_Config() {
@@ -81,7 +93,9 @@ void Gpio_Init() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_2, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+#ifdef NEO3
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);
+#endif
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
   GPIO_InitTypeDef gpio{};
@@ -95,32 +109,40 @@ void Gpio_Init() {
   HAL_GPIO_Init(GPIOA, &gpio);
 
 #ifdef NEO3PRO
-  // MCP2515 shares SPI1 with ILI9341/XPT2046. PB6/PB7 are the former
-  // USART1 VESC pins and are intentionally repurposed now that ESC is direct
-  // to the ROS esc package: PB6=CS (active-low), PB7=INT (active-low).
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
-  gpio.Pin = GPIO_PIN_6;
+  // NEO3PRO MCP2515 is kept as one compact PB10 + PB12..PB15 wiring block:
+  // PB10=INT (active-low), PB12=CS (active-low), PB13=SCK, PB14=MISO, PB15=MOSI.
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
+  gpio.Pin = GPIO_PIN_12;
   gpio.Mode = GPIO_MODE_OUTPUT_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOB, &gpio);
-  gpio.Pin = GPIO_PIN_7;
-  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pin = GPIO_PIN_10;
+  gpio.Mode = GPIO_MODE_IT_FALLING;
   gpio.Pull = GPIO_PULLUP;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &gpio);
+  // MCP2515 INT is active-low. Match ArduPilot/PX4 CANIface architecture:
+  // interrupt context only latches work; SPI draining remains bounded in main/realtime context.
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0U, 0U);
+  HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 #endif
 
+#ifdef NEO3
   gpio.Pin = GPIO_PIN_13;
   gpio.Mode = GPIO_MODE_OUTPUT_OD;
   gpio.Pull = GPIO_PULLUP;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &gpio);
+#endif
 
+#ifdef NEO3
   gpio.Pin = GPIO_PIN_12;
   gpio.Mode = GPIO_MODE_INPUT;
   gpio.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOB, &gpio);
+#endif
 
   gpio.Pin = GPIO_PIN_13;
   gpio.Mode = GPIO_MODE_OUTPUT_PP;
@@ -163,6 +185,39 @@ void Spi1_InitBootOrFatal() {
   if (!Spi1_Configure())
     FatalError();
 }
+
+#ifdef NEO3PRO
+bool Spi2_Configure() {
+  __HAL_RCC_SPI2_CLK_ENABLE();
+  GPIO_InitTypeDef gpio{};
+  gpio.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  gpio.Alternate = GPIO_AF5_SPI2;
+  HAL_GPIO_Init(GPIOB, &gpio);
+
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  // APB1=48 MHz; /8 = 6 MHz, safely below MCP2515's 10 MHz SPI limit.
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 7U;
+  return HAL_SPI_Init(&hspi2) == HAL_OK;
+}
+
+void Spi2_InitBootOrFatal() {
+  if (!Spi2_Configure())
+    FatalError();
+}
+#endif
 
 void I2c1_Init() {
   __HAL_RCC_I2C1_CLK_ENABLE();
@@ -256,6 +311,25 @@ void UartPinsInit(UART_HandleTypeDef *huart) {
 }
 } // namespace
 
+extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason) {
+  // RTC backup registers survive the core reset and are intentionally shared
+  // with the resident bootloader for post-mortem diagnostics.
+  __disable_irq();
+  __HAL_RCC_PWR_CLK_ENABLE();
+  HAL_PWR_EnableBkUpAccess();
+  RTC->BKP1R = kAppCrashMagic;       // bootloader repeated-crash marker
+  RTC->BKP3R = reason;               // 1 HF, 2 MM, 3 BF, 4 UF, 5 generic
+  RTC->BKP4R = SCB->CFSR;
+  RTC->BKP5R = SCB->HFSR;
+  RTC->BKP6R = stack ? stack[6] : 0U; // stacked PC
+  RTC->BKP7R = stack ? stack[5] : 0U; // stacked LR
+  RTC->BKP8R = SCB->MMFAR;
+  RTC->BKP9R = SCB->BFAR;
+  __DSB();
+  NVIC_SystemReset();
+  while (true) { __NOP(); }
+}
+
 void Board_Init() {
   HAL_Init();
   __HAL_RCC_PWR_CLK_ENABLE();
@@ -263,16 +337,23 @@ void Board_Init() {
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootOrFatal();
+#ifdef NEO3PRO
+  Spi2_InitBootOrFatal();
+#endif
 #ifdef NEO3
   I2c1_Init();
 #endif
   Timers_Init();
   Board_SpiDeselectAll();
-  if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0U;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-  }
+  // The resident recovery bootloader may leave CYCCNT enabled with an arbitrary
+  // pre-application epoch. Reset it unconditionally here so every application
+  // libcanard timestamp/deadline shares one deterministic boot-local epoch.
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk;
+  DWT->CYCCNT = 0U;
+  g_dwt_last_cycles = 0U;
+  g_dwt_wrap_count = 0U;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 }
 
 void Board_Service() {
@@ -365,10 +446,16 @@ void Board_SetRealtimeServiceCallback(void (*callback)()) {
 }
 
 void Board_RealtimeService() {
-  /* Long TFT draws are main-context blocking work. Yield at most once per ms
-   * into the motor-link service without permitting recursive entry. */
+  /* Long TFT draws are main-context blocking work. Normally yield at most once
+   * per ms, but a latched MCP2515 interrupt bypasses that throttle so its two
+   * tiny RX buffers are drained at the next HMI chunk boundary. */
   const uint32_t now = HAL_GetTick();
-  if (g_realtime_service_active || now == g_realtime_service_last_ms)
+#ifdef NEO3PRO
+  const bool urgent_can = Board_McpIntPending();
+#else
+  const bool urgent_can = false;
+#endif
+  if (g_realtime_service_active || (!urgent_can && now == g_realtime_service_last_ms))
     return;
   g_realtime_service_last_ms = now;
   g_realtime_service_active = true;
@@ -376,6 +463,19 @@ void Board_RealtimeService() {
   if (g_realtime_service_callback != nullptr)
     g_realtime_service_callback();
   g_realtime_service_active = false;
+}
+
+uint64_t Board_MonotonicMicros64() {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  const uint32_t now_cycles = DWT->CYCCNT;
+  uint32_t wraps = g_dwt_wrap_count;
+  if (now_cycles < g_dwt_last_cycles)
+    ++wraps;
+  const uint64_t cycles = (static_cast<uint64_t>(wraps) << 32U) | now_cycles;
+  if (primask == 0U) __enable_irq();
+  const uint32_t cycles_per_us = std::max<uint32_t>(1U, HAL_RCC_GetHCLKFreq() / 1000000U);
+  return cycles / cycles_per_us;
 }
 
 void Board_DelayUs(uint32_t microseconds) {
@@ -394,7 +494,7 @@ void Board_SpiDeselectAll() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);  // TFT CS
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);  // XPT2046 CS
 #ifdef NEO3PRO
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);  // MCP2515 CS
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // MCP2515 CS
 #endif
 }
 
@@ -431,8 +531,8 @@ bool Board_SpiAcquire(BoardSpiOwner owner, uint32_t prescaler) {
     (void)SPI1->SR;
   }
   CLEAR_BIT(SPI1->CR1, SPI_CR1_SPE);
-  // ILI9341, XPT2046 and MCP2515 all use SPI mode 0. Reassert mode on every
-  // owner handoff so a recovery or future peripheral cannot leak CPOL/CPHA.
+  // ILI9341 and XPT2046 use SPI1 mode 0. MCP2515 is isolated on SPI2.
+  // Reassert SPI1 mode on every HMI owner handoff.
   CLEAR_BIT(SPI1->CR1, SPI_CR1_CPOL | SPI_CR1_CPHA);
   MODIFY_REG(SPI1->CR1, SPI_CR1_BR, prescaler);
   SET_BIT(SPI1->CR1, SPI_CR1_SPE);
@@ -449,9 +549,7 @@ void Board_SpiRelease(BoardSpiOwner owner) {
 }
 
 bool Board_ReinitSpi1() {
-  /* A peripheral-level recovery is a bus-wide transaction. First put every CS
-   * inactive and clear the software owner so TFT/touch/MCP can recover from a
-   * partially completed transfer without two slaves driving MISO together. */
+  /* SPI1 is HMI-only in NEO3PRO builds. */
   Board_SpiDeselectAll();
   g_spi_owner = BoardSpiOwner::NONE;
   ++g_spi_recovery_count;
@@ -462,6 +560,39 @@ bool Board_ReinitSpi1() {
   __HAL_RCC_SPI1_RELEASE_RESET();
   return Spi1_Configure() && hspi1.State == HAL_SPI_STATE_READY;
 }
+
+#ifdef NEO3PRO
+bool Board_ReinitSpi2() {
+  // Dedicated MCP2515 bus recovery; never disturbs TFT/touch on SPI1.
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
+  (void)HAL_SPI_DeInit(&hspi2);
+  __HAL_RCC_SPI2_FORCE_RESET();
+  __NOP();
+  __NOP();
+  __HAL_RCC_SPI2_RELEASE_RESET();
+  return Spi2_Configure() && hspi2.State == HAL_SPI_STATE_READY;
+}
+
+void Board_SetMcpFastIrqCallback(void (*callback)()) {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_mcp_fast_irq_callback = callback;
+  if (primask == 0U) __enable_irq();
+}
+
+bool Board_McpIntPending() {
+  return g_mcp_int_pending || HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10) == GPIO_PIN_RESET;
+}
+
+void Board_McpIntClear() {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_mcp_int_pending = false;
+  if (primask == 0U) __enable_irq();
+}
+
+uint32_t Board_McpIntCount() { return g_mcp_int_count; }
+#endif
 
 void Board_RealtimeDelayMs(uint32_t duration_ms) {
   const uint32_t deadline = HAL_GetTick() + duration_ms;
@@ -754,6 +885,10 @@ void HalUartPort::irqError() {
 // provide this ISR explicitly. Without it the first 1 ms tick traps the MCU in
 // the default infinite loop before USB/HMI/sensor startup can complete.
 extern "C" void SysTick_Handler() {
+  const uint32_t now_cycles = DWT->CYCCNT;
+  if (now_cycles < g_dwt_last_cycles)
+    ++g_dwt_wrap_count;
+  g_dwt_last_cycles = now_cycles;
   HAL_IncTick();
   HAL_SYSTICK_IRQHandler();
 }
@@ -761,6 +896,19 @@ extern "C" void SysTick_Handler() {
 extern "C" void USART1_IRQHandler() { HAL_UART_IRQHandler(&huart1); }
 extern "C" void USART2_IRQHandler() { HAL_UART_IRQHandler(&huart2); }
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
+#ifdef NEO3PRO
+extern "C" void EXTI15_10_IRQHandler() {
+  if (__HAL_GPIO_EXTI_GET_IT(GPIO_PIN_10) != RESET) {
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_10);
+    g_mcp_int_pending = true;
+    ++g_mcp_int_count;
+    // Like ArduPilot/PX4 CAN driver ISR: evacuate hardware FIFO only.
+    // The registered callback is strictly bounded and performs no libcanard,
+    // DSDL, USB, logging or allocation work.
+    if (g_mcp_fast_irq_callback != nullptr) g_mcp_fast_irq_callback();
+  }
+}
+#endif
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.
@@ -796,4 +944,18 @@ extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     g_watchdog_callback();
 }
 
+// Fault wrappers capture the active exception stack before resetting. Keep the
+// handlers minimal: no printf, USB, SPI, heap, or HAL calls on a corrupt stack.
+extern "C" __attribute__((naked)) void HardFault_Handler() {
+  __asm volatile("tst lr,#4\n ite eq\n mrseq r0,msp\n mrsne r0,psp\n movs r1,#1\n b Board_FaultReset");
+}
+extern "C" __attribute__((naked)) void MemManage_Handler() {
+  __asm volatile("tst lr,#4\n ite eq\n mrseq r0,msp\n mrsne r0,psp\n movs r1,#2\n b Board_FaultReset");
+}
+extern "C" __attribute__((naked)) void BusFault_Handler() {
+  __asm volatile("tst lr,#4\n ite eq\n mrseq r0,msp\n mrsne r0,psp\n movs r1,#3\n b Board_FaultReset");
+}
+extern "C" __attribute__((naked)) void UsageFault_Handler() {
+  __asm volatile("tst lr,#4\n ite eq\n mrseq r0,msp\n mrsne r0,psp\n movs r1,#4\n b Board_FaultReset");
+}
 extern "C" void Error_Handler() { FatalError(); }

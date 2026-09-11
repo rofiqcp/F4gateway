@@ -36,6 +36,7 @@ void UsbCdcPort::resetSessionState(bool drop_queues, bool count_abort) {
   tx_pending_ = 0U;
   tx_started_ms_ = 0U;
   tx_stall_reported_ = false;
+  tx_service_pending_ = false;
 #ifdef HMI_TEST_HOOKS
   test_suppress_tx_until_ms_ = 0U;
 #endif
@@ -61,6 +62,8 @@ bool UsbCdcPort::startUsbStack() {
 bool UsbCdcPort::begin() {
   resetSessionState(true, false);
   rx_dropped_ = tx_dropped_ = 0U;
+  tx_low_dropped_ = tx_high_dropped_ = 0U;
+  rx_high_water_ = tx_low_high_water_ = tx_high_high_water_ = 0U;
   tx_complete_ms_ = HAL_GetTick();
   usb_session_generation_ = 0U;
   usb_class_init_count_ = 0U;
@@ -79,6 +82,10 @@ bool UsbCdcPort::begin() {
   last_repair_flags_ = 0U;
   tx_stall_reported_ = false;
   recovery_pending_ = false;
+  host_session_token_ = 0U;
+  host_session_count_ = 0U;
+  low_session_purge_count_ = 0U;
+  purge_low_after_message_ = false;
   return startUsbStack();
 }
 
@@ -103,6 +110,32 @@ void UsbCdcPort::onUsbClassDeInit() {
 void UsbCdcPort::requestRecovery() {
   last_recovery_reason_ = 1U;
   recovery_pending_ = true;
+}
+
+void UsbCdcPort::beginHostSession(uint32_t token) {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  host_session_token_ = token;
+  ++host_session_count_;
+
+  // Snapshot telemetry must not leak from an old host session. Preserve only
+  // a low-priority line already in flight; purge everything queued behind it.
+  const bool low_message_active = tx_message_active_ && !tx_message_high_;
+  if (low_message_active) {
+    purge_low_after_message_ = true;
+  } else {
+    tx_head_ = tx_tail_;
+    purge_low_after_message_ = false;
+    ++low_session_purge_count_;
+  }
+
+  // Control replies are normally sparse. If none is active, drop stale high
+  // priority replies too so the new session ACK is the first control record.
+  const bool high_message_active = tx_message_active_ && tx_message_high_;
+  if (!high_message_active)
+    tx_high_head_ = tx_high_tail_;
+
+  if (primask == 0U) __enable_irq();
 }
 
 uint32_t UsbCdcPort::txBusyAgeMs() const {
@@ -177,6 +210,7 @@ std::size_t UsbCdcPort::write(const uint8_t *data, std::size_t length) {
   const uint16_t free = RingFree(tx_head_, tx_tail_, kTxSize);
   if (free < length) {
     ++tx_dropped_;
+    ++tx_low_dropped_;
     if (primask == 0U)
       __enable_irq();
     return 0U;
@@ -185,6 +219,7 @@ std::size_t UsbCdcPort::write(const uint8_t *data, std::size_t length) {
     tx_[tx_head_] = data[i];
     tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
   }
+  { const uint16_t used = RingUsed(tx_head_, tx_tail_, kTxSize); if (used > tx_low_high_water_) tx_low_high_water_ = used; }
   if (primask == 0U)
     __enable_irq();
   poll();
@@ -200,6 +235,7 @@ std::size_t UsbCdcPort::writeHighPriority(const uint8_t *data,
   const uint16_t free = RingFree(tx_high_head_, tx_high_tail_, kHighTxSize);
   if (free < length) {
     ++tx_dropped_;
+    ++tx_high_dropped_;
     if (primask == 0U)
       __enable_irq();
     return 0U;
@@ -208,6 +244,7 @@ std::size_t UsbCdcPort::writeHighPriority(const uint8_t *data,
     tx_high_[tx_high_head_] = data[i];
     tx_high_head_ = static_cast<uint16_t>((tx_high_head_ + 1U) % kHighTxSize);
   }
+  { const uint16_t used = RingUsed(tx_high_head_, tx_high_tail_, kHighTxSize); if (used > tx_high_high_water_) tx_high_high_water_ = used; }
   if (primask == 0U)
     __enable_irq();
   poll();
@@ -226,6 +263,7 @@ bool UsbCdcPort::writeLine(const char *line) {
   __disable_irq();
   if (RingFree(tx_head_, tx_tail_, kTxSize) < total) {
     ++tx_dropped_;
+    ++tx_low_dropped_;
     if (primask == 0U)
       __enable_irq();
     return false;
@@ -238,6 +276,7 @@ bool UsbCdcPort::writeLine(const char *line) {
   tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
   tx_[tx_head_] = '\n';
   tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
+  { const uint16_t used = RingUsed(tx_head_, tx_tail_, kTxSize); if (used > tx_low_high_water_) tx_low_high_water_ = used; }
   if (primask == 0U)
     __enable_irq();
   poll();
@@ -255,6 +294,7 @@ bool UsbCdcPort::writeLineHighPriority(const char *line) {
   __disable_irq();
   if (RingFree(tx_high_head_, tx_high_tail_, kHighTxSize) < total) {
     ++tx_dropped_;
+    ++tx_high_dropped_;
     if (primask == 0U)
       __enable_irq();
     return false;
@@ -267,6 +307,7 @@ bool UsbCdcPort::writeLineHighPriority(const char *line) {
   tx_high_head_ = static_cast<uint16_t>((tx_high_head_ + 1U) % kHighTxSize);
   tx_high_[tx_high_head_] = '\n';
   tx_high_head_ = static_cast<uint16_t>((tx_high_head_ + 1U) % kHighTxSize);
+  { const uint16_t used = RingUsed(tx_high_head_, tx_high_tail_, kHighTxSize); if (used > tx_high_high_water_) tx_high_high_water_ = used; }
   if (primask == 0U)
     __enable_irq();
   poll();
@@ -276,6 +317,10 @@ bool UsbCdcPort::writeLineHighPriority(const char *line) {
 bool UsbCdcPort::writeLineCritical(const char *line, uint32_t timeout_ms) {
   if (line == nullptr || !connected())
     return false;
+  // Critical means high-priority, not permission to monopolize the MCU. A USB
+  // host can disappear mid-transfer; cap synchronous waiting and let service()
+  // perform endpoint recovery cooperatively.
+  timeout_ms = std::min<uint32_t>(timeout_ms, 25U);
   const uint32_t start = HAL_GetTick();
   do {
     if (writeLineHighPriority(line))
@@ -329,6 +374,9 @@ void UsbCdcPort::service() {
 
   if (explicit_recovery)
     (void)softRestartUsb();
+  // TX completion IRQ only updates ring state and raises this event. All calls
+  // into the ST USB transmit stack occur here in thread/main-loop context.
+  tx_service_pending_ = false;
   poll();
 }
 
@@ -422,6 +470,7 @@ void UsbCdcPort::onReceive(const uint8_t *data, uint32_t length) {
     rx_[rx_head_] = data[i];
     rx_head_ = next;
   }
+  { const uint16_t used = RingUsed(rx_head_, rx_tail_, kRxSize); if (used > rx_high_water_) rx_high_water_ = used; }
 }
 
 void UsbCdcPort::onTransmitComplete() {
@@ -434,6 +483,7 @@ void UsbCdcPort::onTransmitComplete() {
     tx_tail_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
   }
   const bool message_done = tx_packet_ends_message_;
+  const bool completed_high = tx_active_high_;
   tx_pending_ = 0U;
   tx_busy_ = false;
   tx_started_ms_ = 0U;
@@ -442,9 +492,15 @@ void UsbCdcPort::onTransmitComplete() {
   ++tx_complete_count_;
   tx_active_high_ = false;
   tx_packet_ends_message_ = false;
-  if (message_done)
+  if (message_done) {
     tx_message_active_ = false;
-  // Start the next packet immediately from USB completion context so P1 motor
-  // telemetry is not dependent on TFT/GNSS main-loop latency.
-  poll();
+    if (!completed_high && purge_low_after_message_) {
+      tx_tail_ = tx_head_;
+      purge_low_after_message_ = false;
+      ++low_session_purge_count_;
+    }
+  }
+  // Never call USBD_CDC_TransmitPacket() recursively from the USB IRQ. Mark a
+  // service event; main-loop gUsb.service() starts the next packet.
+  tx_service_pending_ = true;
 }

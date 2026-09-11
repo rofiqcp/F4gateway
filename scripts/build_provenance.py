@@ -50,7 +50,7 @@ def write_identity(target, source, env):
         "crc32": "{:08X}".format(zlib.crc32(payload) & 0xFFFFFFFF),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "app_base": "0x08008000",
-        "app_limit": "0x08060000",
+        "app_limit": "0x08040000",
     }
     output = binary.with_name("firmware.identity.json")
     output.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")

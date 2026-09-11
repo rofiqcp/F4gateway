@@ -20,7 +20,7 @@ cd "$ROOT/bootloader"; pio run -e f411_recovery_boot
 cd "$ROOT"; pio run -e blackpill_f411ce_stlink
 python3 scripts/make_app_manifest.py "$APP" "$MANIFEST"
 [[ $(stat -c %s "$BOOT") -le $((0x8000)) ]] || { echo '[STLINK] bootloader exceeds 32 KiB' >&2; exit 5; }
-[[ $(stat -c %s "$APP") -le $((0x58000)) ]] || { echo '[STLINK] application exceeds app region' >&2; exit 6; }
+[[ $(stat -c %s "$APP") -le $((0x38000)) ]] || { echo '[STLINK] application exceeds app region' >&2; exit 6; }
 [[ $(stat -c %s "$MANIFEST") -eq 32 ]] || { echo '[STLINK] invalid manifest size' >&2; exit 7; }
 
 echo "[STLINK] transactional provision boot@08000000 app@08008000 manifest@08060000"
@@ -52,7 +52,7 @@ if ! wait_cdc; then
     exit 8
   fi
   pc=$((pc_hex))
-  if (( pc < 0x08008000 || pc >= 0x08060000 )); then
+  if (( pc < 0x08008000 || pc >= 0x08040000 )); then
     printf '[STLINK] ERROR CPU PC=%s is outside application region\n' "$pc_hex" >&2
     printf '%s\n' "$exec_probe" >&2
     exit 8

@@ -393,6 +393,17 @@ CanardCANFrame* canardPeekTxQueue(const CanardInstance* ins)
     return &ins->tx_queue->frame;
 }
 
+#if CANARD_ENABLE_DEADLINE
+uint64_t canardPeekTxQueueDeadline(const CanardInstance* ins)
+{
+    if ((ins == NULL) || (ins->tx_queue == NULL))
+    {
+        return 0U;
+    }
+    return ins->tx_queue->frame.deadline_usec;
+}
+#endif
+
 void canardPopTxQueue(CanardInstance* ins)
 {
     CanardTxQueueItem* item = ins->tx_queue;

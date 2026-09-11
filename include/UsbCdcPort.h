@@ -10,6 +10,7 @@ class UsbCdcPort {
   void poll();
   void service();
   void requestRecovery();
+  void beginHostSession(uint32_t token);
   int available() const;
   int read();
   int availableForWrite() const;
@@ -23,6 +24,10 @@ class UsbCdcPort {
   bool connected() const;
   uint32_t rxDropped() const { return rx_dropped_; }
   uint32_t txDropped() const { return tx_dropped_; }
+  uint32_t hostSessionToken() const { return host_session_token_; }
+  uint32_t hostSessionCount() const { return host_session_count_; }
+  uint32_t lowSessionPurgeCount() const { return low_session_purge_count_; }
+  bool lowSessionPurgePending() const { return purge_low_after_message_; }
 
   void onReceive(const uint8_t *data, uint32_t length);
   void onTransmitComplete();
@@ -49,6 +54,12 @@ class UsbCdcPort {
   uint16_t rxQueueDepth() const;
   uint16_t txLowQueueDepth() const;
   uint16_t txHighQueueDepth() const;
+  uint16_t rxHighWater() const { return rx_high_water_; }
+  uint16_t txLowHighWater() const { return tx_low_high_water_; }
+  uint16_t txHighHighWater() const { return tx_high_high_water_; }
+  uint32_t txLowDropped() const { return tx_low_dropped_; }
+  uint32_t txHighDropped() const { return tx_high_dropped_; }
+  bool txServicePending() const { return tx_service_pending_; }
   uint32_t cdcTxState() const;
 #ifdef HMI_TEST_HOOKS
   void testSuppressTx(uint32_t duration_ms);
@@ -75,6 +86,11 @@ class UsbCdcPort {
   volatile uint16_t tx_pending_{0U};
   volatile uint32_t rx_dropped_{0U};
   volatile uint32_t tx_dropped_{0U};
+  volatile uint32_t tx_low_dropped_{0U};
+  volatile uint32_t tx_high_dropped_{0U};
+  volatile uint16_t rx_high_water_{0U};
+  volatile uint16_t tx_low_high_water_{0U};
+  volatile uint16_t tx_high_high_water_{0U};
   volatile uint32_t tx_started_ms_{0U};
   volatile uint32_t tx_complete_ms_{0U};
   volatile uint32_t usb_session_generation_{0U};
@@ -94,6 +110,13 @@ class UsbCdcPort {
   volatile uint8_t last_repair_flags_{0U}; // bit0 high, bit1 message-end
   volatile bool tx_stall_reported_{false};
   volatile bool recovery_pending_{false};
+  volatile uint32_t host_session_token_{0U};
+  volatile uint32_t host_session_count_{0U};
+  volatile uint32_t low_session_purge_count_{0U};
+  volatile bool purge_low_after_message_{false};
+  // Set from the USB TX-complete IRQ. The ISR never re-enters the ST USB
+  // transmit stack; the outer main-loop service owns the next packet start.
+  volatile bool tx_service_pending_{false};
 #ifdef HMI_TEST_HOOKS
   volatile uint32_t test_suppress_tx_until_ms_{0U};
 #endif

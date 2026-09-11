@@ -5,6 +5,9 @@
 #include <cstdint>
 
 extern SPI_HandleTypeDef hspi1;
+#ifdef NEO3PRO
+extern SPI_HandleTypeDef hspi2;
+#endif
 extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
@@ -34,11 +37,19 @@ uint32_t Board_ServiceGapP99Ms();
 void Board_ResetServiceGapStats();
 uint32_t Board_StackHeadroomBytes();
 uint32_t Board_MinStackHeadroomBytes();
+uint64_t Board_MonotonicMicros64();
 void Board_SetRealtimeServiceCallback(void (*callback)());
 void Board_RealtimeService();
 void Board_DelayUs(uint32_t microseconds);
 void Board_RealtimeDelayMs(uint32_t duration_ms);
 bool Board_ReinitSpi1();
+#ifdef NEO3PRO
+bool Board_ReinitSpi2();
+void Board_SetMcpFastIrqCallback(void (*callback)());
+bool Board_McpIntPending();
+void Board_McpIntClear();
+uint32_t Board_McpIntCount();
+#endif
 #ifdef HMI_TEST_HOOKS
 void Board_TestInjectSpiInitFailureOnce();
 #endif

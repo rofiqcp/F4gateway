@@ -94,9 +94,8 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
   for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
     TftCs(true);
     TouchCs(true);
-    // Bus ownership is shared with MCP2515 in NEO3PRO builds. Acquiring it
-    // atomically deasserts every slave CS and restores SPI mode 0 + requested
-    // clock before this HMI slave is selected.
+    // SPI1 is HMI-only in NEO3PRO builds; central ownership still prevents TFT
+    // and touch transactions from overlapping and restores mode/clock per slave.
     if (!Board_SpiAcquire(board_owner, prescaler)) {
       ++spi_bus_conflict_count_;
       return false;
@@ -1024,6 +1023,7 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
   if (!beginTransaction(SpiOwner::TOUCH, kTouchPrescaler))
     return false;
   const uint16_t z = readTouchZTx();
+  touch_current_z_ = z;
   if (z <= threshold) {
     (void)endTransaction();
     ++touch_reject_fast_count_;
@@ -1051,6 +1051,8 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     return false;
   const uint16_t rx = Median3(xs[0], xs[1], xs[2]),
                  ry = Median3(ys[0], ys[1], ys[2]);
+  touch_last_raw_x_ = rx;
+  touch_last_raw_y_ = ry;
   press_time_ms_ = HAL_GetTick() + 50U;
   int32_t sx = 0, sy = 0;
   if (touch_rotate_) {
@@ -1068,6 +1070,8 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     return false;
   *x = static_cast<uint16_t>(ClampI32(sx, 0, width_ - 1));
   *y = static_cast<uint16_t>(ClampI32(sy, 0, height_ - 1));
+  touch_last_x_ = *x;
+  touch_last_y_ = *y;
   return true;
 }
 

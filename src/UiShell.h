@@ -1297,7 +1297,7 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
   }
   if (id == UiMenuId::SYSTEM_PINS_IO) {
 #ifdef NEO3PRO
-    snprintf(a,sizeof(a),"CS:%c INT:%c %s",gDiagnostics.pb6VescTx?'H':'L',gDiagnostics.pb7VescRx?'H':'L',gDiagnostics.canOk?"OK":"ERR");drawMetricRow(48,"PB6/PB7 MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
+    snprintf(a,sizeof(a),"CS:%c INT:%c %s",gDiagnostics.pb6VescTx?'H':'L',gDiagnostics.pb7VescRx?'H':'L',gDiagnostics.canOk?"OK":"ERR");drawMetricRow(48,"PB10/12-15 MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"%u MHz / 1 Mbps",(unsigned)gDiagnostics.canOscillatorMhz);drawMetricRow(77,"CAN clock / bitrate",a,gDiagnostics.canOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"RX:%lu D:%lu",(unsigned long)gDiagnostics.canRxFrames,(unsigned long)gDiagnostics.canTransfers);drawMetricRow(106,"DroneCAN raw / msg",a,gDiagnostics.canRxFrames?C_READY:C_WARNING);
     drawMetricRow(135,"F4 <-> ESC","DISCONNECTED",C_READY);
@@ -1340,7 +1340,7 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
     snprintf(a,sizeof(a),"%lu / %lu",(unsigned long)gDiagnostics.spiTransactions,(unsigned long)gDiagnostics.spiBytesTx);drawMetricRow(77,"Transactions / bytes",a,C_INK);
     snprintf(a,sizeof(a),"TO:%lu HAL:%lu BUS:%lu",(unsigned long)gDiagnostics.spiTimeoutCount,(unsigned long)gDiagnostics.spiHalErrorCount,(unsigned long)gDiagnostics.spiBusConflictCount);drawMetricRow(106,"Errors",a,(gDiagnostics.spiTimeoutCount||gDiagnostics.spiHalErrorCount||gDiagnostics.spiBusConflictCount)?C_WARNING:C_READY);
 #ifdef NEO3PRO
-    snprintf(a,sizeof(a),"MCP:%s RX:%lu",gDiagnostics.canOk?"OK":"ERR",(unsigned long)gDiagnostics.canRxFrames);drawMetricRow(135,"Shared SPI MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
+    snprintf(a,sizeof(a),"MCP:%s RX:%lu",gDiagnostics.canOk?"OK":"ERR",(unsigned long)gDiagnostics.canRxFrames);drawMetricRow(135,"MCP2515 SPI2",a,gDiagnostics.canOk?C_READY:C_WARNING);
 #else
     snprintf(a,sizeof(a),"REC:%lu F:%u U:%u",(unsigned long)gDiagnostics.spiRecoveryCount,gDiagnostics.tftFastWriteValidated?1U:0U,gDiagnostics.tftUltraFastWriteValidated?1U:0U);drawMetricRow(135,"Recovery / profiles",a,C_ACCENT);
 #endif
@@ -1349,7 +1349,7 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
   if (id == UiMenuId::SYSTEM_UART_STATUS) {
     snprintf(a,sizeof(a),"E:%lu O:%lu D:%lu",(unsigned long)gDiagnostics.vescUartErrors,(unsigned long)gDiagnostics.vescUartOverflow,(unsigned long)gDiagnostics.vescUartTxDropped);drawMetricRow(48,"VESC UART",a,gDiagnostics.vescUartOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"E:%lu O:%lu D:%lu",(unsigned long)gDiagnostics.gnssUartErrors,(unsigned long)gDiagnostics.gnssUartOverflow,(unsigned long)gDiagnostics.gnssUartTxDropped);drawMetricRow(77,"GNSS UART",a,gDiagnostics.gnssUartOk?C_READY:C_WARNING);
-    snprintf(a,sizeof(a),"X:%lu M:%lu O:%lu",(unsigned long)gDiagnostics.extendedTelemetryAccepted,(unsigned long)gDiagnostics.extendedTelemetryMalformed,(unsigned long)gDiagnostics.extendedTelemetryOutOfOrder);drawMetricRow(106,"Ext RX ok/malformed/ooo",a,(gDiagnostics.extendedTelemetryMalformed||gDiagnostics.extendedTelemetryOutOfOrder)?C_WARNING:C_READY);
+    snprintf(a,sizeof(a),"V3:%lu L:%lu C:%lu E:%lu",(unsigned long)gDiagnostics.extendedTelemetryV3Accepted,(unsigned long)gDiagnostics.extendedTelemetryLegacyAccepted,(unsigned long)gDiagnostics.extendedTelemetryCrcErrors,(unsigned long)(gDiagnostics.extendedTelemetryLengthErrors+gDiagnostics.extendedTelemetryVersionErrors));drawMetricRow(106,"Telemetry v3/legacy/errors",a,(gDiagnostics.extendedTelemetryCrcErrors||gDiagnostics.extendedTelemetryLengthErrors||gDiagnostics.extendedTelemetryVersionErrors)?C_WARNING:C_READY);
     if(d.escx.link.valid){snprintf(a,sizeof(a),"%lu / %s",(unsigned long)d.escx.uartBaud,d.escx.owner);drawMetricRow(135,"Baud / owner",a,C_ACCENT);}else drawNaRow(135,"Baud / owner");
     return;
   }

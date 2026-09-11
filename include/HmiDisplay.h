@@ -98,6 +98,11 @@ public:
   uint32_t spiBusConflictCount() const { return spi_bus_conflict_count_; }
   uint32_t touchReadCount() const { return touch_read_count_; }
   uint32_t touchRejectFastCount() const { return touch_reject_fast_count_; }
+  uint16_t touchCurrentZ() const { return touch_current_z_; }
+  uint16_t touchLastRawX() const { return touch_last_raw_x_; }
+  uint16_t touchLastRawY() const { return touch_last_raw_y_; }
+  uint16_t touchLastX() const { return touch_last_x_; }
+  uint16_t touchLastY() const { return touch_last_y_; }
   uint32_t lastFrameBytes() const { return last_frame_bytes_; }
   uint32_t maxFrameBytes() const { return max_frame_bytes_; }
   uint32_t writeClockHz() const;
@@ -189,6 +194,11 @@ private:
   uint32_t spi_bus_conflict_count_{0U};
   uint32_t touch_read_count_{0U};
   uint32_t touch_reject_fast_count_{0U};
+  uint16_t touch_current_z_{0U};
+  uint16_t touch_last_raw_x_{0U};
+  uint16_t touch_last_raw_y_{0U};
+  uint16_t touch_last_x_{0U};
+  uint16_t touch_last_y_{0U};
 #ifdef HMI_TEST_HOOKS
   bool test_tx_failure_once_{false};
 #endif

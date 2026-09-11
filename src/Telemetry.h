@@ -11,6 +11,7 @@
 struct TelemetryGroupStamp {
   uint32_t lastRxMs{0U};
   uint32_t sourceAgeMs{0xFFFFFFFFUL};
+  uint32_t session{0U};
   uint32_t seq{0U};
   bool valid{false};
   bool fresh{false};

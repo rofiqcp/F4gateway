@@ -15,6 +15,11 @@ struct HmiDiagnostics {
   uint32_t extendedTelemetryAccepted{0};
   uint32_t extendedTelemetryMalformed{0};
   uint32_t extendedTelemetryOutOfOrder{0};
+  uint32_t extendedTelemetryV3Accepted{0};
+  uint32_t extendedTelemetryLegacyAccepted{0};
+  uint32_t extendedTelemetryCrcErrors{0};
+  uint32_t extendedTelemetryLengthErrors{0};
+  uint32_t extendedTelemetryVersionErrors{0};
   uint32_t uiFrames{0};
   uint32_t fullUiFrames{0};
   uint32_t dirtyUiFrames{0};

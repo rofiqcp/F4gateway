@@ -58,10 +58,12 @@ inline void beginTouch() {
 }
 
 inline void correctTouchXY(uint16_t sx, uint16_t sy, uint16_t &tx, uint16_t &ty) {
-  const int32_t mappedX = static_cast<int32_t>(sy) * (W - 1) / (H - 1);
-  const int32_t mappedY = (H - 1) + static_cast<int32_t>(sx) * (0 - (H - 1)) / (W - 1);
-  tx = static_cast<uint16_t>(std::clamp<int32_t>(mappedX, 0, W - 1));
-  ty = static_cast<uint16_t>(std::clamp<int32_t>(mappedY, 0, H - 1));
+  // HmiDisplay::getTouch() follows TFT_eSPI semantics: setTouch() calibration
+  // (including rotate/invert flags) is already applied and sx/sy are screen
+  // coordinates.  A second landscape rotation here used to move valid touches
+  // away from their visible buttons (notably HOME -> MENU).
+  tx = static_cast<uint16_t>(std::clamp<int32_t>(sx, 0, W - 1));
+  ty = static_cast<uint16_t>(std::clamp<int32_t>(sy, 0, H - 1));
 }
 
 inline bool hit(int px, int py, int x, int y, int w, int h) {
