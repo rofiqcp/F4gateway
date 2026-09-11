@@ -558,7 +558,7 @@ bool Neo3ProSensors::mcpFastReadOneCanFrame(uint8_t buffer_index, uint32_t deadl
   tx[0] = buffer_index == 0U ? MCP_READ_RX0 : MCP_READ_RX1;
   for (uint8_t i = 1U; i < sizeof(tx); ++i) tx[i] = 0xFFU;
   if (!mcpFastTransfer(tx, rx, sizeof(tx), deadline_cycles)) return false;
-  if (!parseAndQueueMcpRx(rx, HAL_GetTick())) return false;
+  if (!parseAndQueueMcpRx(rx, Board_MonotonicMicros64())) return false;
   ++can_irq_fast_frames_;
   return true;
 }
@@ -650,6 +650,25 @@ void Neo3ProSensors::processRawCanFrame(const RawCanSlot &slot) {
       known = dtid == SID_GET_NODE_INFO || dtid == SID_PARAM_GETSET;
     }
     if (!known) { ++can_rx_not_wanted_; return; }
+
+    // Low-rate proof diagnostic: capture only genuine MISSED_START events for
+    // data types/services this gateway subscribes to. This executes in main
+    // context after the raw FIFO, never in the MCP2515 ISR.
+    const uint8_t tail = slot.dlc > 0U ? slot.data[slot.dlc - 1U] : 0U;
+    const uint64_t now_us = Board_MonotonicMicros64();
+    const uint32_t queue_age_us = now_us >= slot.timestamp_us
+        ? static_cast<uint32_t>(std::min<uint64_t>(0xFFFFFFFFULL, now_us - slot.timestamp_us)) : 0U;
+    char miss_body[180];
+    std::snprintf(miss_body, sizeof(miss_body),
+        "%lu,%lu,%08lX,%u,%u,%u,%u,%u,%u,%u,%lu",
+        static_cast<unsigned long>(can_rx_missed_start_ + 1U),
+        static_cast<unsigned long>(HAL_GetTick()),
+        static_cast<unsigned long>(slot.id),
+        static_cast<unsigned>(source), static_cast<unsigned>(dtid), service ? 1U : 0U,
+        (tail & 0x80U) != 0U ? 1U : 0U, (tail & 0x40U) != 0U ? 1U : 0U,
+        (tail & 0x20U) != 0U ? 1U : 0U, static_cast<unsigned>(tail & 0x1FU),
+        static_cast<unsigned long>(queue_age_us));
+    writeV2Record("SENS:CANMISS:", miss_body);
   }
 
   switch (-res) {

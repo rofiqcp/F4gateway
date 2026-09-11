@@ -2,6 +2,7 @@ from pathlib import Path
 cpp=Path('src/Neo3ProSensors.cpp').read_text()
 h=Path('src/Neo3ProSensors.h').read_text()
 checks={
+ 'fast ISR timestamp is microseconds': 'parseAndQueueMcpRx(rx, Board_MonotonicMicros64())' in cpp,
  'raw software rx queue': 'RAW_CAN_QUEUE_CAPACITY = 128U' in h and 'processRawCanQueue' in cpp,
  'mcp rx hotpath only queues': 'parseAndQueueMcpRx' in cpp and 'enqueueRawCan(id, dlc, &rx[6], timestamp_us)' in cpp and 'canardHandleRxFrame' not in cpp[cpp.index('void Neo3ProSensors::irqFastDrain()'):cpp.index('bool Neo3ProSensors::enqueueRawCan')],
  'known DTOs accepted before verification': 'transport-only quarantine' in cpp,
