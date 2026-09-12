@@ -16,5 +16,5 @@ for pfx in ['ESCX','PERX','NAVX']:
     need(pfx in proto and ('send_ext("'+pfx+'"') in bridge,'bridge/parser contract '+pfx)
 for topic in ['/esc/foc/telemetry','/yolop/lane_metrics','/perception/obstacle_metrics','/odometry/filtered','/odometry/filtered_map','/local_costmap/costmap','/navigation/mppi_closed_loop/status','/navigation/trajectory_safety_state']:
     need(topic in bridge,'authoritative source '+topic)
-need('encoded.size() <= 220U' in bridge and 'kMaxExtendedLine = 220U' in proto,'220-byte wire bound symmetric')
+need('encoded.size() <= 360U' in bridge and 'kMaxExtendedLine = 360U' in proto,'360-byte F4X3 wire bound symmetric')
 print('PASS F4GATEWAY_STAGE2_CONTRACT')
