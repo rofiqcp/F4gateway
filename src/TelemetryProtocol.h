@@ -18,9 +18,11 @@ struct ExtendedTelemetryParseResult {
   bool crcError{false};
   bool lengthError{false};
   bool versionError{false};
+  bool sessionError{false};
   bool sessionChanged{false};
   ExtendedTelemetryDomain domain{ExtendedTelemetryDomain::NONE};
 };
 
 ExtendedTelemetryParseResult parseExtendedTelemetryLine(
-    const char *line, VehicleTelemetry &telemetry, uint32_t nowMs);
+    const char *line, VehicleTelemetry &telemetry, uint32_t nowMs,
+    uint32_t expectedSession = 0U);

@@ -157,6 +157,34 @@ bool parseHeader(char *buf, Header &h) {
   return parseU32(seq, h.seq) && parseU32(age, h.age) && *h.payload != '\0';
 }
 
+
+uint32_t currentGroupSession(const Header &h, const VehicleTelemetry &t, bool &known) {
+  known = true;
+  if (h.domain == ExtendedTelemetryDomain::ESC) {
+    if (std::strcmp(h.group,"PWR")==0) return t.escx.power.session;
+    if (std::strcmp(h.group,"MTR")==0) return t.escx.motors.session;
+    if (std::strcmp(h.group,"ENC")==0) return t.escx.encoder.session;
+    if (std::strcmp(h.group,"LINK")==0) return t.escx.link.session;
+    if (std::strcmp(h.group,"PERF")==0) return t.escx.performance.session;
+  } else if (h.domain == ExtendedTelemetryDomain::PERCEPTION) {
+    if (std::strcmp(h.group,"CAM")==0) return t.perx.camera.session;
+    if (std::strcmp(h.group,"DET")==0) return t.perx.detection.session;
+    if (std::strcmp(h.group,"LANE")==0) return t.perx.lane.session;
+    if (std::strcmp(h.group,"DRV")==0) return t.perx.drivable.session;
+    if (std::strcmp(h.group,"OBS")==0) return t.perx.obstacle.session;
+    if (std::strcmp(h.group,"PERF")==0) return t.perx.performance.session;
+  } else if (h.domain == ExtendedTelemetryDomain::NAVIGATION) {
+    if (std::strcmp(h.group,"POSE")==0) return t.navx.pose.session;
+    if (std::strcmp(h.group,"ODOM")==0) return t.navx.odom.session;
+    if (std::strcmp(h.group,"IMU")==0) return t.navx.imuMag.session;
+    if (std::strcmp(h.group,"NAV2")==0) return t.navx.nav2.session;
+    if (std::strcmp(h.group,"COST")==0) return t.navx.costmap.session;
+    if (std::strcmp(h.group,"CTRL")==0) return t.navx.control.session;
+  }
+  known = false;
+  return 0U;
+}
+
 bool parseEsc(const Header &h, char *f[], size_t n, VehicleTelemetry &t,
               uint32_t now, bool &outOfOrder) {
   if (std::strcmp(h.group, "PWR") == 0) {
@@ -360,7 +388,8 @@ bool parseNav(const Header &h, char *f[], size_t n, VehicleTelemetry &t,
 }  // namespace
 
 ExtendedTelemetryParseResult parseExtendedTelemetryLine(
-    const char *line, VehicleTelemetry &telemetry, uint32_t nowMs) {
+    const char *line, VehicleTelemetry &telemetry, uint32_t nowMs,
+    uint32_t expectedSession) {
   ExtendedTelemetryParseResult result{};
   if (line == nullptr) return result;
   const bool is_v3 = std::strncmp(line,"F4X3:",5)==0;
@@ -404,6 +433,10 @@ ExtendedTelemetryParseResult parseExtendedTelemetryLine(
     if (!parseU32(parts[3],h.schema) || h.schema!=3U) { result.versionError=true; return result; }
     if (!parseU32(parts[4],h.session) || h.session==0U ||
         !parseU32(parts[5],h.seq) || !parseU32(parts[6],h.age) || !parseU32(parts[7],payload_len)) return result;
+    if (expectedSession != 0U && h.session != expectedSession) {
+      result.sessionError = true;
+      return result;
+    }
     h.payload=parts[8];
     if (std::strlen(h.payload)!=payload_len) { result.lengthError=true; return result; }
   } else {
@@ -411,6 +444,8 @@ ExtendedTelemetryParseResult parseExtendedTelemetryLine(
   }
 
   result.domain = h.domain;
+  bool group_known = false;
+  const uint32_t previous_session = currentGroupSession(h, telemetry, group_known);
   char *fields[kMaxCsvFields]{};
   const size_t count = splitCsv(h.payload,fields,kMaxCsvFields);
   if (count == 0U || count > kMaxCsvFields) return result;
@@ -421,6 +456,7 @@ ExtendedTelemetryParseResult parseExtendedTelemetryLine(
   else if(h.domain==ExtendedTelemetryDomain::NAVIGATION) ok=parseNav(h,fields,count,telemetry,nowMs,outOfOrder);
   result.accepted=ok;
   result.outOfOrder=outOfOrder;
-  result.sessionChanged = ok && is_v3;
+  result.sessionChanged = ok && is_v3 && group_known && previous_session != 0U &&
+                          previous_session != h.session;
   return result;
 }

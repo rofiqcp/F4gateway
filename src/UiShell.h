@@ -1297,7 +1297,7 @@ inline void drawSystemLeaf(UiMenuId id, const UiState &ui,
   }
   if (id == UiMenuId::SYSTEM_PINS_IO) {
 #ifdef NEO3PRO
-    snprintf(a,sizeof(a),"CS:%c INT:%c %s",gDiagnostics.pb6VescTx?'H':'L',gDiagnostics.pb7VescRx?'H':'L',gDiagnostics.canOk?"OK":"ERR");drawMetricRow(48,"PB10/12-15 MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
+    snprintf(a,sizeof(a),"CS:%c INT:%c %s",gDiagnostics.pb12McpCs?'H':'L',gDiagnostics.pb10McpInt?'H':'L',gDiagnostics.canOk?"OK":"ERR");drawMetricRow(48,"PB10/12-15 MCP2515",a,gDiagnostics.canOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"%u MHz / 1 Mbps",(unsigned)gDiagnostics.canOscillatorMhz);drawMetricRow(77,"CAN clock / bitrate",a,gDiagnostics.canOk?C_READY:C_WARNING);
     snprintf(a,sizeof(a),"RX:%lu D:%lu",(unsigned long)gDiagnostics.canRxFrames,(unsigned long)gDiagnostics.canTransfers);drawMetricRow(106,"DroneCAN raw / msg",a,gDiagnostics.canRxFrames?C_READY:C_WARNING);
     drawMetricRow(135,"F4 <-> ESC","DISCONNECTED",C_READY);

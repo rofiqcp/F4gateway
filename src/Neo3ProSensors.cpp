@@ -758,6 +758,9 @@ void Neo3ProSensors::serviceCanHealth(uint32_t now_ms) {
     can_ok_ = false;
     return;
   }
+  can_health_tec_ = tec;
+  can_health_rec_ = rec;
+  can_health_eflg_ = eflg;
 
   if ((eflg & (RX0OVR | RX1OVR)) != 0U) {
     if (eflg & RX0OVR) ++can_rx0_overflows_;
@@ -766,9 +769,6 @@ void Neo3ProSensors::serviceCanHealth(uint32_t now_ms) {
     (void)mcpBitModify(REG_EFLG, RX0OVR | RX1OVR, 0U);
   }
 
-  // Error-passive/bus-off must never be allowed to persist. Abort the hardware
-  // mailbox, drop stale libcanard tails and recover with a cooldown. This is the
-  // MCP2515 equivalent of ArduPilot's deadline + bus-off recovery policy.
   // Match ArduPilot CANIface semantics: error-passive is diagnostic/backpressure,
   // not a controller-reset condition. Only an actual BUS-OFF boundary may trigger
   // controller recovery. TX mailbox deadlines independently abort no-ACK frames.
@@ -798,9 +798,18 @@ bool Neo3ProSensors::writeOneCanFrame(const CanardCANFrame *frame) {
       !mcpRead(REG_TXB0CTRL, &ctrl)) {
     ++can_tx_errors_; noteCanTxFailure(now); return false;
   }
-  if ((eflg & (EFLG_TXBO | EFLG_TXEP)) != 0U || tec >= 128U) {
-    ++can_tx_errors_; noteCanTxFailure(now); can_recovery_pending_ = true; return false;
+  if ((eflg & EFLG_TXBO) != 0U) {
+    ++can_tx_errors_;
+    noteCanTxFailure(now);
+    can_recovery_pending_ = true;
+    return false;
   }
+  // Error-passive must NOT suppress every transmission. TEC can decrease only
+  // after successful acknowledged frames, so a permanent TXEP/TEC>=128 reject
+  // deadlocks recovery after a peer returns. Keep the normal bounded backoff and
+  // hardware-mailbox deadline, but allow one real recovery probe when permitted.
+  if ((eflg & EFLG_TXEP) != 0U || tec >= 128U)
+    ++can_tx_passive_probe_count_;
   if ((ctrl & TXREQ) != 0U) {
     // Unexpected orphaned mailbox. Abort only on this fault path; normal
     // arbitration is never interrupted merely because a new command arrived.
@@ -2292,10 +2301,11 @@ void Neo3ProSensors::publishHardware(bool force) {
   std::snprintf(legacy_line, sizeof(legacy_line), "SENS:HW:%s", body);
   writeUsbLine(legacy_line);
 
-  uint8_t tec = 0U, rec = 0U, eflg = 0U;
-  (void)mcpRead(REG_TEC, &tec);
-  (void)mcpRead(REG_REC, &rec);
-  (void)mcpRead(REG_EFLG, &eflg);
+  // Reuse the 10 Hz health snapshot. Diagnostics must not add three extra SPI2
+  // transactions per publish cycle while RX/TX are active.
+  const uint8_t tec = can_health_tec_;
+  const uint8_t rec = can_health_rec_;
+  const uint8_t eflg = can_health_eflg_;
   std::snprintf(body, sizeof(body),
       "%lu,%lu,%u,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u,%u,%lu,%lu",
       static_cast<unsigned long>(seq), static_cast<unsigned long>(now), can_ok_ ? 1U : 0U,
@@ -2321,7 +2331,7 @@ void Neo3ProSensors::publishHardware(bool force) {
       static_cast<unsigned long>(can_tx_frames_),
       static_cast<unsigned long>(can_tx_errors_));
   writeV2Record("SENS:CANRAW:", body);
-  std::snprintf(body, sizeof(body), "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu",
+  std::snprintf(body, sizeof(body), "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%lu,%lu,%lu",
       static_cast<unsigned long>(can_decode_errors_),
       static_cast<unsigned long>(can_rx_resync_events_),
       static_cast<unsigned long>(can_overflows_),
@@ -2332,6 +2342,7 @@ void Neo3ProSensors::publishHardware(bool force) {
       static_cast<unsigned long>(can_tx_abort_count_),
       static_cast<unsigned>(can_tx_fail_streak_),
       static_cast<unsigned long>(can_busoff_count_),
+      static_cast<unsigned long>(can_tx_passive_probe_count_),
       static_cast<unsigned long>(static_cast<int32_t>(can_tx_backoff_until_ms_ - now) > 0
           ? can_tx_backoff_until_ms_ - now : 0U));
   writeV2Record("SENS:CANHEALTH:", body);

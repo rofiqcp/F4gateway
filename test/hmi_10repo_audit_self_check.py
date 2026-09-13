@@ -47,11 +47,11 @@ need('forceRosOffline()' in main and 'stopAllManualTest();' in main[main.find('s
 for pin in ['GPIO_PIN_6','GPIO_PIN_7','GPIO_PIN_2','GPIO_PIN_3','GPIO_PIN_8','GPIO_PIN_9','GPIO_PIN_12','GPIO_PIN_13','GPIO_PIN_5']:
     need(pin in board,f'R04 board still references {pin}')
 need('GPIO_PIN_11 | GPIO_PIN_12' in usb,'R04 USB remains PA11/PA12')
-for field in ['pb6VescTx','pb7VescRx','pa2GnssTx','pa3GnssRx','pb8I2cScl','pb9I2cSda','pb12Safety','pb13SafetyLed','pa8Buzzer','pa5SpiSck','pa6SpiMiso','pa7SpiMosi','pb0TftCs','pb1TftDc','pb2TftRst','pa4TouchCs','pa11UsbDm','pa12UsbDp']:
+for field in ['pb12McpCs','pb10McpInt','pa2GnssTx','pa3GnssRx','pb8I2cScl','pb9I2cSda','pb12Safety','pb13SafetyLed','pa8Buzzer','pa5SpiSck','pa6SpiMiso','pa7SpiMosi','pb0TftCs','pb1TftDc','pb2TftRst','pa4TouchCs','pa11UsbDm','pa12UsbDp']:
     need(field in diag and field in main,f'R04 diagnostics still samples {field}')
 
 # R05-R08 diagnostics/realtime compatibility.
-for token in ['vescUartErrors','gnssUartErrors','vescFrameErrors','vescRecoveryCount','unknownCommands','overlongCommands','tftControllerId']:
+for token in ['canSpiErrors','canDecodeErrors','canOverflows','unknownCommands','overlongCommands','tftControllerId']:
     need(token in diag and token in shell,f'R05 visible diagnostic {token}')
 need('drawUiFrame' in main and 'gUiDrawActive' in main,'R06 rendering remains main-loop guarded')
 need('gDiagnostics.tftOk' in shell and 'UiDomain::SYSTEM' in shell,'R07 local Service health independent of ROS')

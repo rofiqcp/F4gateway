@@ -1,0 +1,35 @@
+{
+  "f4gateway_git_head": "5adcc25e2b8d6cd559c9b343ace01ee2d15d72e2",
+  "hostname": "sirobo",
+  "raw_prefixes": [
+    "/gnss",
+    "/neo3",
+    "/neo3pro",
+    "/imu",
+    "/heading",
+    "/odometry",
+    "/localization/map_yaw_from_enu"
+  ],
+  "ros_domain_id": "42",
+  "schema": "agv-nav-recorder-v1",
+  "snapshot_sha256": {
+    "firmware.identity.json": "131e7a8da4ba5e60c5c523ed40295877c45227fd363399dd71bca79b473f82b9",
+    "imu.yaml": "c28401732463d075ef764203b6680ffc49841b0c84415cf9b1a325b86c36ae37",
+    "mag_heading.yaml": "8b569d827fbf828cd8f167380504c833fc91d2b6b878f10a70d2e29f607273ee",
+    "yahboom_mag_calibration.yaml": "e130823a35c98a34bbb2fc66db8390583a4d365deebc0d24f3c6f33acdf5a65b"
+  },
+  "start_utc_iso8601": "2026-09-13T11:14:24.924284+00:00",
+  "start_wall_utc_ns": 1789298064924284505,
+  "started": false,
+  "stop_wall_utc_ns": 1789298068137049548,
+  "timestamp_contract": {
+    "authority": "F4 bridge promotes Fix2 gnss_us to ROS stamp only when time_standard=2 UTC; otherwise mapped MCU/reception time",
+    "monotonic_ns": "host monotonic nanoseconds for ordering/latency",
+    "neo3pro": "raw Fix2 mcu_ms/network_us/gnss_us/time_standard preserved from /neo3pro/gnss/meta",
+    "ros_header": "exact ROS message header stamp, sec+nanosec; Nav2/REP-105 consumer time",
+    "wall_utc_ns": "Unix UTC nanoseconds from host CLOCK_REALTIME"
+  },
+  "workspace_git_head": "48cda561c3dd529d2a34e37cc72b9f54b77deaf8",
+  "xy_contract": "prefer /odometry/filtered_map, then /odometry/gnss_map, else WGS84 local ENU from first valid fix",
+  "yaw_contract": "prefer official fusion topics; calibrated diagnostic fallback is displayed but explicitly source-tagged and never promoted to Nav2 authority"
+}

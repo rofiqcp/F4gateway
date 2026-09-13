@@ -92,17 +92,21 @@ with tempfile.TemporaryDirectory() as td:
     raw=out.read_bytes()
     if len(raw)!=32: fail(f'manifest length {len(raw)}')
     magic,fmt,base,size,app_crc,header_crc,generation,reserved=struct.unpack('<8I',raw)
-    if magic!=0x31564741 or fmt!=1 or base!=0x08008000 or size!=len(payload): fail('manifest header fields invalid')
+    if magic!=0x31564741 or fmt!=2 or base!=0x08008000 or size!=len(payload): fail('manifest header fields invalid')
     if app_crc!=(zlib.crc32(payload)&0xffffffff): fail('manifest app CRC mismatch')
     if header_crc!=(zlib.crc32(raw[:20])&0xffffffff): fail('manifest header CRC mismatch')
-    if reserved!=0: fail('manifest reserved field must be zero')
+    if reserved!=0xF411CE01: fail('manifest board id mismatch')
 
 boot = (ROOT / 'bootloader/src/main.c').read_text(encoding='utf-8')
 for token in ('APP_CRASH_MAGIC', 'APP_CRASH_LIMIT 3UL', 'BOOT_IDLE_TIMEOUT_MS 20000UL',
               'maintenance_loop', 'begin_update', 'program_chunk', 'commit_manifest',
-              'erase_sector(FLASH_SECTOR_7)', 'FLASH_SECTOR_2', 'FLASH_SECTOR_6',
+              'erase_sector(FLASH_SECTOR_7)', 'FLASH_SECTOR_2', 'FLASH_SECTOR_5',
               'crc32_bytes((const uint8_t *)APP_BASE, expected_size)', 'application_valid()'):
     if token not in boot: fail(f'resident bootloader token missing: {token}')
+if 'erase_sector(FLASH_SECTOR_6)' in boot:
+    fail('resident updater must preserve DNA sector6')
+if 's <= FLASH_SECTOR_5' not in boot:
+    fail('resident updater application erase range must stop at sector5')
 # Transaction invariant: manifest sector must be invalidated before application sectors.
 if boot.find('erase_sector(FLASH_SECTOR_7)') > boot.find('for (uint32_t s = FLASH_SECTOR_2'):
     fail('resident updater must invalidate manifest before erasing application')
@@ -116,7 +120,7 @@ if 'if(request==BOOT_REQUEST_MAGIC) maintenance_loop(valid);' not in boot:
     fail('application boot request must enter resident USB maintenance, not ROM DFU')
 app_src = (ROOT / 'src/main.cpp').read_text(encoding='utf-8')
 for token in ('gAppWatchdogArmed = true', 'RTC->BKP1R = kAppCrashMagic',
-              'RTC->BKP2R = 0U', 'kCrashCounterClearMs = 10000U'):
+              'RTC->BKP2R = 0U', 'kCrashCounterClearMs = 30000U'):
     if token not in app_src: fail(f'application watchdog recovery token missing: {token}')
 cdc = (ROOT / 'scripts/cdc_boot_upload.py').read_text(encoding='utf-8')
 for token in ('BEGIN:', 'DATA:', "transact(s,'END'", 'verify_runtime', 'BOOT_GLOB'):

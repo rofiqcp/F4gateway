@@ -26,7 +26,10 @@ need("can_ok_ = false;" in neo.split("bool Neo3ProSensors::initMcp",1)[1][:700],
 need("Board_ReinitSpi2" not in neo.split("bool Neo3ProSensors::mcpTransfer",1)[1].split("bool Neo3ProSensors::mcpWrite",1)[0], "SPI failure recovery is deferred out of low-level transfer")
 need("pollSerialGui(std::size_t byteBudget = 256U)" in main, "PC RX parsing has a byte budget")
 need("uint8_t commandBudget = 4U" in main, "PC RX parsing has a command budget")
-need("std::min<uint32_t>(timeout_ms, 25U)" in usb, "critical USB writes are synchronously bounded")
+critical = usb.split("bool UsbCdcPort::writeLineCritical",1)[1].split("#ifdef HMI_TEST_HOOKS",1)[0]
+need("writeLineHighPriority" in critical and "service();" in critical, "critical USB writes are nonblocking high-priority")
+need("HAL_Delay" not in critical and "while (" not in critical, "critical USB writes never spin or sleep")
+need("gDriveStopPending" in main and "serviceSafetyControlTx" in main, "safety STOP retry is latched outside critical USB write")
 need("kTxStallRepairMs" in rd("include/UsbCdcPort.h") and "tx_stall_recovery_count_" in usb, "USB endpoint stall repair remains enabled")
 need("kAppCrashMagic" in board and "NVIC_SystemReset" in board, "fatal boot/runtime failures reset into recovery path")
 for handler in ("HardFault_Handler", "MemManage_Handler", "BusFault_Handler", "UsageFault_Handler"):

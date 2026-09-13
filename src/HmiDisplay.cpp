@@ -1063,9 +1063,9 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     sy = (static_cast<int32_t>(ry) - touch_y0_) * height_ / touch_y1_;
   }
   if (touch_invert_x_)
-    sx = width_ - sx;
+    sx = (width_ - 1) - sx;
   if (touch_invert_y_)
-    sy = height_ - sy;
+    sy = (height_ - 1) - sy;
   if (sx < 0 || sy < 0 || sx >= width_ || sy >= height_)
     return false;
   *x = static_cast<uint16_t>(ClampI32(sx, 0, width_ - 1));

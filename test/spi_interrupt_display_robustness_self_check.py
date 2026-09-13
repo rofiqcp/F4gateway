@@ -52,7 +52,8 @@ need("verifyWriteProfile" in cpp and "readPixel565" in cpp, "fast clocks require
 need("ultra_fast_write_validated_" in h and "ULTRA=%u" in main, "24 MHz validation is observable")
 need("TFT:VERIFY" in main, "runtime clock re-verification command exists")
 
-need(re.search(r"SetPriority\(USART1_IRQn,\s*0", board) is not None, "USART1/VESC priority 0")
+legacy_uart = re.search(r"#if F4_ESC_GATEWAY(.*?)SetPriority\(USART1_IRQn,\s*0", board, re.S)
+need(legacy_uart is not None, "legacy USART1/VESC priority exists only behind F4_ESC_GATEWAY")
 need(re.search(r"SetPriority\(USART2_IRQn,\s*1", board) is not None, "USART2/GNSS priority 1")
 need(re.search(r"SetPriority\(OTG_FS_IRQn,\s*2", usb) is not None, "USB OTG FS priority 2")
 need(re.search(r"SetPriority\(TIM1_TRG_COM_TIM11_IRQn,\s*3", board) is not None, "watchdog priority 3")

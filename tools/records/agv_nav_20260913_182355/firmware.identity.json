@@ -1,0 +1,13 @@
+{
+  "app_base": "0x08008000",
+  "app_limit": "0x08040000",
+  "binary": "firmware.bin",
+  "build_epoch_utc": 1789282576,
+  "crc32": "93025312",
+  "git_dirty": true,
+  "git_full_sha": "5adcc25e2b8d6cd559c9b343ace01ee2d15d72e2",
+  "git_sha": "5adcc25e2b8d",
+  "schema": 3,
+  "sha256": "02d7bddf68a588d0380953ef7507882390a269ebe7b9dc0363f0c0d21b91539d",
+  "size": 185144
+}

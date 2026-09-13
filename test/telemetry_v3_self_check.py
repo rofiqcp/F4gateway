@@ -21,8 +21,10 @@ int main(){
   auto c=parseExtendedTelemetryLine(corrupt.c_str(),t,1020); assert(c.recognized&&!c.accepted&&c.crcError);
   auto l=parseExtendedTelemetryLine(v3("ESC","PWR",42,2,20,"1,53,1,1,1,1,0.1,40,0",3,1).c_str(),t,1030); assert(!l.accepted&&l.lengthError);
   auto ver=parseExtendedTelemetryLine(v3("ESC","PWR",42,2,20,"1,53,1,1,1,1,0.1,40,0",4,0).c_str(),t,1040); assert(!ver.accepted&&ver.versionError);
-  auto news=parseExtendedTelemetryLine(v3("ESC","PWR",77,1,10,"1,54,1,1,1,1,0.1,40,0").c_str(),t,1050); assert(news.accepted&&t.escx.power.session==77&&t.escx.power.seq==1);
-  auto legacy_fresh=parseExtendedTelemetryLine("ESCX:PWR:99:5:1,55,1,1,1,1,0.1,40,0",t,1060); assert(!legacy_fresh.accepted&&legacy_fresh.outOfOrder);
+  auto wrong_session=parseExtendedTelemetryLine(v3("ESC","PWR",77,1,10,"1,54,1,1,1,1,0.1,40,0").c_str(),t,1050,42); assert(wrong_session.recognized&&!wrong_session.accepted&&wrong_session.sessionError&&t.escx.power.session==42);
+  auto bound_ok=parseExtendedTelemetryLine(v3("ESC","PWR",42,2,10,"1,54,1,1,1,1,0.1,40,0").c_str(),t,1055,42); assert(bound_ok.accepted&&!bound_ok.sessionError&&t.escx.power.session==42&&t.escx.power.seq==2);
+  auto news=parseExtendedTelemetryLine(v3("ESC","PWR",77,1,10,"1,54,1,1,1,1,0.1,40,0").c_str(),t,1060); assert(news.accepted&&t.escx.power.session==77&&t.escx.power.seq==1);
+  auto legacy_fresh=parseExtendedTelemetryLine("ESCX:PWR:99:5:1,55,1,1,1,1,0.1,40,0",t,1070); assert(!legacy_fresh.accepted&&legacy_fresh.outOfOrder);
   auto legacy_late=parseExtendedTelemetryLine("ESCX:PWR:100:5:1,56,1,1,1,1,0.1,40,0",t,7000); assert(legacy_late.accepted&&t.escx.power.session==0);
   auto trunc=parseExtendedTelemetryLine("F4X3:ESC:PWR:3:1:1:0:5:1,2:1234",t,7010); assert(trunc.recognized&&!trunc.accepted);
   std::cout<<"TELEMETRY_V3_SELF_CHECK_PASS\n"; return 0;

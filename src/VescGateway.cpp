@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <algorithm>
 
+#if F4_ESC_GATEWAY
+
 int VescGateway::hexNibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -522,3 +524,5 @@ void VescGateway::poll() {
   recoveryTick(now);
   if (owner_ == Owner::RUNTIME) publishStatus(false);
 }
+
+#endif // F4_ESC_GATEWAY

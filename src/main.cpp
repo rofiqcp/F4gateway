@@ -9,6 +9,8 @@
 #include "UsbCdcPort.h"
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
+#include <limits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -56,19 +58,6 @@ Neo3Sensors gNeo3;
 
 #if F4_ESC_GATEWAY
 VescGateway gVesc;
-#else
-struct DisabledVescGateway {
-  void begin() {}
-  void poll() {}
-  void setSafetyStop(bool) {}
-  bool maintenanceMode() const { return false; }
-  bool handleHostCommand(const char *) { return false; }
-  bool uartOk() const { return false; }
-  uint32_t frameErrors() const { return 0U; }
-  uint32_t recoveryCount() const { return 0U; }
-  uint32_t lastValidFrameAgeMs(uint32_t) const { return 0xFFFFFFFFUL; }
-};
-DisabledVescGateway gVesc;
 #endif
 HmiDiagnostics gDiagnostics{};
 
@@ -214,7 +203,69 @@ static bool tryUsbLine(const char *line) {
   return gUsb.write(reinterpret_cast<const uint8_t *>(out), total) == total;
 }
 
-static void printBoth(const char *line) { (void)tryUsbLine(line); }
+static bool printBoth(const char *line) { return tryUsbLine(line); }
+
+// Safety/control messages must never depend on the best-effort telemetry ring.
+// A failed enqueue is latched and retried cooperatively from main/realtime
+// service until the high-priority CDC ring accepts the STOP.
+static bool gDriveStopPending = false;
+static bool gSteerStopPending = false;
+static bool gNavStopPending = false;
+static uint32_t gSafetyControlTxRetries = 0U;
+static uint32_t gSafetyControlTxDrops = 0U;
+static uint32_t gSafetyControlTxQueued = 0U;
+static uint32_t gLastUsbSafetyGeneration = 0U;
+static uint32_t gLastUsbRxResyncCount = 0U;
+static int8_t gDriveTestDirection = 0;
+static uint32_t gDriveLeaseLastTxMs = 0U;
+static constexpr uint32_t DRIVE_LEASE_REFRESH_MS = 100U;
+
+static bool sendSafetyControlLine(const char *line) {
+  if (gUsb.writeLineHighPriority(line)) {
+    ++gSafetyControlTxQueued;
+    return true;
+  }
+  ++gSafetyControlTxRetries;
+  ++gSafetyControlTxDrops;
+  return false;
+}
+
+static void latchAllSafetyStops() {
+  gDriveStopPending = true;
+  gSteerStopPending = true;
+  gNavStopPending = true;
+}
+
+static void forceRosOffline();
+
+static void serviceUsbTransportState() {
+  const uint32_t generation = gUsb.transportGeneration();
+  if (generation != gLastUsbSafetyGeneration) {
+    gLastUsbSafetyGeneration = generation;
+    // ANY destructive USB queue reset can discard a STOP, including endpoint
+    // split-brain repair that does not re-enumerate the USB class. Re-latch all
+    // fail-safe controls whenever the transport generation changes.
+    latchAllSafetyStops();
+  }
+
+  // Physical class loss/re-enumeration invalidates the host session immediately.
+  // Do not wait for the ROS heartbeat timeout before revoking motion authority.
+  const bool transport_authoritative = gUsb.connected() && gUsb.hostSessionEstablished();
+  const bool nav_active = gTelemetry.navigationStatus == NAV_QUEUED ||
+                          gTelemetry.navigationStatus == NAV_NAVIGATING;
+  if (!transport_authoritative &&
+      (gTelemetry.rosConnected || driveTestRunning || steeringTestRunning || nav_active))
+    forceRosOffline();
+}
+
+static void serviceSafetyControlTx() {
+  if (gDriveStopPending && sendSafetyControlLine("CMD:DRIVE:STOP"))
+    gDriveStopPending = false;
+  if (gSteerStopPending && sendSafetyControlLine("CMD:STEER:STOP"))
+    gSteerStopPending = false;
+  if (gNavStopPending && sendSafetyControlLine("CMD:NAV:STOP"))
+    gNavStopPending = false;
+}
 
 static void publishPage() {
   char line[48];
@@ -244,17 +295,21 @@ static void enterSystemDfu() {
 }
 
 static void stopDriveTest() {
-  // STOP dikirim walau state lokal sudah idle agar tombol STOP selalu
-  // idempotent.
-  printBoth("CMD:DRIVE:STOP");
+  // STOP is fail-safe and idempotent. Latch it before clearing local motion
+  // state, then retry via the dedicated high-priority CDC ring until accepted.
+  gDriveStopPending = true;
   driveTestRunning = false;
   driveTestDeadlineMs = 0U;
+  gDriveTestDirection = 0;
+  gDriveLeaseLastTxMs = 0U;
+  serviceSafetyControlTx();
   gTelemetry.state = STATE_STOPPED;
   markUiDirty();
 }
 
 static void stopSteeringTest() {
-  printBoth("CMD:STEER:STOP");
+  gSteerStopPending = true;
+  serviceSafetyControlTx();
   steeringTestRunning = false;
   snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
            "%s", "IDLE");
@@ -321,7 +376,8 @@ static void drawUiNow(bool full = true) {
 }
 
 static bool manualMotionGateValid(bool steering) {
-  if (!gTelemetry.rosConnected || !gTelemetry.escFresh ||
+  if (!gUsb.connected() || !gUsb.hostSessionEstablished() ||
+      !gTelemetry.rosConnected || !gTelemetry.escFresh ||
       gTelemetry.mode != MODE_MANUAL || !gTelemetry.escReady || gTelemetry.eStop)
     return false;
   if (steering)
@@ -488,7 +544,12 @@ static void requestConfig(UiEditKey key, float value) {
     snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%d", txn, keyName,
              value > 0.5F ? 1 : 0);
   }
-  printBoth(line);
+  if (!printBoth(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
+    drawUiNow(true);
+    return;
+  }
   gTelemetry.configPending = true;
   gTelemetry.configLastOk = false;
   gTelemetry.configTxn = txn;
@@ -576,7 +637,12 @@ static void runSteeringTest(float targetDeg) {
   const float limited = std::clamp(targetDeg, -STEER_TEST_ANGLE_MAX_DEG,
                                    STEER_TEST_ANGLE_MAX_DEG);
   snprintf(line, sizeof(line), "CMD:STEER:%.1f", limited);
-  printBoth(line);
+  if (!gUsb.writeLineHighPriority(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB CONTROL BUSY");
+    drawUiNow(false);
+    return;
+  }
   steeringTestRunning = true;
   snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
            "%s", "RUNNING");
@@ -591,8 +657,7 @@ static bool driveTestAllowed() {
 
 static void runDriveTest(bool forward) {
   if (driveTestRunning) {
-    // Pergantian arah wajib melewati STOP; satu sentuhan saat bergerak hanya
-    // menghentikan.
+    // Direction reversal must pass through an explicit STOP.
     stopDriveTest();
     return;
   }
@@ -606,11 +671,35 @@ static void runDriveTest(bool forward) {
   char line[48];
   snprintf(line, sizeof(line), "CMD:DRIVE:%s:%u", forward ? "FWD" : "REV",
            gTelemetry.manualSpeedPct);
-  printBoth(line);
+  // Start/lease refresh is high priority. If the ring is momentarily full, the
+  // cooperative lease service below retries while the physical button remains
+  // in its bounded drive-test session. ROS independently expires the lease.
+  if (!gUsb.writeLineHighPriority(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB CONTROL BUSY");
+    drawUiNow(false);
+    return;
+  }
   driveTestRunning = true;
-  driveTestDeadlineMs = HAL_GetTick() + DRIVE_TEST_MAX_MS;
+  gDriveTestDirection = forward ? 1 : -1;
+  gDriveLeaseLastTxMs = HAL_GetTick();
+  driveTestDeadlineMs = gDriveLeaseLastTxMs + DRIVE_TEST_MAX_MS;
   gTelemetry.state = STATE_RUNNING;
   markUiDirty();
+}
+
+static void serviceManualDriveLease() {
+  if (!driveTestRunning || gDriveTestDirection == 0) return;
+  const uint32_t now = HAL_GetTick();
+  if (static_cast<uint32_t>(now - gDriveLeaseLastTxMs) < DRIVE_LEASE_REFRESH_MS) return;
+  if (!manualMotionGateValid(false)) {
+    stopDriveTest();
+    return;
+  }
+  char line[48];
+  snprintf(line, sizeof(line), "CMD:DRIVE:%s:%u",
+           gDriveTestDirection > 0 ? "FWD" : "REV", gTelemetry.manualSpeedPct);
+  if (gUsb.writeLineHighPriority(line)) gDriveLeaseLastTxMs = now;
 }
 
 static void selectWaypoint(int direction) {
@@ -621,7 +710,12 @@ static void selectWaypoint(int direction) {
     index = 0;
   char line[32];
   snprintf(line, sizeof(line), "CMD:WP:SELECT:%d", index);
-  printBoth(line);
+  if (!printBoth(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
+    drawUiNow(false);
+    return;
+  }
   // Jangan ubah state authoritative sebelum mirror ROS kembali.
 }
 
@@ -640,7 +734,11 @@ static void goSelectedWaypoint() {
   }
   char line[32];
   snprintf(line, sizeof(line), "CMD:WP:GO:%u", index);
-  printBoth(line);
+  if (!printBoth(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
+    drawUiNow(false);
+  }
 }
 
 static void saveSelectedWaypoint() {
@@ -657,10 +755,19 @@ static void saveSelectedWaypoint() {
   }
   char line[32];
   snprintf(line, sizeof(line), "CMD:WP:SAVE:%u", index);
-  printBoth(line);
+  if (!printBoth(line)) {
+    gTelemetry.configLastOk = false;
+    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
+    drawUiNow(false);
+  }
 }
 
-static void stopNavigation() { printBoth("CMD:NAV:STOP"); }
+static void stopNavigation() {
+  // Navigation STOP shares the same fail-safe high-priority/latching contract
+  // as manual drive and steering STOP. A congested telemetry ring cannot lose it.
+  gNavStopPending = true;
+  serviceSafetyControlTx();
+}
 
 static void handleOk() {
   if (gTelemetry.configPending)
@@ -877,6 +984,127 @@ static bool parseBool(const char *s) {
          eqIgnoreCase(s, "TRUE");
 }
 
+
+static bool parseBoolStrict(const char *s, bool &out) {
+  if (s == nullptr || *s == '\0') return false;
+  if (!strcmp(s, "1") || eqIgnoreCase(s, "ON") || eqIgnoreCase(s, "READY") ||
+      eqIgnoreCase(s, "TRUE")) { out = true; return true; }
+  if (!strcmp(s, "0") || eqIgnoreCase(s, "OFF") || eqIgnoreCase(s, "NOT READY") ||
+      eqIgnoreCase(s, "FALSE")) { out = false; return true; }
+  return false;
+}
+
+static bool parseFiniteDoubleStrict(const char *s, double &out) {
+  if (s == nullptr || *s == '\0') return false;
+  errno = 0;
+  char *end = nullptr;
+  const double value = std::strtod(s, &end);
+  if (errno != 0 || end == s || end == nullptr || *end != '\0' || !std::isfinite(value))
+    return false;
+  out = value;
+  return true;
+}
+
+static bool parseLongStrict(const char *s, long &out) {
+  if (s == nullptr || *s == '\0') return false;
+  errno = 0;
+  char *end = nullptr;
+  const long value = std::strtol(s, &end, 10);
+  if (errno != 0 || end == s || end == nullptr || *end != '\0') return false;
+  out = value;
+  return true;
+}
+
+static bool parseU32Strict(const char *s, uint32_t &out) {
+  if (s == nullptr || *s == '\0') return false;
+  for (const char *p = s; *p != '\0'; ++p)
+    if (*p < '0' || *p > '9') return false;
+  errno = 0;
+  char *end = nullptr;
+  const unsigned long value = std::strtoul(s, &end, 10);
+  if (errno != 0 || end == s || end == nullptr || *end != '\0' ||
+      value > std::numeric_limits<uint32_t>::max()) return false;
+  out = static_cast<uint32_t>(value);
+  return true;
+}
+
+static bool legacyTelemetryPayloadValid(const char *command) {
+  if (command == nullptr) return false;
+  auto after = [command](const char *prefix) -> const char * {
+    const size_t n = std::strlen(prefix);
+    return std::strncmp(command, prefix, n) == 0 ? command + n : nullptr;
+  };
+  const char *p = nullptr;
+  double d = 0.0;
+  long i = 0;
+  bool b = false;
+
+  // Every scalar that can refresh a domain must be fully parseable and finite.
+  static const char *const floatPrefixes[] = {
+      "SPD:", "DRIVE_TGT:", "DRIVE_ACT:", "RPM:", "ERPM:", "VBUS:",
+      "STEER_TARGET:", "STEER_ACTUAL:", "STEER_ERR:", "CFGSTEERTEST:",
+      "CFGDRVSCALE:", "LAT:", "LON:", "HDOP:", "HACC:", "GAGE:", "HEAD:",
+      "GYROZ:", "FPS:", "DIST:", "CONF:"};
+  for (const char *prefix : floatPrefixes) {
+    if ((p = after(prefix)) != nullptr) {
+      if (!parseFiniteDoubleStrict(p, d)) return false;
+      if (!std::strcmp(prefix, "LAT:") && (d < -90.0 || d > 90.0)) return false;
+      if (!std::strcmp(prefix, "LON:") && (d < -180.0 || d > 180.0)) return false;
+      if (!std::strcmp(prefix, "CFGSTEERTEST:") &&
+          (d < STEER_TEST_ANGLE_MIN_DEG || d > STEER_TEST_ANGLE_MAX_DEG)) return false;
+      if (!std::strcmp(prefix, "CFGDRVSCALE:") && (d < DRIVE_SCALE_MIN || d > DRIVE_SCALE_MAX)) return false;
+      if (!std::strcmp(prefix, "CONF:") && (d < 0.0 || d > 100.0)) return false;
+      if ((!std::strcmp(prefix, "HDOP:") || !std::strcmp(prefix, "HACC:") ||
+           !std::strcmp(prefix, "GAGE:") || !std::strcmp(prefix, "FPS:") ||
+           !std::strcmp(prefix, "DIST:")) && d < 0.0) return false;
+      return true;
+    }
+  }
+
+  static const char *const intPrefixes[] = {"MANUAL_SPEED:", "FIX:", "SAT:", "WPSEL:"};
+  for (const char *prefix : intPrefixes) {
+    if ((p = after(prefix)) != nullptr) {
+      if (!parseLongStrict(p, i)) return false;
+      if (!std::strcmp(prefix, "MANUAL_SPEED:") && (i < MANUAL_SPEED_MIN || i > MANUAL_SPEED_MAX)) return false;
+      if (!std::strcmp(prefix, "SAT:") && (i < 0 || i > 99)) return false;
+      if (!std::strcmp(prefix, "WPSEL:") && (i < 0 || i >= HMI_WAYPOINT_COUNT)) return false;
+      if (!std::strcmp(prefix, "FIX:") && (i < 0 || i > 6)) return false;
+      return true;
+    }
+  }
+
+  static const char *const boolPrefixes[] = {
+      "ROS:", "ESC:", "ENC:", "VESC_LINK:", "ESTOP:", "CFGPERINF:",
+      "GPS:", "IMU:", "MAG:", "CAM:", "PER:", "DRV:", "OBS:", "MOTION:", "NAV2:"};
+  for (const char *prefix : boolPrefixes)
+    if ((p = after(prefix)) != nullptr) return parseBoolStrict(p, b);
+
+  if ((p = after("MODE:")) != nullptr)
+    return eqIgnoreCase(p, "AUTO") || eqIgnoreCase(p, "MANUAL");
+  if ((p = after("STATE:")) != nullptr)
+    return eqIgnoreCase(p, "STANDBY") || eqIgnoreCase(p, "RUNNING") ||
+           eqIgnoreCase(p, "STOPPED") || eqIgnoreCase(p, "STOP") || eqIgnoreCase(p, "FAULT");
+  if ((p = after("NAV:")) != nullptr)
+    return eqIgnoreCase(p, "IDLE") || eqIgnoreCase(p, "SELECTED") ||
+           eqIgnoreCase(p, "QUEUED") || eqIgnoreCase(p, "SENDING") ||
+           eqIgnoreCase(p, "NAVIGATING") || eqIgnoreCase(p, "ACTIVE") ||
+           eqIgnoreCase(p, "ARRIVED") || eqIgnoreCase(p, "SUCCEEDED") ||
+           eqIgnoreCase(p, "STOPPED") || eqIgnoreCase(p, "CANCELED") ||
+           eqIgnoreCase(p, "FAILED") || eqIgnoreCase(p, "ABORTED") || eqIgnoreCase(p, "REJECTED");
+  if (!std::strncmp(command, "WP", 2) && command[2] >= '0' && command[2] <= '3' && command[3] == ':') {
+    const char *payload = command + 4;
+    const char *colon = std::strchr(payload, ':');
+    if (colon == nullptr || colon == payload) return false;
+    char saved[16]{};
+    const size_t n = static_cast<size_t>(colon - payload);
+    if (n >= sizeof(saved)) return false;
+    std::memcpy(saved, payload, n);
+    saved[n] = '\0';
+    return parseBoolStrict(saved, b);
+  }
+  return true; // unknown commands are rejected by the normal command dispatcher.
+}
+
 static void parseSystemStatus(const char *s) {
   if (eqIgnoreCase(s, "OFF"))
     gTelemetry.systemStatus = SYS_OFF;
@@ -958,21 +1186,30 @@ static void configAck(bool ok, uint16_t txn, const char *key,
 
 static void parseConfigResult(char *command, bool ok) {
   // ACK:CFG:<txn>:<key>:<value> / ERR:CFG:<txn>:<key>:<reason>
-  char *p = strchr(command, ':');
-  if (p == nullptr)
+  char *p1 = std::strchr(command, ':');
+  char *p2 = p1 != nullptr ? std::strchr(p1 + 1, ':') : nullptr;
+  char *txn_end = p2 != nullptr ? std::strchr(p2 + 1, ':') : nullptr;
+  if (p1 == nullptr || p2 == nullptr || txn_end == nullptr || txn_end == p2 + 1) {
+    ++gDiagnostics.configAckMalformed;
     return;
-  p = strchr(p + 1, ':');
-  if (p == nullptr)
+  }
+  const char saved = *txn_end;
+  *txn_end = '\0';
+  uint32_t txn32 = 0U;
+  const bool txn_ok = parseU32Strict(p2 + 1, txn32) && txn32 <= 0xFFFFU;
+  *txn_end = saved;
+  if (!txn_ok) {
+    ++gDiagnostics.configAckMalformed;
     return;
-  const uint16_t txn = static_cast<uint16_t>(strtoul(p + 1, &p, 10));
-  if (p == nullptr || *p != ':')
+  }
+  char *key = txn_end + 1;
+  char *sep = std::strchr(key, ':');
+  if (sep == nullptr || sep == key || sep[1] == '\0') {
+    ++gDiagnostics.configAckMalformed;
     return;
-  char *key = p + 1;
-  char *sep = strchr(key, ':');
-  if (sep == nullptr)
-    return;
+  }
   *sep = '\0';
-  configAck(ok, txn, key, sep + 1);
+  configAck(ok, static_cast<uint16_t>(txn32), key, sep + 1);
 }
 
 static void markRosHeartbeat() {
@@ -999,7 +1236,11 @@ static void markRosHeartbeat() {
 }
 
 static void forceRosOffline() {
+  // ROS/host loss is fail-closed for BOTH manual and autonomous authority.
+  // stopAllManualTest() re-latches drive/steer; navigation STOP is independent.
   stopAllManualTest();
+  gNavStopPending = true;
+  serviceSafetyControlTx();
   const bool wasConnected = gTelemetry.rosConnected;
   gTelemetry.rosConnected = false;
   rosHeartbeatStableCount = 0U;
@@ -1017,6 +1258,7 @@ static void forceRosOffline() {
   gTelemetry.perceptionReady = false;
   gTelemetry.motionReady = false;
   gTelemetry.nav2Ready = false;
+  gTelemetry.navigationStatus = NAV_STOPPED;
   gTelemetry.escFresh = false;
   gTelemetry.perceptionFresh = false;
   gTelemetry.navigationFresh = false;
@@ -1026,7 +1268,6 @@ static void forceRosOffline() {
   gTelemetry.escx = EscExtendedTelemetry{};
   gTelemetry.perx = PerceptionExtendedTelemetry{};
   gTelemetry.navx = NavigationExtendedTelemetry{};
-  gTelemetry.vbusValid = false;
   seenEscDomain = false;
   seenPerceptionDomain = false;
   seenNavigationDomain = false;
@@ -1073,44 +1314,8 @@ static bool startsWithAny(const char *command, const char *const *prefixes,
   return false;
 }
 
-static void markDomainForCommand(const char *command) {
-  // A new link epoch must receive fresh domain data after ROS heartbeat.
-  if (!gTelemetry.rosConnected)
-    return;
-  static const char *const escPrefixes[] = {
-      "MODE:",         "STATE:",      "SPD:",       "DRIVE_TGT:",
-      "DRIVE_ACT:",    "RPM:",        "ERPM:",      "VBUS:",
-      "STEER_TARGET:",
-      "STEER_ACTUAL:", "STEER_ERR:",  "STEERTEST:", "ESC:",
-      "ENC:",          "VESC_LINK:",  "ESTOP:",     "MANUAL_SPEED:",
-      "CFGSTEERTEST:", "CFGDRVSCALE:"};
-  static const char *const perceptionPrefixes[] = {
-      "CFGPERINF:", "CAM:",  "PER:", "FPS:", "OBJ:",
-      "DIST:",      "CONF:", "DRV:", "OBS:", "LANE:"};
-  static const char *const navigationPrefixes[] = {
-      "GPS:",        "FIX:",       "LAT:",      "LON:",       "SAT:",
-      "HDOP:",       "HACC:",      "GAGE:",     "HEAD:",      "IMU:",
-      "GYROZ:",      "MAG:",       "MOTION:",   "NAV2:",      "LOCSTATE:",
-      "GNSSSTATUS:", "IMUSTATUS:", "EKFLOCAL:", "EKFGLOBAL:", "WPSEL:",
-      "TARGET:",     "NAV:",       "WP0:",      "WP1:",       "WP2:",
-      "WP3:"};
-  const uint32_t now = HAL_GetTick();
-  if (startsWithAny(command, escPrefixes,
-                    sizeof(escPrefixes) / sizeof(escPrefixes[0]))) {
-    lastEscDomainMs = now;
-    seenEscDomain = true;
-  } else if (startsWithAny(command, perceptionPrefixes,
-                           sizeof(perceptionPrefixes) /
-                               sizeof(perceptionPrefixes[0]))) {
-    lastPerceptionDomainMs = now;
-    seenPerceptionDomain = true;
-  } else if (startsWithAny(command, navigationPrefixes,
-                           sizeof(navigationPrefixes) /
-                               sizeof(navigationPrefixes[0]))) {
-    lastNavigationDomainMs = now;
-    seenNavigationDomain = true;
-  }
-}
+// Legacy key/value telemetry is display compatibility only. Domain freshness is
+// authoritative exclusively from accepted, host-session-bound F4X3 frames.
 
 static void markUiForCommand(const char *command) {
   uint8_t bits = UI_DIRTY_CONTENT;
@@ -1249,11 +1454,11 @@ static void sampleDiagnostics(uint32_t now) {
 
 #ifdef NEO3PRO
   // Reuse legacy diagnostic fields to display the compact MCP2515 GPIO block.
-  gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_12); // MCP CS
-  gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_10); // MCP INT
+  gDiagnostics.pb12McpCs = pinHigh(GPIOB, GPIO_PIN_12);
+  gDiagnostics.pb10McpInt = pinHigh(GPIOB, GPIO_PIN_10);
 #else
-  gDiagnostics.pb6VescTx = pinHigh(GPIOB, GPIO_PIN_6);
-  gDiagnostics.pb7VescRx = pinHigh(GPIOB, GPIO_PIN_7);
+  gDiagnostics.pb12McpCs = false;
+  gDiagnostics.pb10McpInt = false;
 #endif
   gDiagnostics.pa2GnssTx = pinHigh(GPIOA, GPIO_PIN_2);
   gDiagnostics.pa3GnssRx = pinHigh(GPIOA, GPIO_PIN_3);
@@ -1302,7 +1507,9 @@ static void handleSerialCommand(char *command);
 
 static bool motionSafeForHeavyMaintenance() {
   gNeo3.pollSafetyIo();
+#if F4_ESC_GATEWAY
   gVesc.setSafetyStop(gNeo3.safetyPressed());
+#endif
   const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
   const bool stateSafe =
@@ -1338,19 +1545,88 @@ static bool runTftSelfTest() {
   return true;
 }
 
+static bool hostCommandRealtimeCritical(const char *command) {
+  if (command == nullptr) return false;
+  static const char *const prefixes[] = {
+      "HOST:HELLO:", "F4X3:", "ROS:", "SYS:", "MODE:", "STATE:",
+      "ESTOP:", "ESC:", "ENC:", "VESC_LINK:", "MOTION:", "NAV2:", "NAV:"};
+  return startsWithAny(command, prefixes, sizeof(prefixes) / sizeof(prefixes[0]));
+}
+
+static bool commandAllowedBeforeHostSession(const char *command) {
+  if (command == nullptr) return false;
+  if (!std::strncmp(command, "HOST:HELLO:", 11)) return true;
+  static const char *const exact[] = {
+      "PING", "GET:STATE", "USB:STATUS", "USB:RECOVER", "FAULT:STATUS",
+      "FW:INFO", "TFT:STATUS", "TOUCH:STATUS", "TFT:DIAG",
+      "BOOT:DFU:ARM", "BOOT:DFU:CONFIRM", "BOOT:DFU",
+      "NEO:STATUS", "NEO:CAN:STATUS"};
+  for (const char *item : exact)
+    if (std::strcmp(command, item) == 0) return true;
+  return false;
+}
+
 static void handleSerialCommand(char *command) {
   while (*command == ' ' || *command == '\t')
     ++command;
   if (*command == '\0')
     return;
   const bool transportRealtime =
-      !std::strncmp(command, "VESC:", 5) || !std::strncmp(command, "NEO:", 4);
+      !std::strncmp(command, "VESC:", 5) || !std::strncmp(command, "NEO:", 4) ||
+      hostCommandRealtimeCritical(command);
   if (gRealtimeParserActive && !transportRealtime) {
     (void)enqueueDeferredCommand(command);
     return;
   }
+  if (gRealtimeParserActive && transportRealtime)
+    ++gDiagnostics.realtimeCriticalCommands;
   ++gDiagnostics.hostCommands;
   gDiagnostics.lastHostCommandMs = HAL_GetTick();
+
+  // HOST:HELLO is the only authority-establishing command. Same-token retries are
+  // idempotent: ACK again without queue purge, ROS invalidation, or safety reset.
+  if (!std::strncmp(command, "HOST:HELLO:", 11)) {
+    uint32_t token = 0U;
+    if (!parseU32Strict(command + 11, token) || token == 0U) {
+      ++gDiagnostics.hostSessionMalformed;
+      (void)gUsb.writeLineHighPriority("ERR:HOST:SESSION:ARGS");
+      return;
+    }
+    char ack[96];
+    std::snprintf(ack, sizeof(ack), "ACK:HOST:SESSION:%lu:%lu",
+                  static_cast<unsigned long>(token),
+                  static_cast<unsigned long>(gUsb.transportGeneration()));
+    if (gUsb.hostSessionEstablished() && gUsb.hostSessionToken() == token) {
+      ++gDiagnostics.hostSessionDuplicateHello;
+      (void)gUsb.writeLineHighPriority(ack);
+      return;
+    }
+
+    gUsb.beginHostSession(token);
+    if (!gUsb.writeLineHighPriority(ack)) {
+      // Do not silently establish an epoch the host cannot acknowledge. The host
+      // repeats HELLO; local authority remains fail-closed in the meantime.
+      gUsb.invalidateHostSession();
+      forceRosOffline();
+      return;
+    }
+    gUsb.confirmHostSession();
+    // ACK precedes STOP lines, then every old ROS/domain authority is revoked.
+    forceRosOffline();
+    publishPage();
+    publishLinkState();
+    (void)gNeo3.handleHostCommand("NEO:STATUS");
+    return;
+  }
+
+  // Before HELLO/ACK synchronization only read-only diagnostics and explicit
+  // recovery paths are accepted. Telemetry, configuration ACKs, menu/control,
+  // and peripheral mutation cannot acquire authority from stale CDC bytes.
+  if (!gUsb.hostSessionEstablished() && !commandAllowedBeforeHostSession(command)) {
+    ++gDiagnostics.preSessionRejected;
+    (void)gUsb.writeLineHighPriority("ERR:HOST:SESSION:REQUIRED");
+    return;
+  }
 
   // Gateway hardware frame selalu diprioritaskan dan tidak menyentuh UI parser.
   if (!strncmp(command, "VESC:", 5)) {
@@ -1374,27 +1650,6 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
-  if (!std::strncmp(command, "HOST:HELLO:", 11)) {
-    char *end = nullptr;
-    const unsigned long parsed = std::strtoul(command + 11, &end, 10);
-    if (end == command + 11 || (end != nullptr && *end != '\0')) {
-      (void)gUsb.writeLineHighPriority("ERR:HOST:SESSION:ARGS");
-      return;
-    }
-    const uint32_t token = static_cast<uint32_t>(parsed);
-    gUsb.beginHostSession(token);
-    char ack[96];
-    std::snprintf(ack, sizeof(ack), "ACK:HOST:SESSION:%lu:%lu",
-                  static_cast<unsigned long>(token),
-                  static_cast<unsigned long>(gUsb.sessionGeneration()));
-    (void)gUsb.writeLineHighPriority(ack);
-    // Snapshot after the ACK is queued. Sensor streams are latest-value based;
-    // old session history is never replayed to this host.
-    publishPage();
-    publishLinkState();
-    (void)gNeo3.handleHostCommand("NEO:STATUS");
-    return;
-  }
   if (!strcmp(command, "GET:STATE")) {
     publishPage();
     publishLinkState();
@@ -1412,11 +1667,12 @@ static void handleSerialCommand(char *command) {
                   "USB:STAT:session=%lu,init=%lu,deinit=%lu,abort=%lu,"
                   "tx_complete=%lu,stall_recover=%lu,soft_restart=%lu,"
                   "tx_busy=%u,busy_age_ms=%lu,last_tx_age_ms=%lu,last_rx_age_ms=%lu,"
-                  "rx_pkts=%lu,rx_q=%u,tx_q=%u,tx_hi_q=%u,st_tx=%lu,"
+                  "rx_pkts=%lu,rx_resync=%lu,rx_resync_done=%lu,rx_q=%u,tx_q=%u,tx_hi_q=%u,st_tx=%lu,"
                   "rx_hwm=%u,tx_hwm=%u,tx_hi_hwm=%u,drop_lo=%lu,drop_hi=%lu,kick=%u,"
                   "progress_stall=%lu,recovery_reason=%lu,repair_age_ms=%lu,"
                   "repair_pending=%u,repair_ep_len=%lu,repair_flags=%u,"
-                  "host_token=%lu,host_sessions=%lu,low_purges=%lu,purge_pending=%u,reset_csr=%08lX",
+                  "host_token=%lu,host_sessions=%lu,host_est=%u,low_purges=%lu,high_purges=%lu,purge_pending=%u,"
+                  "safety_retry=%lu,safety_drop=%lu,safety_queued=%lu,reset_csr=%08lX",
                   static_cast<unsigned long>(gUsb.sessionGeneration()),
                   static_cast<unsigned long>(gUsb.classInitCount()),
                   static_cast<unsigned long>(gUsb.classDeInitCount()),
@@ -1429,6 +1685,8 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned long>(gUsb.lastTxCompleteAgeMs()),
                   static_cast<unsigned long>(gUsb.lastRxAgeMs()),
                   static_cast<unsigned long>(gUsb.rxPacketCount()),
+                  static_cast<unsigned long>(gUsb.rxResyncCount()),
+                  static_cast<unsigned long>(gUsb.rxResyncCompleteCount()),
                   static_cast<unsigned>(gUsb.rxQueueDepth()),
                   static_cast<unsigned>(gUsb.txLowQueueDepth()),
                   static_cast<unsigned>(gUsb.txHighQueueDepth()),
@@ -1447,8 +1705,13 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned>(gUsb.lastRepairFlags()),
                   static_cast<unsigned long>(gUsb.hostSessionToken()),
                   static_cast<unsigned long>(gUsb.hostSessionCount()),
+                  gUsb.hostSessionEstablished() ? 1U : 0U,
                   static_cast<unsigned long>(gUsb.lowSessionPurgeCount()),
+                  static_cast<unsigned long>(gUsb.highSessionPurgeCount()),
                   gUsb.lowSessionPurgePending() ? 1U : 0U,
+                  static_cast<unsigned long>(gSafetyControlTxRetries),
+                  static_cast<unsigned long>(gSafetyControlTxDrops),
+                  static_cast<unsigned long>(gSafetyControlTxQueued),
                   static_cast<unsigned long>(gResetCauseFlags));
     (void)gUsb.writeLineCritical(line, 120U);
     return;
@@ -1667,7 +1930,8 @@ static void handleSerialCommand(char *command) {
 
   const uint32_t telemetryNow = HAL_GetTick();
   const ExtendedTelemetryParseResult extended =
-      parseExtendedTelemetryLine(command, gTelemetry, telemetryNow);
+      parseExtendedTelemetryLine(command, gTelemetry, telemetryNow,
+                                 gUsb.hostSessionToken());
   if (extended.recognized) {
     if (!extended.accepted) {
       if (extended.outOfOrder) ++gDiagnostics.extendedTelemetryOutOfOrder;
@@ -1675,17 +1939,20 @@ static void handleSerialCommand(char *command) {
       if (extended.crcError) ++gDiagnostics.extendedTelemetryCrcErrors;
       if (extended.lengthError) ++gDiagnostics.extendedTelemetryLengthErrors;
       if (extended.versionError) ++gDiagnostics.extendedTelemetryVersionErrors;
+      if (extended.sessionError) ++gDiagnostics.extendedTelemetrySessionErrors;
       return;
     }
     ++gDiagnostics.extendedTelemetryAccepted;
     if (extended.v3) ++gDiagnostics.extendedTelemetryV3Accepted;
     else ++gDiagnostics.extendedTelemetryLegacyAccepted;
-    if (extended.domain == ExtendedTelemetryDomain::ESC) {
-      lastEscDomainMs = telemetryNow; seenEscDomain = true;
-    } else if (extended.domain == ExtendedTelemetryDomain::PERCEPTION) {
-      lastPerceptionDomainMs = telemetryNow; seenPerceptionDomain = true;
-    } else if (extended.domain == ExtendedTelemetryDomain::NAVIGATION) {
-      lastNavigationDomainMs = telemetryNow; seenNavigationDomain = true;
+    if (extended.v3) {
+      if (extended.domain == ExtendedTelemetryDomain::ESC) {
+        lastEscDomainMs = telemetryNow; seenEscDomain = true;
+      } else if (extended.domain == ExtendedTelemetryDomain::PERCEPTION) {
+        lastPerceptionDomainMs = telemetryNow; seenPerceptionDomain = true;
+      } else if (extended.domain == ExtendedTelemetryDomain::NAVIGATION) {
+        lastNavigationDomainMs = telemetryNow; seenNavigationDomain = true;
+      }
     }
     updateExtendedFreshness(gTelemetry, telemetryNow);
     markUiDirty(UI_DIRTY_CONTENT | UI_DIRTY_TOPBAR);
@@ -1693,12 +1960,16 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
+  if (!legacyTelemetryPayloadValid(command)) {
+    ++gDiagnostics.legacyTelemetryMalformed;
+    return;
+  }
+
   bool recognized = true;
   if (!strncmp(command, "ROS:", 4)) {
-    if (parseBool(command + 4))
-      markRosHeartbeat();
-    else
-      forceRosOffline();
+    bool value = false;
+    (void)parseBoolStrict(command + 4, value);
+    if (value) markRosHeartbeat(); else forceRosOffline();
   } else if (!strncmp(command, "SYS:", 4)) {
     parseSystemStatus(command + 4);
   } else if (!strncmp(command, "MODE:", 5)) {
@@ -1733,13 +2004,13 @@ static void handleSerialCommand(char *command) {
     snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
              "%.11s", command + 10);
   } else if (!strncmp(command, "ESC:", 4)) {
-    gTelemetry.escReady = parseBool(command + 4);
+    bool value = false; (void)parseBoolStrict(command + 4, value); gTelemetry.escReady = value;
   } else if (!strncmp(command, "ENC:", 4)) {
-    gTelemetry.encoderReady = parseBool(command + 4);
+    bool value = false; (void)parseBoolStrict(command + 4, value); gTelemetry.encoderReady = value;
   } else if (!strncmp(command, "VESC_LINK:", 10)) {
-    gTelemetry.vescConnected = parseBool(command + 10);
+    bool value = false; (void)parseBoolStrict(command + 10, value); gTelemetry.vescConnected = value;
   } else if (!strncmp(command, "ESTOP:", 6)) {
-    gTelemetry.eStop = parseBool(command + 6);
+    bool value = false; (void)parseBoolStrict(command + 6, value); gTelemetry.eStop = value;
     if (gTelemetry.eStop && (driveTestRunning || steeringTestRunning))
       stopAllManualTest();
   } else if (!strncmp(command, "MANUAL_SPEED:", 13)) {
@@ -1868,7 +2139,6 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLine(line);
     return;
   }
-  markDomainForCommand(command);
   sanitizeTelemetry();
   updateDomainFreshness(HAL_GetTick());
   enforceManualMotionGate();
@@ -1899,6 +2169,14 @@ pollSerialGui(std::size_t byteBudget = 256U) {
   // bytes and complete commands per service pass so a PC flood cannot starve
   // MCP2515 RX, watchdog heartbeat, touch, or UI refresh.
   gUsb.poll();
+  const uint32_t usbResync = gUsb.rxResyncCount();
+  if (usbResync != gLastUsbRxResyncCount) {
+    const uint32_t delta = static_cast<uint32_t>(usbResync - gLastUsbRxResyncCount);
+    gLastUsbRxResyncCount = usbResync;
+    gDiagnostics.usbRxResyncs += delta;
+    serialRxLen = 0U;
+    serialRxDiscarding = false;
+  }
   std::size_t processed = 0U;
   uint8_t commandBudget = 4U;
   while (gUsb.available() > 0 && processed < byteBudget && commandBudget > 0U) {
@@ -2142,13 +2420,20 @@ int main() {
   HAL_Delay(50U);
   printBoth("ADV HMI native realtime menu firmware - boot");
   gNeo3.begin();
+#if F4_ESC_GATEWAY
   gVesc.begin();
+#endif
   Board_SetRealtimeServiceCallback([]() {
     // USB completion IRQ never starts the next packet. Service it here in
     // thread context so long TFT transfers cannot starve CDC progress.
     gUsb.service();
+    serviceUsbTransportState();
+    serviceSafetyControlTx();
+    serviceManualDriveLease();
     gNeo3.pollSafetyIo();
+#if F4_ESC_GATEWAY
     gVesc.setSafetyStop(gNeo3.safetyPressed());
+#endif
     // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
     // on dedicated SPI2, so bounded receive draining can safely run from the
     // cooperative realtime-yield path without touching the HMI SPI1 bus.
@@ -2160,7 +2445,9 @@ int main() {
     // its dedicated SPI2; the realtime path never resets/probes the CAN bus.
     gNeo3.pollRealtime();
 #endif
+#if F4_ESC_GATEWAY
     gVesc.poll();
+#endif
   });
   (void)initDisplayBlockingAtBoot();
   restartSplash();
@@ -2175,6 +2462,9 @@ int main() {
      */
     Board_Service();
     gUsb.service();
+    serviceUsbTransportState();
+    serviceSafetyControlTx();
+    serviceManualDriveLease();
     if (!gCrashCounterCleared &&
         static_cast<uint32_t>(HAL_GetTick() - gWatchdogHealthySinceMs) >=
             kCrashCounterClearMs) {
@@ -2186,9 +2476,12 @@ int main() {
       gCrashCounterCleared = true;
     }
     gNeo3.pollSafetyIo();
+#if F4_ESC_GATEWAY
     gVesc.setSafetyStop(gNeo3.safetyPressed());
+#endif
     pollSerialGui();
     serviceDeferredCommands();
+#if F4_ESC_GATEWAY
     gVesc.poll();
 
     if (gVesc.maintenanceMode()) {
@@ -2209,11 +2502,14 @@ int main() {
       gMainLoopHeartbeatMs = HAL_GetTick();
       continue;
     }
+#endif
 
     gNeo3.poll();
     Board_Service();
+#if F4_ESC_GATEWAY
     gVesc.setSafetyStop(gNeo3.safetyPressed());
     gVesc.poll();
+#endif
     pollSerialGui();
     serviceDeferredCommands();
     checkRosLinkTimeout();

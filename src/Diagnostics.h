@@ -12,6 +12,12 @@ struct HmiDiagnostics {
   uint32_t overlongCommands{0};
   uint32_t deferredCommandDrops{0};
   uint32_t deferredCommandPeak{0};
+  uint32_t realtimeCriticalCommands{0};
+  uint32_t preSessionRejected{0};
+  uint32_t hostSessionDuplicateHello{0};
+  uint32_t hostSessionMalformed{0};
+  uint32_t configAckMalformed{0};
+  uint32_t usbRxResyncs{0};
   uint32_t extendedTelemetryAccepted{0};
   uint32_t extendedTelemetryMalformed{0};
   uint32_t extendedTelemetryOutOfOrder{0};
@@ -20,6 +26,8 @@ struct HmiDiagnostics {
   uint32_t extendedTelemetryCrcErrors{0};
   uint32_t extendedTelemetryLengthErrors{0};
   uint32_t extendedTelemetryVersionErrors{0};
+  uint32_t extendedTelemetrySessionErrors{0};
+  uint32_t legacyTelemetryMalformed{0};
   uint32_t uiFrames{0};
   uint32_t fullUiFrames{0};
   uint32_t dirtyUiFrames{0};
@@ -78,8 +86,8 @@ struct HmiDiagnostics {
   bool gnssUartOk{false};
   bool magOk{false};
   bool canOk{false};
-  bool pb6VescTx{false};
-  bool pb7VescRx{false};
+  bool pb12McpCs{false};
+  bool pb10McpInt{false};
   bool pa2GnssTx{false};
   bool pa3GnssRx{false};
   bool pb8I2cScl{false};

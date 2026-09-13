@@ -11,6 +11,9 @@ class UsbCdcPort {
   void service();
   void requestRecovery();
   void beginHostSession(uint32_t token);
+  void confirmHostSession();
+  void invalidateHostSession();
+  bool hostSessionEstablished() const { return host_session_established_; }
   int available() const;
   int read();
   int availableForWrite() const;
@@ -27,13 +30,18 @@ class UsbCdcPort {
   uint32_t hostSessionToken() const { return host_session_token_; }
   uint32_t hostSessionCount() const { return host_session_count_; }
   uint32_t lowSessionPurgeCount() const { return low_session_purge_count_; }
+  uint32_t highSessionPurgeCount() const { return high_session_purge_count_; }
   bool lowSessionPurgePending() const { return purge_low_after_message_; }
 
   void onReceive(const uint8_t *data, uint32_t length);
   void onTransmitComplete();
   void onUsbClassInit();
   void onUsbClassDeInit();
-  uint32_t sessionGeneration() const { return usb_session_generation_; }
+  // Increments whenever queued transport state is destructively reset. Safety
+  // latches use this epoch so STOP survives class reset, deinit, soft restart,
+  // and wrapper/ST endpoint repair.
+  uint32_t transportGeneration() const { return usb_session_generation_; }
+  uint32_t sessionGeneration() const { return transportGeneration(); } // compatibility
   uint32_t classInitCount() const { return usb_class_init_count_; }
   uint32_t classDeInitCount() const { return usb_class_deinit_count_; }
   uint32_t txAbortCount() const { return tx_abort_on_session_reset_; }
@@ -41,6 +49,9 @@ class UsbCdcPort {
   uint32_t txStallRecoveryCount() const { return tx_stall_recovery_count_; }
   uint32_t softRestartCount() const { return usb_soft_restart_count_; }
   uint32_t rxPacketCount() const { return rx_packet_count_; }
+  uint32_t rxResyncCount() const { return rx_resync_count_; }
+  uint32_t rxResyncCompleteCount() const { return rx_resync_complete_count_; }
+  bool rxDiscardingUntilNewline() const { return rx_discard_until_newline_; }
   uint32_t txProgressStallCount() const { return tx_progress_stall_count_; }
   uint32_t lastRecoveryReason() const { return last_recovery_reason_; }
   uint32_t lastRepairAgeMs() const { return last_repair_age_ms_; }
@@ -102,6 +113,9 @@ class UsbCdcPort {
   volatile uint32_t usb_soft_restart_count_{0U};
   volatile uint32_t last_rx_ms_{0U};
   volatile uint32_t rx_packet_count_{0U};
+  volatile uint32_t rx_resync_count_{0U};
+  volatile uint32_t rx_resync_complete_count_{0U};
+  volatile bool rx_discard_until_newline_{false};
   volatile uint32_t tx_progress_stall_count_{0U};
   volatile uint32_t last_recovery_reason_{0U}; // 0 none, 1 explicit, 2 wrapper/ST mismatch
   volatile uint32_t last_repair_age_ms_{0U};
@@ -112,7 +126,9 @@ class UsbCdcPort {
   volatile bool recovery_pending_{false};
   volatile uint32_t host_session_token_{0U};
   volatile uint32_t host_session_count_{0U};
+  volatile bool host_session_established_{false};
   volatile uint32_t low_session_purge_count_{0U};
+  volatile uint32_t high_session_purge_count_{0U};
   volatile bool purge_low_after_message_{false};
   // Set from the USB TX-complete IRQ. The ISR never re-enters the ST USB
   // transmit stack; the outer main-loop service owns the next packet start.

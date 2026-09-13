@@ -1,4 +1,5 @@
 #include "UsbCdcPort.h"
+#include "BoardSupport.h"
 
 #include "stm32f4xx_hal.h"
 #include "usbd_cdc.h"
@@ -42,8 +43,12 @@ void UsbCdcPort::resetSessionState(bool drop_queues, bool count_abort) {
 #endif
   if (drop_queues) {
     rx_head_ = rx_tail_ = 0U;
+    rx_discard_until_newline_ = false;
     tx_head_ = tx_tail_ = 0U;
     tx_high_head_ = tx_high_tail_ = 0U;
+    // Every destructive queue reset advances the safety transport epoch. This
+    // includes endpoint split-brain repair, not only USB class re-enumeration.
+    ++usb_session_generation_;
   }
   if (primask == 0U)
     __enable_irq();
@@ -74,6 +79,9 @@ bool UsbCdcPort::begin() {
   usb_soft_restart_count_ = 0U;
   last_rx_ms_ = 0U;
   rx_packet_count_ = 0U;
+  rx_resync_count_ = 0U;
+  rx_resync_complete_count_ = 0U;
+  rx_discard_until_newline_ = false;
   tx_progress_stall_count_ = 0U;
   last_recovery_reason_ = 0U;
   last_repair_age_ms_ = 0U;
@@ -84,12 +92,15 @@ bool UsbCdcPort::begin() {
   recovery_pending_ = false;
   host_session_token_ = 0U;
   host_session_count_ = 0U;
+  host_session_established_ = false;
   low_session_purge_count_ = 0U;
+  high_session_purge_count_ = 0U;
   purge_low_after_message_ = false;
   return startUsbStack();
 }
 
 void UsbCdcPort::end() {
+  invalidateHostSession();
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
   resetSessionState(true, true);
@@ -97,13 +108,14 @@ void UsbCdcPort::end() {
 
 void UsbCdcPort::onUsbClassInit() {
   ++usb_class_init_count_;
-  ++usb_session_generation_;
+  invalidateHostSession();
   resetSessionState(true, true);
   tx_complete_ms_ = HAL_GetTick();
 }
 
 void UsbCdcPort::onUsbClassDeInit() {
   ++usb_class_deinit_count_;
+  invalidateHostSession();
   resetSessionState(true, true);
 }
 
@@ -115,26 +127,61 @@ void UsbCdcPort::requestRecovery() {
 void UsbCdcPort::beginHostSession(uint32_t token) {
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
+  host_session_established_ = false;
   host_session_token_ = token;
   ++host_session_count_;
 
-  // Snapshot telemetry must not leak from an old host session. Preserve only
-  // a low-priority line already in flight; purge everything queued behind it.
-  const bool low_message_active = tx_message_active_ && !tx_message_high_;
-  if (low_message_active) {
-    purge_low_after_message_ = true;
-  } else {
-    tx_head_ = tx_tail_;
-    purge_low_after_message_ = false;
+  // A new host epoch must not inherit queued records from the previous host.
+  // If a message is already physically in flight, preserve only that ONE complete
+  // newline-delimited message, then append the new session ACK behind it. The new
+  // host intentionally ignores pre-ACK bytes, so this preserves line framing
+  // without allowing stale high-priority control backlog to cross epochs.
+  const auto trim_after_active_message = [](const uint8_t *ring, volatile uint16_t &head,
+                                            volatile uint16_t &tail, uint16_t size,
+                                            bool active) -> bool {
+    if (!active) {
+      const bool had_data = head != tail;
+      head = tail;
+      return had_data;
+    }
+    uint16_t cursor = tail;
+    while (cursor != head) {
+      const uint8_t value = ring[cursor];
+      cursor = static_cast<uint16_t>((cursor + 1U) % size);
+      if (value == '\n') {
+        const bool purged = cursor != head;
+        head = cursor;
+        return purged;
+      }
+    }
+    // Raw writers should still be newline-framed. If not, leave the active data
+    // intact rather than truncating a USB packet into an unrecoverable fragment.
+    return false;
+  };
+
+  if (trim_after_active_message(tx_, tx_head_, tx_tail_, kTxSize,
+                                tx_message_active_ && !tx_message_high_))
     ++low_session_purge_count_;
-  }
+  if (trim_after_active_message(tx_high_, tx_high_head_, tx_high_tail_, kHighTxSize,
+                                tx_message_active_ && tx_message_high_))
+    ++high_session_purge_count_;
+  purge_low_after_message_ = false;
 
-  // Control replies are normally sparse. If none is active, drop stale high
-  // priority replies too so the new session ACK is the first control record.
-  const bool high_message_active = tx_message_active_ && tx_message_high_;
-  if (!high_message_active)
-    tx_high_head_ = tx_high_tail_;
+  if (primask == 0U) __enable_irq();
+}
 
+void UsbCdcPort::confirmHostSession() {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (host_session_token_ != 0U && connected()) host_session_established_ = true;
+  if (primask == 0U) __enable_irq();
+}
+
+void UsbCdcPort::invalidateHostSession() {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  host_session_established_ = false;
+  host_session_token_ = 0U;
   if (primask == 0U) __enable_irq();
 }
 
@@ -172,6 +219,7 @@ uint32_t UsbCdcPort::cdcTxState() const {
 
 bool UsbCdcPort::softRestartUsb() {
   ++usb_soft_restart_count_;
+  invalidateHostSession();
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
   resetSessionState(true, true);
@@ -315,21 +363,17 @@ bool UsbCdcPort::writeLineHighPriority(const char *line) {
 }
 
 bool UsbCdcPort::writeLineCritical(const char *line, uint32_t timeout_ms) {
+  (void)timeout_ms;
   if (line == nullptr || !connected())
     return false;
-  // Critical means high-priority, not permission to monopolize the MCU. A USB
-  // host can disappear mid-transfer; cap synchronous waiting and let service()
-  // perform endpoint recovery cooperatively.
-  timeout_ms = std::min<uint32_t>(timeout_ms, 25U);
-  const uint32_t start = HAL_GetTick();
-  do {
-    if (writeLineHighPriority(line))
-      return true;
-    poll();
-    HAL_Delay(1U);
-  } while (static_cast<uint32_t>(HAL_GetTick() - start) < timeout_ms &&
-           connected());
-  return false;
+  // Critical means high-priority, not permission to block the F411 main context.
+  // Give the endpoint state machine one cooperative service opportunity and then
+  // fail closed. Safety STOP messages have their own persistent retry latch in
+  // main.cpp; maintenance commands can simply be retried by the operator/host.
+  if (writeLineHighPriority(line))
+    return true;
+  service();
+  return writeLineHighPriority(line);
 }
 
 #ifdef HMI_TEST_HOOKS
@@ -452,7 +496,14 @@ void UsbCdcPort::flush(uint32_t timeout_ms) {
   const uint32_t start = HAL_GetTick();
   while ((tx_head_ != tx_tail_ || tx_high_head_ != tx_high_tail_ || tx_busy_) &&
          static_cast<uint32_t>(HAL_GetTick() - start) < timeout_ms) {
-    poll();
+    // A flush is only a bounded drain request, never permission to starve the
+    // realtime loop. Progress CDC TX in thread context, then yield through the
+    // board callback so STOP retries, HMI lease, safety I/O and MCP2515 RX keep
+    // receiving service even during the final DFU acknowledgement drain.
+    service();
+    Board_RealtimeService();
+    if (tx_head_ != tx_tail_ || tx_high_head_ != tx_high_tail_ || tx_busy_)
+      __WFI();
   }
 }
 
@@ -462,12 +513,33 @@ void UsbCdcPort::onReceive(const uint8_t *data, uint32_t length) {
   last_rx_ms_ = HAL_GetTick();
   ++rx_packet_count_;
   for (uint32_t i = 0; i < length; ++i) {
+    const uint8_t value = data[i];
+    if (rx_discard_until_newline_) {
+      ++rx_dropped_;
+      if (value == '\n') {
+        rx_discard_until_newline_ = false;
+        ++rx_resync_complete_count_;
+      }
+      continue;
+    }
     const uint16_t next = static_cast<uint16_t>((rx_head_ + 1U) % kRxSize);
     if (next == rx_tail_) {
+      // A ring overflow destroys line framing. Fail closed: purge every buffered
+      // RX byte and discard input until the next newline before accepting a new
+      // command. main.cpp observes rxResyncCount() and clears its partial parser
+      // buffer as well, so bytes from opposite sides of the overflow can never
+      // be concatenated into an accidental command.
+      rx_tail_ = rx_head_;
+      rx_discard_until_newline_ = true;
+      ++rx_resync_count_;
       ++rx_dropped_;
-      break;
+      if (value == '\n') {
+        rx_discard_until_newline_ = false;
+        ++rx_resync_complete_count_;
+      }
+      continue;
     }
-    rx_[rx_head_] = data[i];
+    rx_[rx_head_] = value;
     rx_head_ = next;
   }
   { const uint16_t used = RingUsed(rx_head_, rx_tail_, kRxSize); if (used > rx_high_water_) rx_high_water_ = used; }

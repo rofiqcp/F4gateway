@@ -361,9 +361,13 @@ private:
   uint32_t can_tx_abort_count_{0U};
   uint32_t can_tx_expired_count_{0U};
   uint32_t can_busoff_count_{0U};
+  uint32_t can_tx_passive_probe_count_{0U};
   uint32_t can_tx_backoff_until_ms_{0U};
   uint32_t last_can_health_ms_{0U};
   uint32_t last_can_recovery_ms_{0U};
+  uint8_t can_health_tec_{0U};
+  uint8_t can_health_rec_{0U};
+  uint8_t can_health_eflg_{0U};
   uint8_t can_tx_fail_streak_{0U};
   bool can_recovery_pending_{false};
   bool mcp_tx_pending_{false};
