@@ -306,7 +306,10 @@ void Neo3ProSensors::serviceDnaVerification(uint32_t now_ms) {
   if (dna_curr_verifying_node_ == DRONECAN_HOST_NODE_ID) dna_nodeinfo_response_received_ = true;
   if (dna_curr_verifying_node_ != 0U && dna_curr_verifying_node_ != DRONECAN_HOST_NODE_ID &&
       !dna_nodeinfo_response_received_) {
-    dna_verified_[dna_curr_verifying_node_] = false;
+    // A missed GetNodeInfo response is a liveness/service failure, not proof that
+    // the persisted identity became invalid. Sensor authority is already revoked
+    // by NodeStatus freshness/health. Keep the verified UID binding so a peer that
+    // returns can recover immediately; uptime rollback below explicitly revokes it.
     ++dna_verification_failures_;
     telemetry_dirty_ |= DIRTY_DNA_SERVER | DIRTY_PEER_HEALTH;
     recomputeDnaServerState();
@@ -317,7 +320,12 @@ void Neo3ProSensors::serviceDnaVerification(uint32_t now_ms) {
   for (uint16_t n = 0U; n <= DroneCanDnaDatabase::kMaxNodeId; ++n) {
     next = static_cast<uint8_t>((next + 1U) % (DroneCanDnaDatabase::kMaxNodeId + 1U));
     if (next == 0U || next == DRONECAN_HOST_NODE_ID) continue;
-    if (dna_seen_[next]) { found = true; break; }
+    // Never emit maintenance/service traffic to a stale node. The MCP2515 will
+    // otherwise retry an unacknowledged request, increasing TEC while the peer is
+    // physically absent. Verification resumes automatically on fresh NodeStatus.
+    const bool fresh = dna_seen_[next] &&
+        static_cast<uint32_t>(now_ms - dna_last_seen_ms_[next]) <= CAN_NODE_STALE_MS;
+    if (fresh) { found = true; break; }
   }
   if (!found) {
     dna_curr_verifying_node_ = DRONECAN_HOST_NODE_ID;
@@ -330,8 +338,9 @@ void Neo3ProSensors::serviceDnaVerification(uint32_t now_ms) {
   // Registered nodes are periodically re-verified; unregistered-but-seen nodes
   // are also queried so their first NodeInfo can populate the persistent DB.
   if (!requestGetNodeInfo(next)) {
-    // Leave response flag false. The next 5 s pass will clear verification,
-    // exactly like ArduPilot when a service acknowledgement is absent.
+    // Leave the response flag false so diagnostics count the missed service on
+    // the next verification pass. Persistent UID verification is not revoked by
+    // this liveness failure; NodeStatus freshness controls sensor authority.
   }
 }
 
@@ -929,6 +938,14 @@ bool Neo3ProSensors::requestService(uint8_t destination_node_id, uint64_t signat
   if (destination_node_id == 0U || destination_node_id > 125U || !transfer_id ||
       (payload_len > 0U && payload == nullptr) || canardGetLocalNodeID(&canard_) == 0U)
     return false;
+  // All host-originated DroneCAN service traffic in this driver targets a node
+  // already discovered by NodeStatus. Never queue a request to an electrically
+  // absent/stale peer: an unacknowledged MCP2515 TX would raise TEC and can mask
+  // the actual peer-loss diagnosis.
+  const uint32_t now_ms = HAL_GetTick();
+  if (!dnaNodeSeen(destination_node_id) ||
+      static_cast<uint32_t>(now_ms - dna_last_seen_ms_[destination_node_id]) > CAN_NODE_STALE_MS)
+    return false;
   const uint64_t deadline_us = Board_MonotonicMicros64() + CAN_TX_QUEUE_DEADLINE_US;
   const int16_t queued = canardRequestOrRespond(&canard_, destination_node_id, signature,
       service_id, transfer_id, CANARD_TRANSFER_PRIORITY_LOW, CanardRequest, payload, payload_len, deadline_us);
@@ -1028,7 +1045,8 @@ void Neo3ProSensors::serviceDiscovery(uint32_t now_ms) {
     }
     return;
   }
-  if (discovery_node_id_ != 0U &&
+  if (discovery_node_id_ != 0U && dnaNodeSeen(discovery_node_id_) &&
+      static_cast<uint32_t>(now_ms - dna_last_seen_ms_[discovery_node_id_]) <= CAN_NODE_STALE_MS &&
       static_cast<uint32_t>(now_ms - last_identity_request_ms_) >= NODE_INFO_RETRY_MS)
     (void)requestGetNodeInfo(discovery_node_id_);
 }
@@ -1310,7 +1328,28 @@ void Neo3ProSensors::updatePeerFailsafe(uint32_t now_ms) {
   }
 
   if (next != peer_state_) {
-    if (next == PeerState::PEER_LOST) ++peer_lost_count_;
+    if (next == PeerState::PEER_LOST) {
+      ++peer_lost_count_;
+      // Fail quiet when the verified peer disappears. Any pending service frame
+      // can no longer receive an ACK and would otherwise keep increasing TEC.
+      // Purge/abort once on the state transition; CAN RX remains enabled and the
+      // peer can recover immediately by sending a fresh NodeStatus.
+      if (mcp_tx_pending_) (void)abortMcpTxBounded();
+      clearCanardTxQueue();
+      ++can_peer_loss_tx_purge_count_;
+      can_tx_backoff_until_ms_ = std::max<uint32_t>(can_tx_backoff_until_ms_,
+          now_ms + CAN_RECOVERY_COOLDOWN_MS);
+
+      // If *all* raw CAN traffic is silent as well, perform one bounded controller
+      // reinitialization for this loss episode. This recovers transient MCP/SPI
+      // state without creating a reset loop when the NEO3 is physically unplugged.
+      const bool raw_silent = last_raw_frame_ms_ != 0U &&
+          static_cast<uint32_t>(now_ms - last_raw_frame_ms_) > CAN_NODE_STALE_MS;
+      if (raw_silent) {
+        ++can_silent_recovery_count_;
+        recoverCan();
+      }
+    }
     if (next == PeerState::NODE_UNHEALTHY) ++node_unhealthy_count_;
     peer_state_ = next;
     peer_state_since_ms_ = now_ms;
@@ -2346,6 +2385,17 @@ void Neo3ProSensors::publishHardware(bool force) {
       static_cast<unsigned long>(static_cast<int32_t>(can_tx_backoff_until_ms_ - now) > 0
           ? can_tx_backoff_until_ms_ - now : 0U));
   writeV2Record("SENS:CANHEALTH:", body);
+  const uint32_t raw_age = lastCanFrameAgeMs(now);
+  const uint32_t node_age = (primary_node_id_ != 0U && dnaNodeSeen(primary_node_id_))
+      ? static_cast<uint32_t>(now - dna_last_seen_ms_[primary_node_id_]) : 0xFFFFFFFFUL;
+  std::snprintf(body, sizeof(body), "%lu,%u,%lu,%lu,%lu,%lu,%lu,%u,%u",
+      static_cast<unsigned long>(seq), static_cast<unsigned>(peer_state_),
+      static_cast<unsigned long>(raw_age), static_cast<unsigned long>(node_age),
+      static_cast<unsigned long>(can_peer_loss_tx_purge_count_),
+      static_cast<unsigned long>(can_silent_recovery_count_),
+      static_cast<unsigned long>(dna_verification_failures_),
+      mcp_tx_pending_ ? 1U : 0U, canTxPermitted(now) ? 1U : 0U);
+  writeV2Record("SENS:CANGUARD:", body);
   const uint32_t rxseq = ++can_rx_diag_sequence_;
   std::snprintf(body, sizeof(body),
       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
