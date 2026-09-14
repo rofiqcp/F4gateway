@@ -1327,29 +1327,43 @@ void Neo3ProSensors::updatePeerFailsafe(uint32_t now_ms) {
     next = PeerState::ACTIVE;
   }
 
-  if (next != peer_state_) {
-    if (next == PeerState::PEER_LOST) {
-      ++peer_lost_count_;
-      // Fail quiet when the verified peer disappears. Any pending service frame
-      // can no longer receive an ACK and would otherwise keep increasing TEC.
-      // Purge/abort once on the state transition; CAN RX remains enabled and the
-      // peer can recover immediately by sending a fresh NodeStatus.
-      if (mcp_tx_pending_) (void)abortMcpTxBounded();
-      clearCanardTxQueue();
-      ++can_peer_loss_tx_purge_count_;
-      can_tx_backoff_until_ms_ = std::max<uint32_t>(can_tx_backoff_until_ms_,
-          now_ms + CAN_RECOVERY_COOLDOWN_MS);
+  const bool entering_peer_lost = next == PeerState::PEER_LOST &&
+                                  peer_state_ != PeerState::PEER_LOST;
+  const bool leaving_peer_lost = next != PeerState::PEER_LOST &&
+                                 peer_state_ == PeerState::PEER_LOST;
 
-      // If *all* raw CAN traffic is silent as well, perform one bounded controller
-      // reinitialization for this loss episode. This recovers transient MCP/SPI
-      // state without creating a reset loop when the NEO3 is physically unplugged.
-      const bool raw_silent = last_raw_frame_ms_ != 0U &&
-          static_cast<uint32_t>(now_ms - last_raw_frame_ms_) > CAN_NODE_STALE_MS;
-      if (raw_silent) {
-        ++can_silent_recovery_count_;
-        recoverCan();
-      }
+  if (entering_peer_lost) {
+    ++peer_lost_count_;
+    peer_loss_recovery_attempted_ = false;
+    // Fail quiet when the verified peer disappears. Any pending service frame
+    // can no longer receive an ACK and would otherwise keep increasing TEC.
+    // Purge/abort once on entry; CAN RX stays enabled for immediate peer return.
+    if (mcp_tx_pending_) (void)abortMcpTxBounded();
+    clearCanardTxQueue();
+    ++can_peer_loss_tx_purge_count_;
+    can_tx_backoff_until_ms_ = std::max<uint32_t>(can_tx_backoff_until_ms_,
+        now_ms + CAN_RECOVERY_COOLDOWN_MS);
+  }
+
+  // Raw CAN can become silent slightly *after* NodeStatus crosses the stale
+  // threshold. The old transition-only check missed that case forever. While
+  // PEER_LOST persists, wait until all raw traffic is stale, then reinitialize
+  // MCP/SPI exactly once for this loss episode. This recovers an RX-stuck MCP2515
+  // without creating a reset loop when the NEO3 is physically unplugged.
+  if (next == PeerState::PEER_LOST && !peer_loss_recovery_attempted_) {
+    const bool raw_silent = last_raw_frame_ms_ != 0U &&
+        static_cast<uint32_t>(now_ms - last_raw_frame_ms_) > CAN_NODE_STALE_MS;
+    const bool cooldown_ready = last_can_recovery_ms_ == 0U ||
+        static_cast<uint32_t>(now_ms - last_can_recovery_ms_) >= CAN_RECOVERY_COOLDOWN_MS;
+    if (raw_silent && cooldown_ready) {
+      peer_loss_recovery_attempted_ = true;
+      ++can_silent_recovery_count_;
+      recoverCan();
     }
+  }
+  if (leaving_peer_lost) peer_loss_recovery_attempted_ = false;
+
+  if (next != peer_state_) {
     if (next == PeerState::NODE_UNHEALTHY) ++node_unhealthy_count_;
     peer_state_ = next;
     peer_state_since_ms_ = now_ms;
@@ -1531,6 +1545,9 @@ void Neo3ProSensors::decodeAllocation(const CanardRxTransfer *t) {
 
   uint8_t requested = 0U;
   bool first_part = false;
+  // canardDecodeScalar() uses UAVCAN DSDL bit ordering here. For the wire byte
+  // (node_id << 1) | first_part, scalar offsets 0..6 decode node_id and offset
+  // 7 decodes first_part_of_unique_id.
   if (!decodeScalar(t, 0U, 7U, false, &requested) ||
       !decodeScalar(t, 7U, 1U, false, &first_part)) {
     ++can_decode_errors_;
@@ -1578,7 +1595,9 @@ void Neo3ProSensors::decodeAllocation(const CanardRxTransfer *t) {
     }
     allocated_node_id_ = response_node;
   }
-  response[0] = response_node & 0x7FU;
+  // Allocator responses are non-anonymous: first_part_of_unique_id must be 0.
+  // DSDL wire layout is [node_id:bits1..7 | first_part:bit0].
+  response[0] = static_cast<uint8_t>((response_node & 0x7FU) << 1U);
   std::memcpy(&response[1], dna_unique_id_, dna_unique_id_len_);
   (void)broadcastDroneCan(SIG_ALLOCATION, DTID_ALLOCATION, &dna_transfer_id_,
                           CANARD_TRANSFER_PRIORITY_LOW, response,

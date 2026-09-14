@@ -364,6 +364,7 @@ private:
   uint32_t can_tx_passive_probe_count_{0U};
   uint32_t can_peer_loss_tx_purge_count_{0U};
   uint32_t can_silent_recovery_count_{0U};
+  bool peer_loss_recovery_attempted_{false};
   uint32_t can_tx_backoff_until_ms_{0U};
   uint32_t last_can_health_ms_{0U};
   uint32_t last_can_recovery_ms_{0U};

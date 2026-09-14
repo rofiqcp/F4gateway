@@ -1,0 +1,45 @@
+yahboom_mag_calibration:
+  valid: true
+  source: 8-direction CW static fit against calibrated IST8310 ENU heading
+  created_at: '2026-09-08T21:35:22.127586'
+  raw_csv: calibration/heading_8dir_raw_20260908_212631.csv
+  sample_count: 352
+  segment_count: 8
+  cw_transition_check_pass: true
+  map_yaw_from_enu_rad: 0.0
+  map_yaw_spread_deg: 0.0
+  bias_xy_lsb:
+  - 3149.3785714285714
+  - -685.6555555555556
+  matrix_xy_per_lsb:
+  - 0.00015120427015192066
+  - 3.1681446903763345e-06
+  - 3.168144690376335e-06
+  - 0.0001505579689968453
+  yaw_sign: 1.0
+  yaw_offset_rad: 0.8223761251570312
+  heading_lut_input_rad:
+  - 2.7240861697569554
+  - -2.710348188236295
+  - -1.9751903317446442
+  - -1.1536408183125866
+  - -0.28246946438759446
+  - 0.42930084020351056
+  - 1.2641769027026561
+  - 2.005447804488236
+  heading_lut_correction_rad:
+  - 0.24569326301548333
+  - -0.02465451513241934
+  - -0.028445113539452116
+  - -0.05610151548826515
+  - -0.1545047255227136
+  - -0.11398551629058801
+  - -0.09784420050625031
+  - 0.23336673995612678
+  corrected_norm_mean: 1.003312196306926
+  corrected_norm_std: 0.016923629913547504
+  validation:
+    rms_error_deg: 0.232489570460255
+    max_abs_error_deg: 0.7736739438534277
+    pass: true
+  scope: planar XY only; Z/3D spherical calibration requires multi-axis rotation
