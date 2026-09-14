@@ -125,7 +125,7 @@ inline void drawUiTopBar(const UiState &ui, const VehicleTelemetry &d) {
 
   if (menuChanged || !gUiTopBarCache.valid) {
     if (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW) {
-      iconGrid(14, 14, C_ACCENT);
+      iconHome(14, 14, C_ACCENT);
     } else if (ui.menu == UiMenuId::MAIN_MENU) {
       iconHome(14, 14, C_TEXT);
     } else {
@@ -591,14 +591,91 @@ inline void drawOperatorCard(uint8_t slot, UiMenuId id,
 
 inline void drawHome(const UiState &ui, const VehicleTelemetry &d) {
   (void)ui;
-  // Operator landing page: the three primary domains are directly selectable.
-  // This intentionally matches the three validated middle touch zones.
-  for (uint8_t slot = 0U; slot < DOMAIN_PAGE_SIZE; ++slot)
-    drawOperatorCard(slot, menuCardAt(UiMenuId::MAIN_MENU, 0U, slot), d, true);
+  const int xs[3] = {UI_CARD_X0, UI_CARD_X0 + UI_CARD_W + UI_CARD_GAP,
+                     UI_CARD_X0 + 2 * (UI_CARD_W + UI_CARD_GAP)};
+  if (!gUiDynamicPass) {
+    const char *labels[3] = {"SPEED", "STATE", "POWER"};
+    for (uint8_t i = 0U; i < 3U; ++i) {
+      drawCard(xs[i], HOME_TILE_Y, UI_CARD_W, HOME_TILE_H, C_CARD, C_CARD_LINE,
+               false);
+      drawMicroText(labels[i], xs[i] + UI_CARD_W / 2, HOME_TILE_Y + 10,
+                    C_DISABLED, C_CARD, TC_DATUM);
+    }
 
-  if (!gUiDynamicPass)
-    drawMicroText("ESC / PERCEPTION / NAV2", W / 2, 38, C_TEXT_DIM, C_BG,
-                  TC_DATUM);
+    // HOME has one operator action only: MENU in the validated bottom-center zone.
+    tft.fillRoundRect(HOME_MENU_X, HOME_MENU_Y, HOME_MENU_W, HOME_MENU_H, 7,
+                      C_PANEL);
+    tft.drawRoundRect(HOME_MENU_X, HOME_MENU_Y, HOME_MENU_W, HOME_MENU_H, 7,
+                      C_ACCENT);
+    iconGrid(HOME_MENU_X + HOME_MENU_W / 2, HOME_MENU_Y + 17, C_ACCENT);
+    drawCompactText("MENU", HOME_MENU_X + HOME_MENU_W / 2,
+                    HOME_MENU_Y + 31, C_ACCENT, C_PANEL, TC_DATUM);
+
+    drawMicroText("ESC", 62, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
+    drawMicroText("PER", 160, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
+    drawMicroText("NAV", 258, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
+  }
+
+  char speed[20], state[20], power[20], modeLink[48];
+  snprintf(speed, sizeof(speed), "%.1f km/h", d.speedKmh);
+  const char *stateText = d.eStop
+                              ? "E-STOP"
+                              : (d.systemStatus == SYS_FAULT
+                                     ? "FAULT"
+                                     : (d.state == STATE_RUNNING
+                                            ? "RUNNING"
+                                            : (d.systemStatus == SYS_READY
+                                                   ? "READY"
+                                                   : vehicleStateText(d.state))));
+  snprintf(state, sizeof(state), "%s", stateText);
+  if (d.vbusValid)
+    snprintf(power, sizeof(power), "%.1f V", d.vbusV);
+  else
+    snprintf(power, sizeof(power), "%s", "N/A");
+  snprintf(modeLink, sizeof(modeLink), "%s | ROS %s | F103 %s", modeText(d.mode),
+           d.rosConnected ? "ON" : "OFF", d.vescConnected ? "ON" : "OFF");
+
+  const uint16_t speedColor = d.eStop ? C_FAULT : C_INK;
+  const uint16_t stateColor = d.eStop || d.systemStatus == SYS_FAULT
+                                  ? C_FAULT
+                                  : (d.systemStatus == SYS_READY ? C_READY : C_WARNING);
+  const uint16_t powerColor = d.vbusValid ? C_INK : C_DISABLED;
+  if (!gUiDynamicPass || !gUiHomeCache.valid ||
+      strcmp(gUiHomeCache.speed, speed) != 0 || gUiHomeCache.speedColor != speedColor)
+    drawValueTextPadded(speed, xs[0] + UI_CARD_W / 2, HOME_TILE_Y + 36,
+                        speedColor, C_CARD, 90U, TC_DATUM);
+  if (!gUiDynamicPass || !gUiHomeCache.valid ||
+      strcmp(gUiHomeCache.state, state) != 0 || gUiHomeCache.stateColor != stateColor)
+    drawCompactTextPadded(state, xs[1] + UI_CARD_W / 2, HOME_TILE_Y + 42,
+                          stateColor, C_CARD, 88U, TC_DATUM);
+  if (!gUiDynamicPass || !gUiHomeCache.valid ||
+      strcmp(gUiHomeCache.power, power) != 0 || gUiHomeCache.powerColor != powerColor)
+    drawValueTextPadded(power, xs[2] + UI_CARD_W / 2, HOME_TILE_Y + 36,
+                        powerColor, C_CARD, 86U, TC_DATUM);
+
+  if (!gUiDynamicPass || !gUiHomeCache.valid ||
+      strcmp(gUiHomeCache.modeLink, modeLink) != 0)
+    drawMicroTextPadded(modeLink, W / 2, 169, C_TEXT_DIM, C_BG, 300U, TC_DATUM);
+
+  const bool ready[3] = {d.escReady && d.vescConnected, d.perceptionReady,
+                         d.motionReady && d.nav2Ready};
+  const bool fresh[3] = {d.escFresh, d.perceptionFresh, d.navigationFresh};
+  const int dotX[3] = {62, 160, 258};
+  for (uint8_t i = 0U; i < 3U; ++i) {
+    const uint16_t color = domainHealthColor(ready[i], fresh[i]);
+    if (!gUiDynamicPass || !gUiHomeCache.valid || gUiHomeCache.railColors[i] != color)
+      drawStatusDot(dotX[i], HOME_HEALTH_Y + 6, color, 4);
+    gUiHomeCache.railColors[i] = color;
+  }
+
+  std::snprintf(gUiHomeCache.speed, sizeof(gUiHomeCache.speed), "%s", speed);
+  std::snprintf(gUiHomeCache.state, sizeof(gUiHomeCache.state), "%s", state);
+  std::snprintf(gUiHomeCache.power, sizeof(gUiHomeCache.power), "%s", power);
+  std::snprintf(gUiHomeCache.modeLink, sizeof(gUiHomeCache.modeLink), "%s", modeLink);
+  gUiHomeCache.speedColor = speedColor;
+  gUiHomeCache.stateColor = stateColor;
+  gUiHomeCache.powerColor = powerColor;
+  gUiHomeCache.valid = true;
 }
 
 inline void drawMainMenu(const UiState &ui, const VehicleTelemetry &d) {

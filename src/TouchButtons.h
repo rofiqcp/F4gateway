@@ -121,16 +121,20 @@ inline SoftKey touchKeyAt(const UiState &ui, int x, int y) {
   if (ui.menu == UiMenuId::SPLASH)
     return SoftKey::NONE;
 
-  // Zone 1: small HOME/MENU control at the physical top-left.  On HOME the
-  // icon opens MAIN MENU; elsewhere the same fixed zone performs back/home.
+  // Zone 1: top-left is HOME/BACK everywhere except HOME itself.
+  // HOME is already the landing overview, so the top-left area is display-only.
   if (hit(x, y, HOME_TOUCH_X, HOME_TOUCH_Y, HOME_TOUCH_W, HOME_TOUCH_H))
     return (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW)
-               ? SoftKey::MENU
+               ? SoftKey::NONE
                : SoftKey::TOP_LEFT;
 
-  // Zones 2..4: only the three middle columns are selectable menu cards.
-  if (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW ||
-      ui.menu == UiMenuId::MAIN_MENU)
+  // HOME: only the validated bottom-center zone opens MAIN MENU.
+  if (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW) {
+    return footerKeyAt(x, y) == SoftKey::OK ? SoftKey::MENU : SoftKey::NONE;
+  }
+
+  // MAIN MENU: only the three validated middle zones select ESC/PER/NAV.
+  if (ui.menu == UiMenuId::MAIN_MENU)
     return cardKeyAt(x, y);
 
   if (ui.menu == UiMenuId::ESC_MANUAL_TEST) {

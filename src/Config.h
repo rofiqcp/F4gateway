@@ -195,9 +195,10 @@ static constexpr int TOUCH_COL_W = 106;
 static constexpr int HOME_TILE_Y = 42;
 static constexpr int HOME_TILE_H = 84;
 static constexpr int HOME_HEALTH_Y = 140;
-static constexpr int HOME_MENU_X = 4;
+// HOME hanya membuka MENU dari zona bawah-tengah yang tervalidasi.
+static constexpr int HOME_MENU_X = 110;
 static constexpr int HOME_MENU_Y = 188;
-static constexpr int HOME_MENU_W = W - 8;
+static constexpr int HOME_MENU_W = 102;
 static constexpr int HOME_MENU_H = 48;
 
 // Parameter operator yang benar-benar aman diedit dari HMI.

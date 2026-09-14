@@ -605,8 +605,7 @@ static void selectRelative(int direction) {
 static void chooseVisibleCard(uint8_t slot) {
   if (slot >= DOMAIN_PAGE_SIZE)
     return;
-  if (gUi.menu == UiMenuId::HOME || gUi.menu == UiMenuId::OVERVIEW ||
-      gUi.menu == UiMenuId::MAIN_MENU) {
+  if (gUi.menu == UiMenuId::MAIN_MENU) {
     const UiMenuId id = menuCardAt(UiMenuId::MAIN_MENU, 0U, slot);
     if (id != UiMenuId::SPLASH)
       setMenu(id);
