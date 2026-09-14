@@ -52,7 +52,10 @@ inline void suppressTouchUntilRelease() {
 
 inline void beginTouch() {
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
-  uint16_t calData[5] = {300, 3600, 300, 3600, 1};
+  // Empirical 7-point calibration from the installed panel:
+  // raw X rises left->right (~0.9k, 2.3k, 3.7k), raw Y falls top->bottom
+  // (~3.2k, 2.1k, 0.7k). Keep axes unrotated and invert screen Y.
+  uint16_t calData[5] = {580, 3440, 330, 3310, 4};
   tft.setTouch(calData);
   invalidateTouchGeneration();
 }
@@ -70,13 +73,27 @@ inline bool hit(int px, int py, int x, int y, int w, int h) {
   return px >= x && px < (x + w) && py >= y && py < (y + h);
 }
 
-inline SoftKey cardKeyAt(int x, int y, int top, int height) {
-  if (y < top || y >= top + height) return SoftKey::NONE;
-  for (uint8_t i = 0U; i < DOMAIN_PAGE_SIZE; ++i) {
-    const int cardX = UI_CARD_X0 + i * (UI_CARD_W + UI_CARD_GAP);
-    if (hit(x, y, cardX, top, UI_CARD_W, height))
-      return i == 0U ? SoftKey::CARD_0 : (i == 1U ? SoftKey::CARD_1 : SoftKey::CARD_2);
-  }
+inline int touchColumnAt(int x, int y, int top, int height) {
+  if (y < top || y >= top + height) return -1;
+  if (hit(x, y, TOUCH_COL0_X, top, TOUCH_COL_W, height)) return 0;
+  if (hit(x, y, TOUCH_COL1_X, top, TOUCH_COL_W, height)) return 1;
+  if (hit(x, y, TOUCH_COL2_X, top, TOUCH_COL_W, height)) return 2;
+  return -1;
+}
+
+inline SoftKey cardKeyAt(int x, int y) {
+  const int col = touchColumnAt(x, y, TOUCH_MIDDLE_Y, TOUCH_MIDDLE_H);
+  if (col == 0) return SoftKey::CARD_0;
+  if (col == 1) return SoftKey::CARD_1;
+  if (col == 2) return SoftKey::CARD_2;
+  return SoftKey::NONE;
+}
+
+inline SoftKey footerKeyAt(int x, int y) {
+  const int col = touchColumnAt(x, y, TOUCH_BOTTOM_Y, TOUCH_BOTTOM_H);
+  if (col == 0) return SoftKey::LEFT;
+  if (col == 1) return SoftKey::OK;
+  if (col == 2) return SoftKey::RIGHT;
   return SoftKey::NONE;
 }
 
@@ -101,30 +118,37 @@ inline bool uiUsesPagerFooter(const UiState &ui) {
 }
 
 inline SoftKey touchKeyAt(const UiState &ui, int x, int y) {
-  if (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW) {
-    return hit(x, y, HOME_MENU_X, HOME_MENU_Y, HOME_MENU_W, HOME_MENU_H)
+  if (ui.menu == UiMenuId::SPLASH)
+    return SoftKey::NONE;
+
+  // Zone 1: small HOME/MENU control at the physical top-left.  On HOME the
+  // icon opens MAIN MENU; elsewhere the same fixed zone performs back/home.
+  if (hit(x, y, HOME_TOUCH_X, HOME_TOUCH_Y, HOME_TOUCH_W, HOME_TOUCH_H))
+    return (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW)
                ? SoftKey::MENU
-               : SoftKey::NONE;
-  }
+               : SoftKey::TOP_LEFT;
 
-  if (ui.menu != UiMenuId::SPLASH &&
-      hit(x, y, HOME_TOUCH_X, HOME_TOUCH_Y, HOME_TOUCH_W, HOME_TOUCH_H))
-    return SoftKey::TOP_LEFT;
-
-  if (ui.menu == UiMenuId::MAIN_MENU)
-    return cardKeyAt(x, y, SUBMENU_CARD_Y, SUBMENU_CARD_H);
+  // Zones 2..4: only the three middle columns are selectable menu cards.
+  if (ui.menu == UiMenuId::HOME || ui.menu == UiMenuId::OVERVIEW ||
+      ui.menu == UiMenuId::MAIN_MENU)
+    return cardKeyAt(x, y);
 
   if (ui.menu == UiMenuId::ESC_MANUAL_TEST) {
-    if (hit(x, y, 108, 40, 104, 50)) return SoftKey::TEST_FORWARD;
-    if (hit(x, y, 6, 96, 94, 70)) return SoftKey::TEST_LEFT;
-    if (hit(x, y, 108, 96, 104, 70)) return SoftKey::TEST_STOP;
-    if (hit(x, y, 220, 96, 94, 70)) return SoftKey::TEST_RIGHT;
-    if (hit(x, y, 108, 172, 104, 52)) return SoftKey::TEST_REVERSE;
+    // Manual-test actions are deliberately constrained to the same six fixed
+    // middle/footer zones; there are no extra hidden touch rectangles.
+    const int middle = touchColumnAt(x, y, TOUCH_MIDDLE_Y, TOUCH_MIDDLE_H);
+    if (middle == 0) return SoftKey::TEST_LEFT;
+    if (middle == 1) return SoftKey::TEST_STOP;
+    if (middle == 2) return SoftKey::TEST_RIGHT;
+    const int bottom = touchColumnAt(x, y, TOUCH_BOTTOM_Y, TOUCH_BOTTOM_H);
+    if (bottom == 0) return SoftKey::TEST_REVERSE;
+    if (bottom == 1) return SoftKey::TEST_STOP;
+    if (bottom == 2) return SoftKey::TEST_FORWARD;
     return SoftKey::NONE;
   }
 
   if (menuHasChildren(ui.menu)) {
-    const SoftKey card = cardKeyAt(x, y, SUBMENU_CARD_Y, SUBMENU_CARD_H);
+    const SoftKey card = cardKeyAt(x, y);
     if (card != SoftKey::NONE) {
       const uint8_t slot = card == SoftKey::CARD_0 ? 0U : (card == SoftKey::CARD_1 ? 1U : 2U);
       return menuCardAt(ui.menu, ui.pageIndex, slot) == UiMenuId::SPLASH
@@ -133,20 +157,19 @@ inline SoftKey touchKeyAt(const UiState &ui, int x, int y) {
     }
   }
 
-  if (uiUsesEditFooter(ui)) {
-    if (hit(x, y, SOFTKEY_X0, SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H)) return SoftKey::LEFT;
-    if (hit(x, y, SOFTKEY_X0 + SOFTKEY_W + SOFTKEY_GAP, SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H)) return SoftKey::OK;
-    if (hit(x, y, SOFTKEY_X0 + 2 * (SOFTKEY_W + SOFTKEY_GAP), SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H)) return SoftKey::RIGHT;
-    return SoftKey::NONE;
-  }
+  // Zones 5..7: LEFT / OK / RIGHT.  A page may ignore OK when it has no
+  // center action, but no touch outside these fixed zones is accepted.
+  if (uiUsesEditFooter(ui))
+    return footerKeyAt(x, y);
 
   if (uiUsesPagerFooter(ui)) {
-    if (hit(x, y, CAROUSEL_LEFT_X, CAROUSEL_NAV_Y, CAROUSEL_NAV_W, CAROUSEL_NAV_H)) return SoftKey::LEFT;
-    if ((ui.menu == UiMenuId::NAV_MISSION ||
-         menuDetailActionTarget(ui.menu, ui.detailViewIndex) != UiMenuId::SPLASH) &&
-        hit(x, y, CAROUSEL_PAGE_X, CAROUSEL_NAV_Y, CAROUSEL_PAGE_W, CAROUSEL_NAV_H))
+    const SoftKey footer = footerKeyAt(x, y);
+    if (footer == SoftKey::LEFT || footer == SoftKey::RIGHT)
+      return footer;
+    if (footer == SoftKey::OK &&
+        (ui.menu == UiMenuId::NAV_MISSION ||
+         menuDetailActionTarget(ui.menu, ui.detailViewIndex) != UiMenuId::SPLASH))
       return SoftKey::OK;
-    if (hit(x, y, CAROUSEL_RIGHT_X, CAROUSEL_NAV_Y, CAROUSEL_NAV_W, CAROUSEL_NAV_H)) return SoftKey::RIGHT;
   }
   return SoftKey::NONE;
 }

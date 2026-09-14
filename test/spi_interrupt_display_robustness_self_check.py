@@ -72,6 +72,20 @@ need("kDeferredCommandSlots" in main and "deferredCommandDrops" in diag, "deferr
 need("invalidateTouchGeneration" in main and "touchGeneration" in rd("src/TouchButtons.h"),
      "touch events are generation-scoped across page/display changes")
 need("touch_reject_fast_count_" in cpp and "Median3" in cpp, "XPT2046 fast reject + median filtering remain active")
+raw_touch = re.search(r"void HmiDisplay::readTouchRawTx\([^)]*\)\s*\{(.*?)\n\}", cpp, re.S)
+need(raw_touch is not None, "XPT2046 raw-read routine exists")
+y_phase = raw_touch.group(1).split("*x = t;", 1)[1] if "*x = t;" in raw_touch.group(1) else ""
+y_sequence = re.search(
+    r"\(void\)transferTx\(0U\);\s*"
+    r"\(void\)transferTx\(0x90U\);\s*"
+    r"\(void\)transferTx\(0U\);\s*"
+    r"\(void\)transferTx\(0x90U\);\s*"
+    r"\(void\)transferTx\(0U\);\s*"
+    r"\(void\)transferTx\(0x90U\);\s*"
+    r"(?:/\*.*?\*/\s*|//[^\n]*\n\s*)*"
+    r"t\s*=\s*static_cast<uint16_t>\(transferTx\(0U\)\)\s*<<\s*5U",
+    y_phase, re.S)
+need(y_sequence is not None, "XPT2046 Y conversion has no extra dummy byte before ADC high byte")
 need("motionSafeForHeavyMaintenance" in main and "ERR:TFT:MOTION_OR_NAV_ACTIVE" in main,
      "heavy TFT test is motion/nav gated")
 need("Board_RealtimeDelayMs" in main and "TFT:TEST" in main, "TFT self-test delays continue realtime service")

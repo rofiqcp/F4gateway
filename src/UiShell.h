@@ -591,88 +591,14 @@ inline void drawOperatorCard(uint8_t slot, UiMenuId id,
 
 inline void drawHome(const UiState &ui, const VehicleTelemetry &d) {
   (void)ui;
-  const int xs[3] = {UI_CARD_X0, UI_CARD_X0 + UI_CARD_W + UI_CARD_GAP,
-                     UI_CARD_X0 + 2 * (UI_CARD_W + UI_CARD_GAP)};
-  if (!gUiDynamicPass) {
-    const char *labels[3] = {"SPEED", "STATE", "POWER"};
-    for (uint8_t i = 0U; i < 3U; ++i) {
-      drawCard(xs[i], HOME_TILE_Y, UI_CARD_W, HOME_TILE_H, C_CARD, C_CARD_LINE,
-               false);
-      drawMicroText(labels[i], xs[i] + UI_CARD_W / 2, HOME_TILE_Y + 10,
-                    C_DISABLED, C_CARD, TC_DATUM);
-    }
-    tft.fillRoundRect(HOME_MENU_X, HOME_MENU_Y, HOME_MENU_W, HOME_MENU_H, 7,
-                      C_PANEL);
-    tft.drawRoundRect(HOME_MENU_X, HOME_MENU_Y, HOME_MENU_W, HOME_MENU_H, 7,
-                      C_ACCENT);
-    iconGrid(HOME_MENU_X + 26, HOME_MENU_Y + 20, C_ACCENT);
-    drawUiText("MENU", W / 2, HOME_MENU_Y + 10, C_ACCENT, C_PANEL, TC_DATUM);
-    drawMicroText("HOLD 0.8s = SERVICE", W / 2, HOME_MENU_Y + 31, C_TEXT_DIM,
-                  C_PANEL, TC_DATUM);
-    drawMicroText("ESC", 62, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
-    drawMicroText("PER", 160, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
-    drawMicroText("NAV", 258, HOME_HEALTH_Y + 18, C_TEXT_DIM, C_BG, TC_DATUM);
-  }
+  // Operator landing page: the three primary domains are directly selectable.
+  // This intentionally matches the three validated middle touch zones.
+  for (uint8_t slot = 0U; slot < DOMAIN_PAGE_SIZE; ++slot)
+    drawOperatorCard(slot, menuCardAt(UiMenuId::MAIN_MENU, 0U, slot), d, true);
 
-  char speed[20], state[20], power[20], modeLink[48];
-  snprintf(speed, sizeof(speed), "%.1f", d.speedKmh);
-  const char *stateText = d.eStop
-                              ? "E-STOP"
-                              : (d.systemStatus == SYS_FAULT
-                                     ? "FAULT"
-                                     : (d.state == STATE_RUNNING
-                                            ? "RUNNING"
-                                            : (d.systemStatus == SYS_READY
-                                                   ? "READY"
-                                                   : vehicleStateText(d.state))));
-  snprintf(state, sizeof(state), "%s", stateText);
-  if (d.vbusValid)
-    snprintf(power, sizeof(power), "%.1f V", d.vbusV);
-  else
-    snprintf(power, sizeof(power), "%s", "N/A");
-  snprintf(modeLink, sizeof(modeLink), "%s | ROS %s | F103 %s", modeText(d.mode),
-           d.rosConnected ? "ON" : "OFF", d.vescConnected ? "ON" : "OFF");
-
-  const uint16_t speedColor = d.eStop ? C_FAULT : C_INK;
-  const uint16_t stateColor = d.eStop || d.systemStatus == SYS_FAULT
-                                  ? C_FAULT
-                                  : (d.systemStatus == SYS_READY ? C_READY : C_WARNING);
-  const uint16_t powerColor = d.vbusValid ? C_INK : C_DISABLED;
-  if (!gUiDynamicPass || !gUiHomeCache.valid ||
-      strcmp(gUiHomeCache.speed, speed) != 0 || gUiHomeCache.speedColor != speedColor)
-    drawValueTextPadded(speed, xs[0] + UI_CARD_W / 2, HOME_TILE_Y + 36,
-                        speedColor, C_CARD, 86U, TC_DATUM);
-  if (!gUiDynamicPass || !gUiHomeCache.valid ||
-      strcmp(gUiHomeCache.state, state) != 0 || gUiHomeCache.stateColor != stateColor)
-    drawCompactTextPadded(state, xs[1] + UI_CARD_W / 2, HOME_TILE_Y + 42,
-                          stateColor, C_CARD, 88U, TC_DATUM);
-  if (!gUiDynamicPass || !gUiHomeCache.valid ||
-      strcmp(gUiHomeCache.power, power) != 0 || gUiHomeCache.powerColor != powerColor)
-    drawValueTextPadded(power, xs[2] + UI_CARD_W / 2, HOME_TILE_Y + 36,
-                        powerColor, C_CARD, 86U, TC_DATUM);
-
-  if (!gUiDynamicPass || !gUiHomeCache.valid || strcmp(gUiHomeCache.modeLink, modeLink) != 0)
-    drawMicroTextPadded(modeLink, W / 2, 169, C_TEXT_DIM, C_BG, 300U, TC_DATUM);
-
-  const bool ready[3] = {d.escReady && d.vescConnected, d.perceptionReady,
-                         d.motionReady && d.nav2Ready};
-  const bool fresh[3] = {d.escFresh, d.perceptionFresh, d.navigationFresh};
-  const int dotX[3] = {62, 160, 258};
-  for (uint8_t i = 0U; i < 3U; ++i) {
-    const uint16_t color = domainHealthColor(ready[i], fresh[i]);
-    if (!gUiDynamicPass || !gUiHomeCache.valid || gUiHomeCache.railColors[i] != color)
-      drawStatusDot(dotX[i], HOME_HEALTH_Y + 6, color, 4);
-    gUiHomeCache.railColors[i] = color;
-  }
-
-  std::snprintf(gUiHomeCache.speed, sizeof(gUiHomeCache.speed), "%s", speed);
-  std::snprintf(gUiHomeCache.state, sizeof(gUiHomeCache.state), "%s", state);
-  std::snprintf(gUiHomeCache.power, sizeof(gUiHomeCache.power), "%s", power);
-  std::snprintf(gUiHomeCache.modeLink, sizeof(gUiHomeCache.modeLink), "%s", modeLink);
-  gUiHomeCache.speedColor = speedColor;
-  gUiHomeCache.stateColor = stateColor;
-  gUiHomeCache.powerColor = powerColor;
-  gUiHomeCache.valid = true;
+  if (!gUiDynamicPass)
+    drawMicroText("ESC / PERCEPTION / NAV2", W / 2, 38, C_TEXT_DIM, C_BG,
+                  TC_DATUM);
 }
 
 inline void drawMainMenu(const UiState &ui, const VehicleTelemetry &d) {
@@ -812,24 +738,32 @@ inline void drawManualTest(const UiState &ui, const VehicleTelemetry &d) {
   const bool steerChanged = full ||
                             gManualRenderCache.steerReady != steerReady ||
                             gManualRenderCache.angleDeg != angleDeg;
-  if (driveChanged) {
-    drawManualTestButton(108, 40, 104, 50, SoftKey::TEST_FORWARD, "FORWARD",
-                         speed, driveReady);
-    drawManualTestButton(108, 172, 104, 52, SoftKey::TEST_REVERSE, "REVERSE",
-                         speed, driveReady);
-  }
+
+  // Manual test also obeys the same fixed physical zones.  Middle row is
+  // LEFT / STOP / RIGHT, bottom row is REV / STOP / FWD.  No control is drawn
+  // outside the seven validated touch regions.
   if (steerChanged) {
-    drawManualTestButton(6, 96, 94, 70, SoftKey::TEST_LEFT, "LEFT", angle,
-                         steerReady);
-    drawManualTestButton(220, 96, 94, 70, SoftKey::TEST_RIGHT, "RIGHT", angle,
-                         steerReady);
+    drawManualTestButton(UI_CARD_X0, TOUCH_MIDDLE_Y, UI_CARD_W, TOUCH_MIDDLE_H,
+                         SoftKey::TEST_LEFT, "LEFT", angle, steerReady);
+    drawManualTestButton(UI_CARD_X0 + UI_CARD_W + UI_CARD_GAP, TOUCH_MIDDLE_Y,
+                         UI_CARD_W, TOUCH_MIDDLE_H, SoftKey::TEST_STOP,
+                         "STOP", "ALL MOTION", true, true);
+    drawManualTestButton(UI_CARD_X0 + 2 * (UI_CARD_W + UI_CARD_GAP),
+                         TOUCH_MIDDLE_Y, UI_CARD_W, TOUCH_MIDDLE_H,
+                         SoftKey::TEST_RIGHT, "RIGHT", angle, steerReady);
   }
-  if (full) {
-    drawManualTestButton(108, 96, 104, 70, SoftKey::TEST_STOP, "STOP",
-                         "ALL MOTION", true, true);
-    drawMicroText("HOLD 0.6s  |  RELEASE = STOP", W / 2, 229, C_WARNING, C_BG,
+  if (driveChanged || full) {
+    drawManualTestButton(softKeyX(0), SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H,
+                         SoftKey::TEST_REVERSE, "REV", speed, driveReady);
+    drawManualTestButton(softKeyX(1), SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H,
+                         SoftKey::TEST_STOP, "STOP", "RELEASE", true, true);
+    drawManualTestButton(softKeyX(2), SOFTKEY_Y, SOFTKEY_W, SOFTKEY_H,
+                         SoftKey::TEST_FORWARD, "FWD", speed, driveReady);
+  }
+  if (full)
+    drawMicroText("HOLD 0.6s  |  RELEASE = STOP", W / 2, 38, C_WARNING, C_BG,
                   TC_DATUM);
-  }
+
   gManualRenderCache.valid = true;
   gManualRenderCache.driveReady = driveReady;
   gManualRenderCache.steerReady = steerReady;

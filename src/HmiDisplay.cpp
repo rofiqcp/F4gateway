@@ -1004,7 +1004,9 @@ void HmiDisplay::readTouchRawTx(uint16_t *x, uint16_t *y) {
   (void)transferTx(0x90U);
   (void)transferTx(0U);
   (void)transferTx(0x90U);
-  (void)transferTx(0U);
+  // After the third XP command the very next byte is the high 8 bits of the
+  // settled Y conversion. Do not insert another dummy byte here: doing so
+  // shifts the ADC stream and can fabricate impossible (>4095) raw values.
   t = static_cast<uint16_t>(transferTx(0U)) << 5U;
   t |= static_cast<uint16_t>((transferTx(0U) >> 3U) & 0x1FU);
   *y = t;
@@ -1016,44 +1018,86 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
       ++spi_bus_conflict_count_;
     return false;
   }
+
   ++touch_read_count_;
   threshold = std::max<uint16_t>(20U, threshold);
   if (static_cast<int32_t>(press_time_ms_ - HAL_GetTick()) > 0)
     threshold = 20U;
+
+  // Keep the idle path extremely cheap: one pressure conversion is enough to
+  // reject an untouched panel.  Only a real press pays the settling delay.
   if (!beginTransaction(SpiOwner::TOUCH, kTouchPrescaler))
     return false;
-  const uint16_t z = readTouchZTx();
-  touch_current_z_ = z;
-  if (z <= threshold) {
+
+  const uint16_t z1 = readTouchZTx();
+  touch_current_z_ = z1;
+  if (z1 <= threshold) {
     (void)endTransaction();
     ++touch_reject_fast_count_;
     press_time_ms_ = 0U;
     return false;
   }
-  uint16_t xs[3]{}, ys[3]{};
-  for (uint8_t i = 0U; i < 3U; ++i) {
-    readTouchRawTx(&xs[i], &ys[i]);
-    if (i < 2U)
-      Board_DelayUs(150U);
-  }
+
+  // XPT2046/TFT_eSPI validated-touch sequencing allows the resistive panel and
+  // ADC mux to settle between position samples.  The old 150-us triple sample
+  // was too aggressive on the real 2.4-inch panel: pressure was detected, but
+  // every touch was discarded as coordinate jitter before it reached the UI.
+  uint16_t x1 = 0U, y1 = 0U, x2 = 0U, y2 = 0U, x3 = 0U, y3 = 0U;
+  readTouchRawTx(&x1, &y1);
+  Board_DelayUs(1000U);
+
   const uint16_t z2 = readTouchZTx();
-  const bool ended = endTransaction();
-  if (!ended || z2 <= threshold) {
+  touch_current_z_ = z2;
+  if (z2 <= threshold) {
+    (void)endTransaction();
     press_time_ms_ = 0U;
     return false;
   }
-  const uint16_t xmin = std::min(xs[0], std::min(xs[1], xs[2])),
-                 xmax = std::max(xs[0], std::max(xs[1], xs[2]));
-  const uint16_t ymin = std::min(ys[0], std::min(ys[1], ys[2])),
-                 ymax = std::max(ys[0], std::max(ys[1], ys[2]));
-  if (static_cast<uint16_t>(xmax - xmin) > 80U ||
-      static_cast<uint16_t>(ymax - ymin) > 80U)
+
+  Board_DelayUs(2000U);
+  readTouchRawTx(&x2, &y2);
+  Board_DelayUs(1000U);
+  readTouchRawTx(&x3, &y3);
+
+  // Always retain the latest raw sample for TOUCH:STATUS diagnostics, even if
+  // this particular sample is rejected.  This makes field debugging useful.
+  touch_last_raw_x_ = x3;
+  touch_last_raw_y_ = y3;
+
+  const bool ended = endTransaction();
+  if (!ended) {
+    press_time_ms_ = 0U;
     return false;
-  const uint16_t rx = Median3(xs[0], xs[1], xs[2]),
-                 ry = Median3(ys[0], ys[1], ys[2]);
+  }
+
+  // XPT2046 position conversions are 12-bit. Values above 4095 indicate a
+  // floating/corrupted MISO return path and must never become a UI action.
+  if (x1 > 4095U || x2 > 4095U || x3 > 4095U ||
+      y1 > 4095U || y2 > 4095U || y3 > 4095U) {
+    press_time_ms_ = 0U;
+    return false;
+  }
+
+  // TFT_eSPI uses a very tight raw deadband.  Keep the previously proven 80-LSB
+  // tolerance here because this AGV HMI has longer wiring and electrical noise,
+  // while still rejecting obvious jumps/slides.  Use a median of three settled
+  // samples so a single SPI/ADC outlier cannot cancel a real operator press.
+  const uint16_t xmin = std::min(x1, std::min(x2, x3));
+  const uint16_t xmax = std::max(x1, std::max(x2, x3));
+  const uint16_t ymin = std::min(y1, std::min(y2, y3));
+  const uint16_t ymax = std::max(y1, std::max(y2, y3));
+  if (static_cast<uint16_t>(xmax - xmin) > 80U ||
+      static_cast<uint16_t>(ymax - ymin) > 80U) {
+    press_time_ms_ = 0U;
+    return false;
+  }
+
+  const uint16_t rx = Median3(x1, x2, x3);
+  const uint16_t ry = Median3(y1, y2, y3);
   touch_last_raw_x_ = rx;
   touch_last_raw_y_ = ry;
   press_time_ms_ = HAL_GetTick() + 50U;
+
   int32_t sx = 0, sy = 0;
   if (touch_rotate_) {
     sx = (static_cast<int32_t>(ry) - touch_x0_) * width_ / touch_x1_;
@@ -1068,6 +1112,7 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     sy = (height_ - 1) - sy;
   if (sx < 0 || sy < 0 || sx >= width_ || sy >= height_)
     return false;
+
   *x = static_cast<uint16_t>(ClampI32(sx, 0, width_ - 1));
   *y = static_cast<uint16_t>(ClampI32(sy, 0, height_ - 1));
   touch_last_x_ = *x;

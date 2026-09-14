@@ -39,14 +39,16 @@ def topbar(draw, title):
         label(draw, (x + 10, 14), code, F8, DIM, "lm")
         x += 30
 
-def carousel(draw, selected, count):
+def carousel(draw, selected, count, actionable=False):
     y = 188
-    round_box(draw, (4, y, 80, 235), PANEL)
-    round_box(draw, (86, y, 234, 235), PANEL2)
-    round_box(draw, (240, y, 316, 235), PANEL)
-    label(draw, (42, 212), "<", F14, TEXT, "mm")
-    label(draw, (160, 212), f"{selected + 1} / {count}", F12, ACCENT, "mm")
-    label(draw, (278, 212), ">", F14, TEXT, "mm")
+    boxes = [(4, y, 105, 235), (110, y, 211, 235), (216, y, 317, 235)]
+    for i, box in enumerate(boxes):
+        round_box(draw, box, PANEL if i != 1 or actionable else PANEL2,
+                  ACCENT if i == 1 and actionable else BORDER)
+    label(draw, (54, 212), "<  LEFT", F10, TEXT, "mm")
+    label(draw, (160, 212), "OK" if actionable else f"{selected + 1} / {count}",
+          F12, ACCENT if actionable else DIM, "mm")
+    label(draw, (267, 212), "RIGHT  >", F10, TEXT, "mm")
 
 def root_page(title, items, selected=0):
     image = Image.new("RGB", (W, H), BG)
@@ -54,45 +56,40 @@ def root_page(title, items, selected=0):
     topbar(draw, title)
     for slot, item in enumerate(items[:3]):
         x = 6 + slot * 104
-        round_box(draw, (x, 42, x + 99, 173), PANEL2 if slot == selected else PANEL,
+        round_box(draw, (x, 56, x + 99, 183), PANEL2 if slot == selected else PANEL,
                   ACCENT if slot == selected else BORDER)
-        label(draw, (x + 50, 83), item, F10, ACCENT if slot == selected else TEXT, "mm")
-        label(draw, (x + 50, 117), "READY", F8, READY, "mm")
-        label(draw, (x + 50, 151), str(slot + 1), F8, DIM, "mm")
+        label(draw, (x + 50, 92), item, F10, ACCENT if slot == selected else TEXT, "mm")
+        label(draw, (x + 50, 126), "READY", F8, READY, "mm")
+        label(draw, (x + 50, 162), str(slot + 1), F8, DIM, "mm")
     carousel(draw, selected, len(items))
     return image
 def overview_page():
     image = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(image)
     topbar(draw, "OVERVIEW")
-    round_box(draw, (6, 36, 314, 82), PANEL)
-    label(draw, (16, 50), "AUTO | READY     0.0 km/h", F10, TEXT)
-    label(draw, (16, 70), "3D FIX/17 SAT | IDLE > NO TARGET", F8, DIM)
     for i, item in enumerate(("ESC", "PERCEPTION", "NAVIGATION")):
         x = 6 + i * 104
-        round_box(draw, (x, 89, x + 99, 182), CARD, ACCENT if i == 0 else BORDER)
-        label(draw, (x + 50, 124), item, F10, INK, "mm")
-        label(draw, (x + 50, 163), "READY", F8, READY, "mm")
-    carousel(draw, 0, 4)
+        round_box(draw, (x, 56, x + 99, 183), PANEL, BORDER)
+        label(draw, (x + 50, 98), item, F10, TEXT, "mm")
+        label(draw, (x + 50, 146), "READY", F8, READY, "mm")
+    label(draw, (160, 38), "ESC / PERCEPTION / NAV2", F8, DIM, "mm")
     return image
 
 def manual_page():
     image = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(image)
     topbar(draw, "MANUAL TEST")
-    buttons = [
-        ((108, 40, 212, 90), "FORWARD", ACCENT),
-        ((6, 96, 100, 166), "LEFT", ACCENT),
-        ((108, 96, 212, 166), "STOP", FAULT),
-        ((220, 96, 314, 166), "RIGHT", ACCENT),
-        ((108, 172, 212, 224), "REVERSE", ACCENT),
-    ]
-    for box, text, color in buttons:
-        round_box(draw, box, PANEL2 if text != "STOP" else FAULT, color)
-        label(draw, ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2), text, F10,
-              TEXT, "mm")
-    label(draw, (160, 232), "HOLD 0.6s  |  RELEASE = STOP", F8, (242, 181, 56), "mm")
+    middle = [(6, 56, 105, 183), (110, 56, 209, 183), (214, 56, 313, 183)]
+    for box, text, color in zip(middle, ("LEFT", "STOP", "RIGHT"), (ACCENT, FAULT, ACCENT)):
+        round_box(draw, box, FAULT if text == "STOP" else PANEL, color)
+        label(draw, ((box[0]+box[2])//2, 120), text, F10, TEXT, "mm")
+    bottom = [(4,188,105,235),(110,188,211,235),(216,188,317,235)]
+    for box, text, color in zip(bottom, ("REV", "STOP", "FWD"), (ACCENT, FAULT, ACCENT)):
+        round_box(draw, box, FAULT if text == "STOP" else PANEL, color)
+        label(draw, ((box[0]+box[2])//2, 212), text, F10, TEXT, "mm")
+    label(draw, (160, 38), "HOLD 0.6s | RELEASE = STOP", F8, (242,181,56), "mm")
     return image
+
 def main():
     pages = {
         "OVERVIEW": overview_page(),

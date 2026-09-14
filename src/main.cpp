@@ -605,7 +605,8 @@ static void selectRelative(int direction) {
 static void chooseVisibleCard(uint8_t slot) {
   if (slot >= DOMAIN_PAGE_SIZE)
     return;
-  if (gUi.menu == UiMenuId::MAIN_MENU) {
+  if (gUi.menu == UiMenuId::HOME || gUi.menu == UiMenuId::OVERVIEW ||
+      gUi.menu == UiMenuId::MAIN_MENU) {
     const UiMenuId id = menuCardAt(UiMenuId::MAIN_MENU, 0U, slot);
     if (id != UiMenuId::SPLASH)
       setMenu(id);
@@ -1373,8 +1374,9 @@ static void sampleDiagnostics(uint32_t now) {
   const bool oldTftOk = gDiagnostics.tftOk;
   gDiagnostics.displayReady = tft.displayReady();
   gDiagnostics.displayFaulted = tft.displayFaulted();
-  gDiagnostics.tftOk = ((gTftControllerId & 0xFFFFU) == 0x9341U) &&
-                       gDiagnostics.displayReady &&
+  // Operational health is the proven write-path state. Controller ID remains
+  // separately visible in diagnostics and may be zero on write-only modules.
+  gDiagnostics.tftOk = gDiagnostics.displayReady &&
                        !gDiagnostics.displayFaulted;
   gDiagnostics.spiTransactions = tft.spiTransactions();
   gDiagnostics.spiBytesTx = tft.spiBytesTx();
@@ -1754,10 +1756,12 @@ static void handleSerialCommand(char *command) {
   }
   if (!strcmp(command, "TFT:STATUS")) {
     char line[96];
+    const bool idOk = (gTftControllerId & 0xFFFFU) == 0x9341U;
+    const char *state = !gDiagnostics.tftOk ? "FAULT" : (idOk ? "OK" : "WRITE_ONLY");
     std::snprintf(
         line, sizeof(line), "TFT:ID:%08lX:MODE=%02X:MADCTL=%02X:PIXFMT=%02X:%s",
         static_cast<unsigned long>(gTftControllerId), gTftPowerMode, gTftMadctl,
-        gTftPixelFormat, gDiagnostics.tftOk ? "OK" : "FAULT");
+        gTftPixelFormat, state);
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
@@ -2231,19 +2235,32 @@ static void updateDisplayDiagnostics(bool ready) {
 }
 
 static bool validateDisplayController() {
+  // Register readback is useful for identification, but it must not gate the
+  // whole HMI. Some ILI9341/XPT2046 modules have a reliable write path while
+  // DOUT/readback is weak or unavailable. Previously a zero ID forced
+  // displayReady=false, which permanently disabled handleTouch() and caused a
+  // recovery/reset loop every two seconds even though the visible TFT worked.
   gTftControllerId = tft.displayFaulted() ? 0U : tft.readId();
-  const bool controllerOk =
+  const bool controllerIdentified =
       (gTftControllerId & 0xFFFFU) == 0x9341U && !tft.displayFaulted();
-  if (controllerOk) {
+
+  if (!tft.displayFaulted()) {
     tft.setRotation(1U);
+  }
+
+  if (controllerIdentified && !tft.displayFaulted()) {
     gTftPowerMode = tft.readRegister8(0x0AU, 0U);
     gTftMadctl = tft.readRegister8(0x0BU, 0U);
     gTftPixelFormat = tft.readRegister8(0x0CU, 0U);
     (void)tft.validateFastWriteClock();
   } else {
+    // Stay at the conservative 6 MHz write clock when readback cannot prove
+    // the controller identity. The write-path remains usable and touch polling
+    // is allowed; diagnostics still expose ID=0 for field troubleshooting.
     gTftPowerMode = gTftMadctl = gTftPixelFormat = 0U;
   }
-  const bool ready = controllerOk && !tft.displayFaulted();
+
+  const bool ready = !tft.displayFaulted();
   tft.setDisplayReady(ready);
   tft.setSwapBytes(true);
   updateDisplayDiagnostics(ready);

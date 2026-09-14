@@ -161,25 +161,35 @@ static constexpr int OVERVIEW_SUMMARY_Y = 36;
 static constexpr int OVERVIEW_SUMMARY_H = 47;
 static constexpr int OVERVIEW_CARD_Y = 89;
 static constexpr int OVERVIEW_CARD_H = 94;
-static constexpr int SUBMENU_CARD_Y = 42;
-static constexpr int SUBMENU_CARD_H = 132;
+static constexpr int SUBMENU_CARD_Y = 56;
+static constexpr int SUBMENU_CARD_H = 128;
 static constexpr uint8_t SUBMENU_VISIBLE_CARDS = 3;
 static constexpr uint8_t DOMAIN_PAGE_SIZE = 3;
 
 // Footer carousel: tombol kiri/kanan besar dan indikator posisi di tengah.
 static constexpr int CAROUSEL_NAV_Y = 188;
 static constexpr int CAROUSEL_NAV_H = 48;
-static constexpr int CAROUSEL_NAV_W = 76;
+static constexpr int CAROUSEL_NAV_W = 102;
 static constexpr int CAROUSEL_LEFT_X = 4;
-static constexpr int CAROUSEL_RIGHT_X = W - 4 - CAROUSEL_NAV_W;
-static constexpr int CAROUSEL_PAGE_X = CAROUSEL_LEFT_X + CAROUSEL_NAV_W + 6;
-static constexpr int CAROUSEL_PAGE_W = CAROUSEL_RIGHT_X - 6 - CAROUSEL_PAGE_X;
+static constexpr int CAROUSEL_PAGE_X = 110;
+static constexpr int CAROUSEL_PAGE_W = 102;
+static constexpr int CAROUSEL_RIGHT_X = 216;
 
-// HOME visual tetap kecil, tetapi area sentuh sengaja lebih besar ke kanan/bawah.
+// Tujuh zona touch fisik yang divalidasi dari panel 2.4-inch.
+// Visual HOME tetap kecil; hitbox diperbesar tanpa menambah hotspot baru.
 static constexpr int HOME_TOUCH_X = 0;
 static constexpr int HOME_TOUCH_Y = 0;
-static constexpr int HOME_TOUCH_W = 52;
-static constexpr int HOME_TOUCH_H = 44;
+static constexpr int HOME_TOUCH_W = 96;
+static constexpr int HOME_TOUCH_H = 56;
+
+static constexpr int TOUCH_MIDDLE_Y = 56;
+static constexpr int TOUCH_MIDDLE_H = 128;
+static constexpr int TOUCH_BOTTOM_Y = 184;
+static constexpr int TOUCH_BOTTOM_H = H - TOUCH_BOTTOM_Y;
+static constexpr int TOUCH_COL0_X = 0;
+static constexpr int TOUCH_COL1_X = 107;
+static constexpr int TOUCH_COL2_X = 214;
+static constexpr int TOUCH_COL_W = 106;
 
 // HOME: three operator summaries + one large MENU touch target.
 static constexpr int HOME_TILE_Y = 42;
@@ -204,7 +214,7 @@ static constexpr float DRIVE_SCALE_MAX = 5.00F;
 static constexpr float DRIVE_SCALE_STEP = 0.01F;
 
 // Touch dan refresh: parser telemetry tetap jauh lebih cepat dari paint TFT.
-static constexpr uint16_t TOUCH_THRESHOLD = 300;
+static constexpr uint16_t TOUCH_THRESHOLD = 200;
 static constexpr uint32_t TOUCH_POLL_MS = 20;
 static constexpr uint32_t TOUCH_TAP_MIN_MS = 35;
 static constexpr uint32_t TOUCH_HOLD_ACTION_MS = 650;
