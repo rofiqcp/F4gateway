@@ -25,7 +25,6 @@ STATUS_RE = re.compile(
 def auto_device():
     pats = [
         "/dev/serial/by-id/*BLACKPILL_F411CE_CDC*",
-        "/dev/ttyACM0",
     ]
     for pat in pats:
         found = sorted(glob.glob(pat))
