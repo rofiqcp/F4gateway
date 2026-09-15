@@ -6,8 +6,8 @@
 class DroneCanDnaDatabase {
 public:
   static constexpr uint8_t kMaxNodeId = 125U;
-  static constexpr uint32_t kStorageBase = 0x08040000UL; // STM32F411 sector 6
-  static constexpr uint32_t kStorageLimit = 0x08060000UL;
+  static constexpr uint32_t kStorageBase = 0x0807E000UL; // compact 8 KiB DNA journal at end of persistent sector
+  static constexpr uint32_t kStorageLimit = 0x08080000UL;
 
   bool begin(uint8_t own_node_id, const uint8_t *own_uid, uint8_t own_uid_len);
   bool isRegistered(uint8_t node_id) const;

@@ -8,7 +8,7 @@ usbh=(ROOT/'include/UsbCdcPort.h').read_text()
 proto=(ROOT/'src/TelemetryProtocol.cpp').read_text()
 protoh=(ROOT/'src/TelemetryProtocol.h').read_text()
 diag=(ROOT/'src/Diagnostics.h').read_text()
-bridge=Path('/home/sirobo/agv/src/stmf4/src/stmf4_hmi_bridge.cpp').read_text()
+bridge=(ROOT.parent/'src/stmf4/src/stmf4_hmi_bridge.cpp').read_text()
 def need(ok,msg):
     if not ok: raise SystemExit('FAIL: '+msg)
     print('PASS:',msg)

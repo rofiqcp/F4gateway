@@ -42,7 +42,7 @@ check("MANIFEST_FORMAT 2UL" in boot and "GATEWAY_BOARD_ID" in boot, "manifest v2
 check("boot_watchdog_init" in boot and "boot_watchdog_stop" in boot, "bootloader watchdog lifecycle exists")
 check("DATA2:" in boot and "ERR:DATA2:CRC" in boot, "bootloader chunk CRC protocol exists")
 check("memcmp((const void *)(APP_BASE + offset), data, len)" in boot, "flash chunk readback verification exists")
-check("BOOT_PROTOCOL_VERSION 2UL" in boot and "proto=2" in uploader and "DATA2:" in uploader, "uploader negotiates robust boot protocol")
+check("BOOT_PROTOCOL_VERSION 3UL" in boot and "proto=3" in uploader and "DATA2:" in uploader, "uploader negotiates robust boot protocol")
 check("FORMAT = 2" in manifest and "BOARD_ID = 0xF411CE01" in manifest, "host manifest generator matches bootloader")
 
 print("STAGE1_EMBEDDED_ROBUSTNESS_SELF_CHECK_PASS")

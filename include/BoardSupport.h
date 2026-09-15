@@ -4,18 +4,11 @@
 #include <cstddef>
 #include <cstdint>
 
-#ifndef F4_ESC_GATEWAY
-#define F4_ESC_GATEWAY 0
-#endif
-
 extern SPI_HandleTypeDef hspi1;
 #ifdef NEO3PRO
 extern SPI_HandleTypeDef hspi2;
 #endif
 extern I2C_HandleTypeDef hi2c1;
-#if F4_ESC_GATEWAY
-extern UART_HandleTypeDef huart1;
-#endif
 extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim11;
@@ -119,7 +112,4 @@ private:
   volatile bool rx_restart_required_{false};
 };
 
-#if F4_ESC_GATEWAY
-extern HalUartPort gVescUart;
-#endif
 extern HalUartPort gGnssUart;

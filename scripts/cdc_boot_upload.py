@@ -4,7 +4,7 @@ from pathlib import Path
 
 RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode*-if00"
 BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_BOOT_CDC*-if00"
-APP_BASE=0x08008000; APP_LIMIT=0x08040000; CHUNK=240
+APP_BASE=0x08004000; APP_LIMIT=0x08060000; CHUNK=240
 
 def normalize_image(path):
     data=Path(path).read_bytes()
@@ -122,23 +122,19 @@ def upload_boot(port,data):
         print('[BOOT-CDC]',transact(s,'PING',['BOOT:PONG'],2))
         info=transact(s,'INFO',['BOOT:INFO:'],2)
         print('[BOOT-CDC]',info)
-        proto=2 if 'proto=2' in info else 1
+        if 'proto=3' not in info or 'layout=AGVBL3-04000-60000' not in info:
+            raise RuntimeError(f'incompatible resident bootloader layout; provision once via ST-Link: {info}')
         r=transact(s,f'BEGIN:{len(data)}:{crc:08X}',['ACK:BEGIN:'],12)
         print('[BOOT-CDC]',r)
         off=0; last_pct=-1
         while off<len(data):
             chunk=data[off:off+CHUNK]
-            if proto >= 2:
-                chunk_crc=zlib.crc32(chunk)&0xffffffff
-                r=transact(s,f'DATA2:{off}:{chunk_crc:08X}:{chunk.hex().upper()}',['ACK:DATA2:'],3)
-                try:
-                    parts=r.split(':'); nxt=int(parts[2],0); echoed=int(parts[3],16)
-                    if echoed != chunk_crc: raise ValueError('chunk CRC echo mismatch')
-                except Exception: raise RuntimeError(f'bad DATA2 ack {r}')
-            else:
-                r=transact(s,f'DATA:{off}:{chunk.hex().upper()}',['ACK:DATA:'],3)
-                try: nxt=int(r.rsplit(':',1)[1],0)
-                except Exception: raise RuntimeError(f'bad DATA ack {r}')
+            chunk_crc=zlib.crc32(chunk)&0xffffffff
+            r=transact(s,f'DATA2:{off}:{chunk_crc:08X}:{chunk.hex().upper()}',['ACK:DATA2:'],3)
+            try:
+                parts=r.split(':'); nxt=int(parts[2],0); echoed=int(parts[3],16)
+                if echoed != chunk_crc: raise ValueError('chunk CRC echo mismatch')
+            except Exception: raise RuntimeError(f'bad DATA2 ack {r}')
             if nxt!=off+len(chunk): raise RuntimeError(f'offset mismatch host={off+len(chunk)} boot={nxt}')
             off=nxt; pct=(off*100)//len(data)
             if pct//5!=last_pct//5:

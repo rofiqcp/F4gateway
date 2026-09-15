@@ -6,6 +6,7 @@
 #include "BoardSupport.h"
 #include "BuildInfo.h"
 #include "HmiDisplay.h"
+#include "PersistentConfigStore.h"
 #include "UsbCdcPort.h"
 #include <algorithm>
 #include <cmath>
@@ -36,13 +37,6 @@
 #include "TouchButtons.h"
 #include "UiMenu.h"
 #include "UiShell.h"
-#ifndef F4_ESC_GATEWAY
-#define F4_ESC_GATEWAY 0
-#endif
-#if F4_ESC_GATEWAY
-#include "VescGateway.h"
-#endif
-
 #ifndef HMI_LEGACY_UART
 #define HMI_LEGACY_UART 0
 #endif
@@ -56,10 +50,9 @@ Neo3ProSensors gNeo3;
 Neo3Sensors gNeo3;
 #endif
 
-#if F4_ESC_GATEWAY
-VescGateway gVesc;
-#endif
 HmiDiagnostics gDiagnostics{};
+PersistentConfigStore gPersistentConfig;
+static bool gPersistentConfigReady = false;
 
 static volatile uint32_t gMainLoopHeartbeatMs = 0U;
 static volatile bool gAppWatchdogArmed = false;
@@ -1406,15 +1399,7 @@ static void sampleDiagnostics(uint32_t now) {
 
   gDiagnostics.gnssUartOk = gNeo3.gnssUartOk();
   gDiagnostics.magOk = gNeo3.magOk();
-#if F4_ESC_GATEWAY
-  gDiagnostics.vescUartOk = gVesc.uartOk();
-  gDiagnostics.vescUartErrors = gVescUart.errorCount();
-  gDiagnostics.vescUartOverflow = gVescUart.overflowCount();
-  gDiagnostics.vescUartTxDropped = gVescUart.txDropped();
-  gDiagnostics.vescFrameErrors = gVesc.frameErrors();
-  gDiagnostics.vescRecoveryCount = gVesc.recoveryCount();
-  gDiagnostics.vescLastFrameAgeMs = gVesc.lastValidFrameAgeMs(now);
-#else
+  // ESC is direct USB on the host; F411 owns no motor UART.
   gDiagnostics.vescUartOk = false;
   gDiagnostics.vescUartErrors = 0U;
   gDiagnostics.vescUartOverflow = 0U;
@@ -1422,7 +1407,6 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.vescFrameErrors = 0U;
   gDiagnostics.vescRecoveryCount = 0U;
   gDiagnostics.vescLastFrameAgeMs = 0xFFFFFFFFUL;
-#endif
 #ifdef NEO3PRO
   gDiagnostics.gnssUartErrors = 0U;
   gDiagnostics.gnssUartOverflow = 0U;
@@ -1508,9 +1492,6 @@ static void handleSerialCommand(char *command);
 
 static bool motionSafeForHeavyMaintenance() {
   gNeo3.pollSafetyIo();
-#if F4_ESC_GATEWAY
-  gVesc.setSafetyStop(gNeo3.safetyPressed());
-#endif
   const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
   const bool stateSafe =
@@ -1629,13 +1610,9 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
-  // Gateway hardware frame selalu diprioritaskan dan tidak menyentuh UI parser.
+  // F411 never owns ESC transport. Reject stale/legacy gateway commands explicitly.
   if (!strncmp(command, "VESC:", 5)) {
-#if F4_ESC_GATEWAY
-    (void)gVesc.handleHostCommand(command);
-#else
     (void)gUsb.writeLineCritical("ERR:VESC:DIRECT_ESC_ONLY", 120U);
-#endif
     return;
   }
   if (!strncmp(command, "NEO:", 4)) {
@@ -1651,6 +1628,59 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
+  if (!strcmp(command, "EEPROM:STATUS")) {
+    char line[144];
+    std::snprintf(line, sizeof(line),
+                  "EEPROM:STAT:ok=%u:full=%u:used=%lu:total=%lu:invalid=%lu:writes=%lu",
+                  gPersistentConfig.storageOk() ? 1U : 0U,
+                  gPersistentConfig.storageFull() ? 1U : 0U,
+                  static_cast<unsigned long>(gPersistentConfig.usedSlots()),
+                  static_cast<unsigned long>(gPersistentConfig.totalSlots()),
+                  static_cast<unsigned long>(gPersistentConfig.invalidRecords()),
+                  static_cast<unsigned long>(gPersistentConfig.writes()));
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!std::strncmp(command, "EEPROM:GET:", 11)) {
+    uint32_t key = 0U, value = 0U;
+    if (!parseU32Strict(command + 11, key) || key == 0U || key > 0xFFFFU ||
+        !gPersistentConfig.readU32(static_cast<uint16_t>(key), value)) {
+      (void)gUsb.writeLineCritical("ERR:EEPROM:GET", 120U);
+      return;
+    }
+    char line[96];
+    std::snprintf(line, sizeof(line), "ACK:EEPROM:GET:%lu:%lu",
+                  static_cast<unsigned long>(key), static_cast<unsigned long>(value));
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!std::strncmp(command, "EEPROM:SET:", 11)) {
+    char *separator = std::strchr(command + 11, ':');
+    if (separator == nullptr) {
+      (void)gUsb.writeLineCritical("ERR:EEPROM:SET:ARGS", 120U);
+      return;
+    }
+    *separator = '\0';
+    uint32_t key = 0U, value = 0U;
+    if (!parseU32Strict(command + 11, key) || !parseU32Strict(separator + 1, value) ||
+        key == 0U || key > 0xFFFFU) {
+      (void)gUsb.writeLineCritical("ERR:EEPROM:SET:ARGS", 120U);
+      return;
+    }
+    if (!motionSafeForHeavyMaintenance()) {
+      (void)gUsb.writeLineCritical("ERR:EEPROM:WAIT_SAFE", 120U);
+      return;
+    }
+    if (!gPersistentConfig.writeU32(static_cast<uint16_t>(key), value)) {
+      (void)gUsb.writeLineCritical("ERR:EEPROM:WRITE", 120U);
+      return;
+    }
+    char line[96];
+    std::snprintf(line, sizeof(line), "ACK:EEPROM:SET:%lu:%lu",
+                  static_cast<unsigned long>(key), static_cast<unsigned long>(value));
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
   if (!strcmp(command, "GET:STATE")) {
     publishPage();
     publishLinkState();
@@ -2425,6 +2455,7 @@ int main() {
   gResetCauseFlags = RCC->CSR;
   __HAL_RCC_CLEAR_RESET_FLAGS();
   Board_Init();
+  gPersistentConfigReady = gPersistentConfig.begin();
   bool usbInitOk = false;
   for (uint8_t attempt = 0U; attempt < 3U && !usbInitOk; ++attempt) {
     usbInitOk = gUsb.begin();
@@ -2435,10 +2466,8 @@ int main() {
   }
   HAL_Delay(50U);
   printBoth("ADV HMI native realtime menu firmware - boot");
+  if (!gPersistentConfigReady) printBoth("ERR:EEPROM:INIT");
   gNeo3.begin();
-#if F4_ESC_GATEWAY
-  gVesc.begin();
-#endif
   Board_SetRealtimeServiceCallback([]() {
     // USB completion IRQ never starts the next packet. Service it here in
     // thread context so long TFT transfers cannot starve CDC progress.
@@ -2447,9 +2476,6 @@ int main() {
     serviceSafetyControlTx();
     serviceManualDriveLease();
     gNeo3.pollSafetyIo();
-#if F4_ESC_GATEWAY
-    gVesc.setSafetyStop(gNeo3.safetyPressed());
-#endif
     // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
     // on dedicated SPI2, so bounded receive draining can safely run from the
     // cooperative realtime-yield path without touching the HMI SPI1 bus.
@@ -2460,9 +2486,6 @@ int main() {
     // HMI display writes yield here between bounded chunks. Drain MCP2515 on
     // its dedicated SPI2; the realtime path never resets/probes the CAN bus.
     gNeo3.pollRealtime();
-#endif
-#if F4_ESC_GATEWAY
-    gVesc.poll();
 #endif
   });
   (void)initDisplayBlockingAtBoot();
@@ -2492,40 +2515,12 @@ int main() {
       gCrashCounterCleared = true;
     }
     gNeo3.pollSafetyIo();
-#if F4_ESC_GATEWAY
-    gVesc.setSafetyStop(gNeo3.safetyPressed());
-#endif
     pollSerialGui();
     serviceDeferredCommands();
-#if F4_ESC_GATEWAY
-    gVesc.poll();
 
-    if (gVesc.maintenanceMode()) {
-      // Behavioral backport from the proven Arduino gateway: while a Python or
-      // VESC Tool maintenance session owns the motor link, defer GNSS/MAG/TFT
-      // best-effort work. Safety, USB parsing, VESC UART and watchdog heartbeat
-      // keep running at maximum service density; sensor IRQ/rings remain intact
-      // and are consumed again after maintenance exits.
-      for (uint8_t i = 0U; i < 4U; ++i) {
-        Board_Service();
-        pollSerialGui();
-        serviceDeferredCommands();
-        gNeo3.pollSafetyIo();
-        gVesc.setSafetyStop(gNeo3.safetyPressed());
-        gVesc.poll();
-      }
-      gUsb.service();
-      gMainLoopHeartbeatMs = HAL_GetTick();
-      continue;
-    }
-#endif
 
     gNeo3.poll();
     Board_Service();
-#if F4_ESC_GATEWAY
-    gVesc.setSafetyStop(gNeo3.safetyPressed());
-    gVesc.poll();
-#endif
     pollSerialGui();
     serviceDeferredCommands();
     checkRosLinkTimeout();

@@ -2,7 +2,7 @@
 from pathlib import Path
 import sys
 root=Path(__file__).resolve().parents[1]
-menu=(root/'src/UiMenu.h').read_text(); shell=(root/'src/UiShell.h').read_text(); cfg=(root/'src/Config.h').read_text(); proto=(root/'src/TelemetryProtocol.cpp').read_text(); bridge=Path('/home/sirobo/agv/src/stmf4/src/stmf4_hmi_bridge.cpp').read_text()
+menu=(root/'src/UiMenu.h').read_text(); shell=(root/'src/UiShell.h').read_text(); cfg=(root/'src/Config.h').read_text(); proto=(root/'src/TelemetryProtocol.cpp').read_text(); bridge=(root.parent/'src/stmf4/src/stmf4_hmi_bridge.cpp').read_text()
 def need(c,m):
     if not c: raise SystemExit('FAIL '+m)
     print('PASS',m)

@@ -70,9 +70,10 @@ if ns['_try_stlink_force_dfu'](): fail('non-F411 ST-Link target was accepted')
 # Transaction order: validity metadata is invalidated first and committed LAST.
 dfu = DFU.read_text(encoding='utf-8')
 order = [
-    'run_dfu invalidate-manifest', 'run_dfu write-app', 'run_dfu readback-app',
-    'cmp "$RAW" "$READBACK"', 'run_dfu commit-manifest', 'run_dfu readback-manifest',
-    'cmp "$MANIFEST" "$READBACK_MANIFEST"', 'leave_bootloader'
+    'run_dfu backup-persistent', 'run_dfu backup-legacy-sector6', 'compose_persistent_image.py',
+    'run_dfu write-app', 'run_dfu readback-app', 'cmp "$RAW" "$READBACK"',
+    'run_dfu restore-persistent', 'run_dfu readback-persistent',
+    'cmp "$PERSIST_NEW" "$PERSIST_READBACK"', 'leave_bootloader'
 ]
 pos=[]
 for token in order:
@@ -87,12 +88,12 @@ if '0x08000000:leave' not in dfu: fail('DFU leave must jump via resident bootloa
 # Manifest binary contract and CRCs.
 with tempfile.TemporaryDirectory() as td:
     td=Path(td); app=td/'app.bin'; out=td/'manifest.bin'
-    payload=bytearray((i*37+11)&0xff for i in range(4097)); struct.pack_into('<II', payload, 0, 0x2001FFF0, 0x08008021); payload=bytes(payload); app.write_bytes(payload)
+    payload=bytearray((i*37+11)&0xff for i in range(4097)); struct.pack_into('<II', payload, 0, 0x2001FFF0, 0x08004021); payload=bytes(payload); app.write_bytes(payload)
     subprocess.run([sys.executable,str(MANIFEST),str(app),str(out)],check=True,capture_output=True,text=True)
     raw=out.read_bytes()
     if len(raw)!=32: fail(f'manifest length {len(raw)}')
     magic,fmt,base,size,app_crc,header_crc,generation,reserved=struct.unpack('<8I',raw)
-    if magic!=0x31564741 or fmt!=2 or base!=0x08008000 or size!=len(payload): fail('manifest header fields invalid')
+    if magic!=0x31564741 or fmt!=2 or base!=0x08004000 or size!=len(payload): fail('manifest header fields invalid')
     if app_crc!=(zlib.crc32(payload)&0xffffffff): fail('manifest app CRC mismatch')
     if header_crc!=(zlib.crc32(raw[:20])&0xffffffff): fail('manifest header CRC mismatch')
     if reserved!=0xF411CE01: fail('manifest board id mismatch')
@@ -100,19 +101,21 @@ with tempfile.TemporaryDirectory() as td:
 boot = (ROOT / 'bootloader/src/main.c').read_text(encoding='utf-8')
 for token in ('APP_CRASH_MAGIC', 'APP_CRASH_LIMIT 3UL', 'BOOT_IDLE_TIMEOUT_MS 20000UL',
               'maintenance_loop', 'begin_update', 'program_chunk', 'commit_manifest',
-              'erase_sector(FLASH_SECTOR_7)', 'FLASH_SECTOR_2', 'FLASH_SECTOR_5',
+              'manifest_next_address', 'MANIFEST_BASE', 'FLASH_SECTOR_1', 'FLASH_SECTOR_6',
               'crc32_bytes((const uint8_t *)APP_BASE, expected_size)', 'application_valid()'):
     if token not in boot: fail(f'resident bootloader token missing: {token}')
-if 'erase_sector(FLASH_SECTOR_6)' in boot:
-    fail('resident updater must preserve DNA sector6')
-if 's <= FLASH_SECTOR_5' not in boot:
-    fail('resident updater application erase range must stop at sector5')
-# Transaction invariant: manifest sector must be invalidated before application sectors.
-if boot.find('erase_sector(FLASH_SECTOR_7)') > boot.find('for (uint32_t s = FLASH_SECTOR_2'):
-    fail('resident updater must invalidate manifest before erasing application')
-# Manifest commit must only occur after full flash CRC verification.
-if boot.find('crc32_bytes((const uint8_t *)APP_BASE, expected_size)') > boot.find('HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, MANIFEST_ADDR'):
+begin = boot.split('static bool begin_update',1)[1].split('static bool program_chunk',1)[0]
+if 'FLASH_SECTOR_7' in begin:
+    fail('resident updater must never erase persistent Sector 7')
+if 's <= FLASH_SECTOR_6' not in begin or 'FLASH_SECTOR_1' not in begin:
+    fail('resident updater application erase range must be sectors 1..6')
+if begin.find('manifest_next_address() == 0U') > begin.find('for (uint32_t s = FLASH_SECTOR_1'):
+    fail('manifest capacity guard must run before application erase')
+commit = boot.split('static bool commit_manifest',1)[1].split('static int hex_nibble',1)[0]
+if commit.find('crc32_bytes((const uint8_t *)APP_BASE, expected_size)') > commit.find('HAL_FLASH_Program'):
     fail('manifest commit occurs before full-image CRC verification')
+if 'memcmp((const void *)target, &m, sizeof(m)) == 0' not in commit:
+    fail('manifest journal record lacks readback verification')
 # ROM DFU remains explicit emergency fallback, never the normal boot request path.
 if 'if (!strcmp(line, "ROMDFU"))' not in boot:
     fail('explicit ROM DFU emergency command missing')
@@ -123,10 +126,10 @@ for token in ('gAppWatchdogArmed = true', 'RTC->BKP1R = kAppCrashMagic',
               'RTC->BKP2R = 0U', 'kCrashCounterClearMs = 30000U'):
     if token not in app_src: fail(f'application watchdog recovery token missing: {token}')
 cdc = (ROOT / 'scripts/cdc_boot_upload.py').read_text(encoding='utf-8')
-for token in ('BEGIN:', 'DATA:', "transact(s,'END'", 'verify_runtime', 'BOOT_GLOB'):
+for token in ('BEGIN:', 'DATA2:', "transact(s,'END'", 'verify_runtime', 'BOOT_GLOB'):
     if token not in cdc: fail(f'resident host uploader token missing: {token}')
 
 print('PASS F411_RECOVERY_STATE_MACHINE')
 print('normal path: runtime CDC -> resident BOOT CDC -> transactional flash -> app heartbeat')
-print('power-loss rule: manifest invalidated first; committed only after full CRC; resident bootloader never overwritten')
+print('power-loss rule: app erase invalidates old CRC; new manifest is appended only after full CRC; Sector 7 is preserved')
 print('emergency path: immutable STM32 ROM DFU remains explicit USB fallback only')

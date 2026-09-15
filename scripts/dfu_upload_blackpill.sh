@@ -8,7 +8,10 @@ IMAGE="${1:-}"
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
-MANIFEST="$TMP/manifest.bin"; ZERO="$TMP/manifest_invalid.bin"; READBACK="$TMP/readback.bin"; READBACK_MANIFEST="$TMP/manifest_readback.bin"; RAW="$TMP/app_raw.bin"
+MANIFEST="$TMP/manifest.bin"; RAW="$TMP/app_raw.bin"; READBACK="$TMP/readback.bin"
+PERSIST_OLD="$TMP/persistent_old.bin"; PERSIST_NEW="$TMP/persistent_new.bin"; PERSIST_READBACK="$TMP/persistent_readback.bin"
+OLD_SECTOR6="$TMP/old_sector6.bin"
+BOOT_SNAPSHOT="$TMP/boot_sector0.bin"
 python3 - <<PY2
 from pathlib import Path
 d=Path("$IMAGE").read_bytes()
@@ -18,10 +21,6 @@ Path("$RAW").write_bytes(d)
 print(f"[USB-DFU] normalized raw app bytes={len(d)}")
 PY2
 python3 "$ROOT_DIR/scripts/make_app_manifest.py" "$RAW" "$MANIFEST"
-python3 - <<PY
-from pathlib import Path
-Path("$ZERO").write_bytes(bytes(32))
-PY
 SIZE=$(stat -c %s "$RAW")
 
 wait_dfu_ready() {
@@ -48,18 +47,30 @@ run_dfu() {
   return "$rc"
 }
 
-echo "[USB-DFU] transactional update: invalidate -> app -> readback -> commit manifest -> leave bootloader -> CDC verify"
-run_dfu invalidate-manifest -a 0 -d 0483:df11 -s 0x08060000 -D "$ZERO"
-run_dfu write-app -a 0 -d 0483:df11 -s 0x08008000 -D "$RAW"
-run_dfu readback-app -a 0 -d 0483:df11 -s "0x08008000:${SIZE}" -U "$READBACK"
+echo "[USB-DFU] recovery update: preserve Sector 7 -> app -> verify -> restore persistent journal"
+run_dfu verify-resident-layout -a 0 -d 0483:df11 -s "0x08000000:16384" -U "$BOOT_SNAPSHOT"
+python3 - "$BOOT_SNAPSHOT" <<'PYBOOT'
+import sys
+from pathlib import Path
+data=Path(sys.argv[1]).read_bytes()
+marker=b'AGVBL3-04000-60000'
+if len(data)!=0x4000 or marker not in data:
+    raise SystemExit('[USB-DFU] incompatible/legacy resident bootloader; run ST-Link provisioning once before ROM-DFU recovery')
+print('[USB-DFU] resident layout marker verified')
+PYBOOT
+# ROM DFU is the emergency path. Preserve all persistent bytes before any write
+# to Sector 7, and snapshot legacy Sector 6 for one-time 224K->368K migration.
+run_dfu backup-persistent -a 0 -d 0483:df11 -s "0x08060000:131072" -U "$PERSIST_OLD"
+run_dfu backup-legacy-sector6 -a 0 -d 0483:df11 -s "0x08040000:131072" -U "$OLD_SECTOR6"
+python3 "$ROOT_DIR/scripts/compose_persistent_image.py" --persistent "$PERSIST_OLD" --legacy-sector6 "$OLD_SECTOR6" --manifest "$MANIFEST" --output "$PERSIST_NEW"
+run_dfu write-app -a 0 -d 0483:df11 -s 0x08004000 -D "$RAW"
+run_dfu readback-app -a 0 -d 0483:df11 -s "0x08004000:${SIZE}" -U "$READBACK"
 cmp "$RAW" "$READBACK"
 echo "[USB-DFU] app readback verified (${SIZE} bytes)"
-# Commit validity metadata LAST, but do not use its address as the DfuSe :leave
-# address. STM32 ROM DFU uses the current DfuSe address as the jump target.
-run_dfu commit-manifest -a 0 -d 0483:df11 -s 0x08060000 -D "$MANIFEST"
-run_dfu readback-manifest -a 0 -d 0483:df11 -s "0x08060000:32" -U "$READBACK_MANIFEST"
-cmp "$MANIFEST" "$READBACK_MANIFEST"
-echo "[USB-DFU] committed manifest readback verified"
+run_dfu restore-persistent -a 0 -d 0483:df11 -s 0x08060000 -D "$PERSIST_NEW"
+run_dfu readback-persistent -a 0 -d 0483:df11 -s "0x08060000:131072" -U "$PERSIST_READBACK"
+cmp "$PERSIST_NEW" "$PERSIST_READBACK"
+echo "[USB-DFU] persistent journal restored and verified"
 
 CDC="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
 leave_bootloader() {

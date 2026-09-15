@@ -7,8 +7,8 @@ from pathlib import Path
 
 MAGIC = 0x31564741  # AGV1
 FORMAT = 2
-APP_BASE = 0x08008000
-APP_LIMIT = 0x08040000
+APP_BASE = 0x08004000
+APP_LIMIT = 0x08060000
 BOARD_ID = 0xF411CE01
 
 image = Path(sys.argv[1]).read_bytes()

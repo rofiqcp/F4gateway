@@ -3,13 +3,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
 
 #define MANIFEST_MAGIC 0x31564741UL
 #define MANIFEST_FORMAT 2UL
 #define GATEWAY_BOARD_ID 0xF411CE01UL
-#define BOOT_PROTOCOL_VERSION 2UL
+#define BOOT_PROTOCOL_VERSION 3UL
 #define SRAM_BASE_ADDR 0x20000000UL
 #define SRAM_END_ADDR  0x20020000UL
 #define APP_CRASH_MAGIC 0x48535243UL
@@ -111,13 +109,40 @@ static bool vector_valid(uint32_t base, uint32_t limit) {
   return pc >= base && pc < limit;
 }
 
-static bool application_valid(void) {
-  const app_manifest_t *m = (const app_manifest_t *)MANIFEST_ADDR;
+static bool manifest_erased(const app_manifest_t *m) {
+  const uint32_t *w = (const uint32_t *)m;
+  for (uint32_t i = 0U; i < sizeof(*m) / sizeof(*w); ++i)
+    if (w[i] != 0xFFFFFFFFUL) return false;
+  return true;
+}
+
+static bool manifest_record_valid(const app_manifest_t *m) {
   if (m->magic != MANIFEST_MAGIC || m->format != MANIFEST_FORMAT) return false;
-  if (m->reserved != GATEWAY_BOARD_ID) return false;
-  if (m->app_base != APP_BASE || m->app_size < 8U || m->app_size > (APP_LIMIT - APP_BASE)) return false;
-  if (crc32_bytes((const uint8_t *)m, 20U) != m->header_crc32) return false;
-  if (!vector_valid(APP_BASE, APP_LIMIT)) return false;
+  if (m->reserved != GATEWAY_BOARD_ID || m->app_base != APP_BASE) return false;
+  if (m->app_size < 8U || m->app_size > (APP_LIMIT - APP_BASE)) return false;
+  return crc32_bytes((const uint8_t *)m, 20U) == m->header_crc32;
+}
+
+static const app_manifest_t *latest_manifest(void) {
+  const app_manifest_t *latest = NULL;
+  for (uint32_t a = MANIFEST_BASE; a + sizeof(app_manifest_t) <= MANIFEST_LIMIT; a += sizeof(app_manifest_t)) {
+    const app_manifest_t *m = (const app_manifest_t *)a;
+    if (manifest_erased(m)) break;
+    if (manifest_record_valid(m)) latest = m;
+  }
+  return latest;
+}
+
+static uint32_t manifest_next_address(void) {
+  for (uint32_t a = MANIFEST_BASE; a + sizeof(app_manifest_t) <= MANIFEST_LIMIT; a += sizeof(app_manifest_t))
+    if (manifest_erased((const app_manifest_t *)a)) return a;
+  return 0U;
+}
+
+static bool application_valid(void) {
+  const app_manifest_t *m = latest_manifest();
+  if (m == NULL) return false;
+  if (!vector_valid(APP_BASE, APP_BASE + m->app_size)) return false;
   return crc32_bytes((const uint8_t *)APP_BASE, m->app_size) == m->app_crc32;
 }
 
@@ -159,10 +184,14 @@ static bool erase_sector(uint32_t sector) {
 
 static bool begin_update(uint32_t size, uint32_t crc) {
   if (size < 8U || size > (APP_LIMIT - APP_BASE)) return false;
+  /* Never destroy the running image when there is no durable commit slot. */
+  if (manifest_next_address() == 0U) return false;
   if (HAL_FLASH_Unlock() != HAL_OK) return false;
-  bool ok = erase_sector(FLASH_SECTOR_7); /* invalidate manifest FIRST */
-  /* Sector 6 (0x08040000..0x0805FFFF) is persistent DroneCAN DNA storage. */
-  for (uint32_t s = FLASH_SECTOR_2; ok && s <= FLASH_SECTOR_5; ++s) ok = erase_sector(s);
+  /* Sector 0 is the resident bootloader. Sector 7 is append-only persistent
+   * storage. Erasing any application sector invalidates the old manifest CRC,
+   * so no destructive manifest invalidation is required. */
+  bool ok = true;
+  for (uint32_t s = FLASH_SECTOR_1; ok && s <= FLASH_SECTOR_6; ++s) ok = erase_sector(s);
   (void)HAL_FLASH_Lock();
   if (!ok) return false;
   expected_size = size; expected_crc = crc; write_offset = 0U; update_started = true; timeout_to_app = false;
@@ -197,17 +226,23 @@ static bool commit_manifest(void) {
   if (!update_started || write_offset != expected_size) return false;
   if (crc32_bytes((const uint8_t *)APP_BASE, expected_size) != expected_crc) return false;
   if (!vector_valid(APP_BASE, APP_BASE + expected_size)) return false;
+  const uint32_t target = manifest_next_address();
+  if (target == 0U) return false;  /* fail closed: persistent journal exhausted */
+  const app_manifest_t *previous = latest_manifest();
   app_manifest_t m = {0};
   m.magic = MANIFEST_MAGIC; m.format = MANIFEST_FORMAT; m.app_base = APP_BASE;
-  m.app_size = expected_size; m.app_crc32 = expected_crc; m.header_crc32 = crc32_bytes((const uint8_t *)&m, 20U);
-  m.generation = HAL_GetTick(); m.reserved = GATEWAY_BOARD_ID;
+  m.app_size = expected_size; m.app_crc32 = expected_crc;
+  m.header_crc32 = crc32_bytes((const uint8_t *)&m, 20U);
+  m.generation = previous == NULL ? 1U : previous->generation + 1U;
+  m.reserved = GATEWAY_BOARD_ID;
   if (HAL_FLASH_Unlock() != HAL_OK) return false;
   bool ok = true;
   const uint32_t *words = (const uint32_t *)&m;
   for (uint32_t i = 0U; i < sizeof(m)/4U; ++i) {
-    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, MANIFEST_ADDR + 4U*i, words[i]) != HAL_OK) { ok = false; break; }
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, target + 4U*i, words[i]) != HAL_OK) { ok = false; break; }
   }
   (void)HAL_FLASH_Lock();
+  if (ok) ok = memcmp((const void *)target, &m, sizeof(m)) == 0;
   return ok && application_valid();
 }
 
@@ -230,34 +265,61 @@ static bool decode_hex(const char *hex, uint8_t *out, uint32_t *len) {
   return true;
 }
 
+static bool parse_u32(const char *s, uint32_t base, uint32_t *out) {
+  if (s == NULL || out == NULL || *s == '\0' || (base != 10U && base != 16U)) return false;
+  uint32_t value = 0U;
+  while (*s != '\0') {
+    const int digit = hex_nibble(*s++);
+    if (digit < 0 || (uint32_t)digit >= base) return false;
+    if (value > (0xFFFFFFFFUL - (uint32_t)digit) / base) return false;
+    value = value * base + (uint32_t)digit;
+  }
+  *out = value;
+  return true;
+}
+
+static char *append_text(char *p, char *end, const char *s) {
+  while (*s != '\0' && p < end) *p++ = *s++;
+  return p;
+}
+
+static char *append_dec(char *p, char *end, uint32_t value) {
+  char rev[10]; uint32_t n = 0U;
+  do { rev[n++] = (char)('0' + value % 10U); value /= 10U; } while (value != 0U && n < sizeof(rev));
+  while (n != 0U && p < end) *p++ = rev[--n];
+  return p;
+}
+
+static char *append_hex8(char *p, char *end, uint32_t value) {
+  static const char digits[] = "0123456789ABCDEF";
+  for (int shift = 28; shift >= 0 && p < end; shift -= 4) *p++ = digits[(value >> shift) & 0xFU];
+  return p;
+}
+
 static void reply_info(void) {
-  char out[280];
-  const app_manifest_t *m = (const app_manifest_t *)MANIFEST_ADDR;
-  snprintf(out, sizeof(out),
-           "BOOT:INFO:proto=%lu:board=%08lX:valid=%u:update=%u:offset=%lu:size=%lu:manifest=%08lX:reason=%08lX:cfsr=%08lX:hfsr=%08lX:pc=%08lX:lr=%08lX",
-           (unsigned long)BOOT_PROTOCOL_VERSION, (unsigned long)GATEWAY_BOARD_ID,
-           application_valid()?1U:0U, update_started?1U:0U, (unsigned long)write_offset,
-           (unsigned long)expected_size, (unsigned long)m->magic,
-           (unsigned long)RTC->BKP3R, (unsigned long)RTC->BKP4R,
-           (unsigned long)RTC->BKP5R, (unsigned long)RTC->BKP6R,
-           (unsigned long)RTC->BKP7R);
+  char out[240]; char *p = out; char *const end = out + sizeof(out) - 1U;
+#define TXT(x) do { p = append_text(p, end, (x)); } while (0)
+#define DEC(x) do { p = append_dec(p, end, (uint32_t)(x)); } while (0)
+#define HEX(x) do { p = append_hex8(p, end, (uint32_t)(x)); } while (0)
+  TXT("BOOT:INFO:proto="); DEC(BOOT_PROTOCOL_VERSION); TXT(":board="); HEX(GATEWAY_BOARD_ID);
+  TXT(":layout=AGVBL3-04000-60000:valid="); DEC(application_valid() ? 1U : 0U); *p = '\0';
+#undef TXT
+#undef DEC
+#undef HEX
   (void)boot_usb_write_line(out, 250U);
 }
 
 static void handle_line(char *line) {
   if (!strcmp(line, "PING")) { (void)boot_usb_write_line("BOOT:PONG", 250U); return; }
   if (!strcmp(line, "INFO")) { reply_info(); return; }
-  if (!strcmp(line, "BOOT")) {
-    if (!update_started && application_valid()) { (void)boot_usb_write_line("ACK:BOOT", 250U); boot_usb_flush(250U); HAL_Delay(20U); jump_vector(APP_BASE); }
-    (void)boot_usb_write_line("ERR:BOOT:APP_INVALID", 250U); return;
-  }
   if (!strcmp(line, "ROMDFU")) { (void)boot_usb_write_line("ACK:ROMDFU", 250U); boot_usb_flush(250U); HAL_Delay(20U); jump_system_dfu(); }
   if (!strncmp(line, "BEGIN:", 6U)) {
     char *sep = strchr(line + 6U, ':');
     if (!sep) { (void)boot_usb_write_line("ERR:BEGIN:FORMAT", 250U); return; }
-    *sep = '\0'; char *end1=NULL,*end2=NULL;
-    uint32_t size = (uint32_t)strtoul(line+6U,&end1,0); uint32_t crc=(uint32_t)strtoul(sep+1U,&end2,16);
-    if (!end1 || *end1!='\0' || !end2 || *end2!='\0') { (void)boot_usb_write_line("ERR:BEGIN:FORMAT",250U); return; }
+    *sep = '\0'; uint32_t size = 0U, crc = 0U;
+    if (!parse_u32(line+6U,10U,&size) || !parse_u32(sep+1U,16U,&crc)) {
+      (void)boot_usb_write_line("ERR:BEGIN:FORMAT",250U); return;
+    }
     (void)boot_usb_write_line("BOOT:ERASING", 250U); boot_usb_flush(250U);
     if (!begin_update(size,crc)) { (void)boot_usb_write_line("ERR:BEGIN:FLASH",250U); return; }
     (void)boot_usb_write_line("ACK:BEGIN:0",250U); return;
@@ -265,33 +327,23 @@ static void handle_line(char *line) {
   if (!strncmp(line,"DATA2:",6U)) {
     char *sep1=strchr(line+6U,':'); if(!sep1){(void)boot_usb_write_line("ERR:DATA2:FORMAT",250U);return;}
     *sep1='\0'; char *sep2=strchr(sep1+1U,':'); if(!sep2){(void)boot_usb_write_line("ERR:DATA2:FORMAT",250U);return;}
-    *sep2='\0'; char *end1=NULL,*end2=NULL;
-    uint32_t off=(uint32_t)strtoul(line+6U,&end1,0);
-    uint32_t chunk_crc=(uint32_t)strtoul(sep1+1U,&end2,16);
+    *sep2='\0'; uint32_t off=0U, chunk_crc=0U;
     uint8_t data[BOOT_DATA_MAX]; uint32_t len=0U;
-    if(!end1||*end1!='\0'||!end2||*end2!='\0'||!decode_hex(sep2+1U,data,&len)){
+    if(!parse_u32(line+6U,10U,&off) || !parse_u32(sep1+1U,16U,&chunk_crc) || !decode_hex(sep2+1U,data,&len)){
       (void)boot_usb_write_line("ERR:DATA2:FORMAT",250U);return;
     }
     if(crc32_bytes(data,len)!=chunk_crc){(void)boot_usb_write_line("ERR:DATA2:CRC",250U);return;}
-    if(!program_chunk(off,data,len)){ char out[72]; snprintf(out,sizeof(out),"ERR:DATA2:OFFSET:%lu",(unsigned long)write_offset); (void)boot_usb_write_line(out,250U); return; }
-    if(crc32_bytes((const uint8_t *)(APP_BASE+off),len)!=chunk_crc){(void)boot_usb_write_line("ERR:DATA2:READBACK",250U);return;}
-    char out[80]; snprintf(out,sizeof(out),"ACK:DATA2:%lu:%08lX",(unsigned long)write_offset,(unsigned long)chunk_crc); (void)boot_usb_write_line(out,250U); return;
-  }
-  if (!strncmp(line,"DATA:",5U)) {
-    char *sep=strchr(line+5U,':'); if(!sep){(void)boot_usb_write_line("ERR:DATA:FORMAT",250U);return;}
-    *sep='\0'; char *end=NULL; uint32_t off=(uint32_t)strtoul(line+5U,&end,0);
-    uint8_t data[BOOT_DATA_MAX]; uint32_t len=0U;
-    if(!end||*end!='\0'||!decode_hex(sep+1U,data,&len)){(void)boot_usb_write_line("ERR:DATA:FORMAT",250U);return;}
-    if(!program_chunk(off,data,len)){ char out[64]; snprintf(out,sizeof(out),"ERR:DATA:OFFSET:%lu",(unsigned long)write_offset); (void)boot_usb_write_line(out,250U); return; }
-    char out[64]; snprintf(out,sizeof(out),"ACK:DATA:%lu",(unsigned long)write_offset); (void)boot_usb_write_line(out,250U); return;
+    if(!program_chunk(off,data,len)){
+      char out[48]; char *p=append_text(out,out+sizeof(out)-1U,"ERR:DATA2:OFFSET:");
+      p=append_dec(p,out+sizeof(out)-1U,write_offset); *p='\0'; (void)boot_usb_write_line(out,250U); return;
+    }
+    char out[48]; char *p=append_text(out,out+sizeof(out)-1U,"ACK:DATA2:");
+    p=append_dec(p,out+sizeof(out)-1U,write_offset); p=append_text(p,out+sizeof(out)-1U,":");
+    p=append_hex8(p,out+sizeof(out)-1U,chunk_crc); *p='\0'; (void)boot_usb_write_line(out,250U); return;
   }
   if (!strcmp(line,"END")) {
     if(!commit_manifest()){(void)boot_usb_write_line("ERR:END:VERIFY",250U);return;}
     update_started=false; (void)boot_usb_write_line("ACK:END:OK",250U); boot_usb_flush(300U); HAL_Delay(30U); NVIC_SystemReset(); while(1){}
-  }
-  if (!strcmp(line,"ABORT")) {
-    if(update_started || !application_valid()) {(void)boot_usb_write_line("ACK:ABORT:HOLD",250U); timeout_to_app=false; return;}
-    (void)boot_usb_write_line("ACK:ABORT:BOOT",250U); boot_usb_flush(250U); HAL_Delay(20U); jump_vector(APP_BASE);
   }
   (void)boot_usb_write_line("ERR:UNKNOWN",250U);
 }
@@ -334,7 +386,7 @@ int main(void) {
   maintenance_loop(false);
 }
 
-void SysTick_Handler(void){
+void boot_systick_handler_impl(void){
   HAL_IncTick(); HAL_SYSTICK_IRQHandler();
   if (boot_watchdog_armed &&
       (uint32_t)(HAL_GetTick() - boot_watchdog_last_pat_ms) > BOOT_WATCHDOG_TIMEOUT_MS) {

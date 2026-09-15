@@ -6,6 +6,11 @@ BOOT="$ROOT/bootloader/.pio/build/f411_recovery_boot/firmware.bin"
 APP="$ROOT/.pio/build/blackpill_f411ce_stlink/firmware.bin"
 MANIFEST="$ROOT/.pio/build/blackpill_f411ce_stlink/manifest.bin"
 CDC="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+PERSIST_OLD="$TMP/persistent_old.bin"
+OLD_SECTOR6="$TMP/old_sector6.bin"
+PERSIST_NEW="$TMP/persistent_new.bin"
 [[ -x "$OPENOCD" ]] || { echo "[STLINK] openocd not found: $OPENOCD" >&2; exit 2; }
 
 probe="$($OPENOCD -f interface/stlink.cfg -f target/stm32f4x.cfg \
@@ -19,17 +24,28 @@ echo "[STLINK] target verified STM32F411 DBGMCU=$id"
 cd "$ROOT/bootloader"; pio run -e f411_recovery_boot
 cd "$ROOT"; pio run -e blackpill_f411ce_stlink
 python3 scripts/make_app_manifest.py "$APP" "$MANIFEST"
-[[ $(stat -c %s "$BOOT") -le $((0x8000)) ]] || { echo '[STLINK] bootloader exceeds 32 KiB' >&2; exit 5; }
-[[ $(stat -c %s "$APP") -le $((0x38000)) ]] || { echo '[STLINK] application exceeds app region' >&2; exit 6; }
+[[ $(stat -c %s "$BOOT") -le $((0x4000)) ]] || { echo '[STLINK] bootloader exceeds 16 KiB' >&2; exit 5; }
+[[ $(stat -c %s "$APP") -le $((0x5C000)) ]] || { echo '[STLINK] application exceeds 368 KiB app region' >&2; exit 6; }
 [[ $(stat -c %s "$MANIFEST") -eq 32 ]] || { echo '[STLINK] invalid manifest size' >&2; exit 7; }
 
-echo "[STLINK] transactional provision boot@08000000 app@08008000 manifest@08060000"
+echo "[STLINK] backing up Sector 7 and legacy Sector 6 before layout migration"
 "$OPENOCD" -f interface/stlink.cfg -f target/stm32f4x.cfg \
   -c "adapter speed 500; init; reset halt; \
-      flash erase_address 0x08000000 0x8000; \
+      dump_image $PERSIST_OLD 0x08060000 0x20000; \
+      dump_image $OLD_SECTOR6 0x08040000 0x20000; shutdown"
+python3 scripts/compose_persistent_image.py \
+  --persistent "$PERSIST_OLD" --legacy-sector6 "$OLD_SECTOR6" \
+  --manifest "$MANIFEST" --output "$PERSIST_NEW"
+[[ $(stat -c %s "$PERSIST_NEW") -eq $((0x20000)) ]] || { echo '[STLINK] invalid persistent image size' >&2; exit 7; }
+
+echo "[STLINK] transactional provision boot@08000000 app@08004000 persistent@08060000"
+"$OPENOCD" -f interface/stlink.cfg -f target/stm32f4x.cfg \
+  -c "adapter speed 500; init; reset halt; \
+      flash erase_address 0x08000000 0x4000; \
       flash write_image $BOOT 0x08000000 bin; verify_image $BOOT 0x08000000 bin; \
-      flash write_image erase $APP 0x08008000 bin; verify_image $APP 0x08008000 bin; \
-      flash write_image erase $MANIFEST 0x08060000 bin; verify_image $MANIFEST 0x08060000 bin; \
+      flash erase_address 0x08004000 0x5C000; \
+      flash write_image $APP 0x08004000 bin; verify_image $APP 0x08004000 bin; \
+      flash write_image erase $PERSIST_NEW 0x08060000 bin; verify_image $PERSIST_NEW 0x08060000 bin; \
       reset run; shutdown"
 
 wait_cdc() {
@@ -52,7 +68,7 @@ if ! wait_cdc; then
     exit 8
   fi
   pc=$((pc_hex))
-  if (( pc < 0x08008000 || pc >= 0x08040000 )); then
+  if (( pc < 0x08004000 || pc >= 0x08060000 )); then
     printf '[STLINK] ERROR CPU PC=%s is outside application region\n' "$pc_hex" >&2
     printf '%s\n' "$exec_probe" >&2
     exit 8

@@ -7,25 +7,17 @@ board=(root/'src/BoardSupport.cpp').read_text()
 boardh=(root/'include/BoardSupport.h').read_text()
 usb=(root/'src/usb/UsbCdcPort.cpp').read_text()
 usbh=(root/'include/UsbCdcPort.h').read_text()
-vesc=(root/'src/VescGateway.cpp').read_text()
 
 def need(ok,msg):
     if not ok: raise SystemExit('FAIL: '+msg)
     print('PASS:',msg)
 
-# Direct-ESC production must have no executable legacy transport path.
-need('DisabledVescGateway' not in main,'no misleading runtime-disabled VESC stub remains')
-for call in ('gVesc.begin();','gVesc.poll();','gVesc.setSafetyStop(','gVesc.maintenanceMode()'):
-    positions=[m.start() for m in re.finditer(re.escape(call),main)]
-    for pos in positions:
-        guard=main.rfind('#if F4_ESC_GATEWAY',0,pos)
-        endif=main.rfind('#endif',0,pos)
-        need(guard > endif, f'{call} guarded by F4_ESC_GATEWAY')
-need(re.search(r'#if F4_ESC_GATEWAY\s*\nUART_HandleTypeDef huart1',board) is not None,'USART1 handle compile-time gated')
-need(re.search(r'#if F4_ESC_GATEWAY\s*\nHalUartPort gVescUart',board) is not None,'legacy VESC UART object compile-time gated')
-need(re.search(r'#if F4_ESC_GATEWAY\s*\nextern "C" void USART1_IRQHandler',board) is not None,'USART1 IRQ compile-time gated')
-need('#if F4_ESC_GATEWAY' in vesc[:200] and vesc.rstrip().endswith('#endif // F4_ESC_GATEWAY'),'legacy VESC translation unit hard-gated')
-need('#if F4_ESC_GATEWAY\nextern UART_HandleTypeDef huart1;' in boardh,'legacy UART declaration hard-gated')
+# Direct-ESC production: F411 contains no motor transport implementation at all.
+need('F4_ESC_GATEWAY' not in main+board+boardh,'legacy F4 ESC feature switch removed')
+need('gVesc' not in main+board+boardh,'legacy F4 VESC objects removed')
+need('USART1_IRQHandler' not in board and 'huart1' not in board+boardh,'F411 USART1 motor ownership removed')
+need(not (root/'src/VescGateway.cpp').exists() and not (root/'src/VescGateway.h').exists(),'legacy VescGateway sources deleted')
+need('ERR:VESC:DIRECT_ESC_ONLY' in main,'stale VESC-over-F411 commands fail closed')
 
 # Every destructive USB queue reset advances a generation observed by safety.
 reset=usb[usb.index('void UsbCdcPort::resetSessionState'):usb.index('bool UsbCdcPort::startUsbStack')]

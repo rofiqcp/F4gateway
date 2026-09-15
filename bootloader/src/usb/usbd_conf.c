@@ -1,8 +1,16 @@
 #include "stm32f4xx_hal.h"
 #include "usbd_core.h"
+#include "usbd_cdc.h"
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 extern USBD_HandleTypeDef hUsbDeviceFS;
+
+void *USBD_static_malloc(uint32_t size) {
+  static uint32_t cdc_mem[(sizeof(USBD_CDC_HandleTypeDef) + 3U) / 4U];
+  return size <= sizeof(cdc_mem) ? cdc_mem : NULL;
+}
+
+void USBD_static_free(void *p) { (void)p; }
 
 void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd) {
   if (hpcd->Instance != USB_OTG_FS) return;
@@ -53,7 +61,7 @@ void HAL_PCD_ISOINIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
 void HAL_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd) { USBD_LL_DevConnected((USBD_HandleTypeDef *)hpcd->pData); }
 void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd) { USBD_LL_DevDisconnected((USBD_HandleTypeDef *)hpcd->pData); }
 
-void OTG_FS_IRQHandler(void) { HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS); }
+void boot_otg_fs_irq_impl(void) { HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS); }
 
 USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev) {
   hpcd_USB_OTG_FS.Instance = USB_OTG_FS;

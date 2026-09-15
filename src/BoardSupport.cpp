@@ -8,16 +8,10 @@ SPI_HandleTypeDef hspi1{};
 SPI_HandleTypeDef hspi2{};
 #endif
 I2C_HandleTypeDef hi2c1{};
-#if F4_ESC_GATEWAY
-UART_HandleTypeDef huart1{};
-#endif
 UART_HandleTypeDef huart2{};
 TIM_HandleTypeDef htim1{};
 TIM_HandleTypeDef htim11{};
 
-#if F4_ESC_GATEWAY
-HalUartPort gVescUart(&huart1, USART1);
-#endif
 HalUartPort gGnssUart(&huart2, USART2);
 
 extern "C" uint8_t _end;
@@ -295,17 +289,6 @@ void UartPinsInit(UART_HandleTypeDef *huart) {
   gpio.Mode = GPIO_MODE_AF_PP;
   gpio.Pull = GPIO_PULLUP;
   gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-#if F4_ESC_GATEWAY
-  if (huart->Instance == USART1) {
-    __HAL_RCC_USART1_CLK_ENABLE();
-    gpio.Pin = GPIO_PIN_6 | GPIO_PIN_7;
-    gpio.Alternate = GPIO_AF7_USART1;
-    HAL_GPIO_Init(GPIOB, &gpio);
-    HAL_NVIC_SetPriority(USART1_IRQn, 0U, 0U);
-    HAL_NVIC_ClearPendingIRQ(USART1_IRQn);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
-  } else
-#endif
   if (huart->Instance == USART2) {
     __HAL_RCC_USART2_CLK_ENABLE();
     gpio.Pin = GPIO_PIN_2 | GPIO_PIN_3;
@@ -675,7 +658,7 @@ bool HalUartPort::begin(uint32_t baudrate) {
 }
 
 void HalUartPort::end() {
-  const IRQn_Type irqn = (instance_ == USART1) ? USART1_IRQn : USART2_IRQn;
+  const IRQn_Type irqn = USART2_IRQn;
   HAL_NVIC_DisableIRQ(irqn);
   if (handle_->Instance != nullptr && handle_->gState != HAL_UART_STATE_RESET) {
     /* Recovery is a main-context operation and must finish before begin().
@@ -902,9 +885,6 @@ extern "C" void SysTick_Handler() {
   HAL_SYSTICK_IRQHandler();
 }
 
-#if F4_ESC_GATEWAY
-extern "C" void USART1_IRQHandler() { HAL_UART_IRQHandler(&huart1); }
-#endif
 extern "C" void USART2_IRQHandler() { HAL_UART_IRQHandler(&huart2); }
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
 #ifdef NEO3PRO
@@ -924,27 +904,18 @@ extern "C" void EXTI15_10_IRQHandler() {
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.
 extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-#if F4_ESC_GATEWAY
-  if (huart == &huart1) { gVescUart.irqRxComplete(); return; }
-#endif
   if (huart == &huart2) gGnssUart.irqRxComplete();
 }
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.
 extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-#if F4_ESC_GATEWAY
-  if (huart == &huart1) { gVescUart.irqTxComplete(); return; }
-#endif
   if (huart == &huart2) gGnssUart.irqTxComplete();
 }
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.
 extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-#if F4_ESC_GATEWAY
-  if (huart == &huart1) { gVescUart.irqError(); return; }
-#endif
   if (huart == &huart2) gGnssUart.irqError();
 }
 

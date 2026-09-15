@@ -8,9 +8,9 @@ dbh=(root/'src/DroneCanDnaDatabase.h').read_text()
 boot=(root/'bootloader/src/main.c').read_text()
 ld=(root/'linker/STM32F411CEUX_APP.ld').read_text()
 checks={
-'APP stops before DNA sector':'LENGTH = 0x38000' in ld,
-'DNA sector reserved':'kStorageBase = 0x08040000UL' in dbh and 'kStorageLimit = 0x08060000UL' in dbh,
-'boot updater preserves sector6':'FLASH_SECTOR_5' in boot and 'FLASH_SECTOR_6' not in boot.split('static bool begin_update',1)[1].split('static bool program_chunk',1)[0],
+'APP uses sectors1-6 only':'ORIGIN = 0x08004000' in ld and 'LENGTH = 0x5C000' in ld,
+'DNA partition reserved':'kStorageBase = 0x0807E000UL' in dbh and 'kStorageLimit = 0x08080000UL' in dbh,
+'boot updater preserves sector7':'FLASH_SECTOR_1' in boot and 'FLASH_SECTOR_6' in boot and 'FLASH_SECTOR_7' not in boot.split('static bool begin_update',1)[1].split('static bool program_chunk',1)[0],
 'true separate commit word':'commit_word' in dbh and 'address + 16U' in db and 'memcmp(reinterpret_cast<const void *>(address), &jr, 16U)' in db,
 'ArduPilot FNV offset':'14695981039346656037ULL' in dbh,
 'ArduPilot FNV prime':'1099511628211ULL' in dbh,
