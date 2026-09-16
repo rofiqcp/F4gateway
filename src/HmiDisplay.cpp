@@ -94,8 +94,8 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
   for (uint8_t attempt = 0U; attempt < 2U; ++attempt) {
     TftCs(true);
     TouchCs(true);
-    // SPI1 is HMI-only in NEO3PRO builds; central ownership still prevents TFT
-    // and touch transactions from overlapping and restores mode/clock per slave.
+    // SPI1 is HMI-only; central ownership prevents TFT/touch overlap and
+    // restores the correct mode/clock for each device.
     if (!Board_SpiAcquire(board_owner, prescaler)) {
       ++spi_bus_conflict_count_;
       return false;

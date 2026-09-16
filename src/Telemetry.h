@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include "Config.h"
+#include "HmiConfig.h"
 
 struct TelemetryGroupStamp {
   uint32_t lastRxMs{0U};
@@ -26,9 +26,12 @@ struct EscExtendedTelemetry {
   float vbusV{0.0F}, motorCurrentA{0.0F}, inputCurrentA{0.0F};
   float iqA{0.0F}, idA{0.0F}, duty{0.0F}, mosTempC{0.0F}, motorTempC{0.0F};
   uint8_t faultCode{0U};
-  float leftVbusV{0.0F}, leftCurrentA{0.0F}, leftDuty{0.0F}, leftRpm{0.0F};
-  float rightVbusV{0.0F}, rightCurrentA{0.0F}, rightDuty{0.0F}, rightRpm{0.0F};
+  // MTR wire payload is backward compatible; both speed values are ERPM.
+  float leftVbusV{0.0F}, leftCurrentA{0.0F}, leftDuty{0.0F}, leftErpm{0.0F};
+  float rightVbusV{0.0F}, rightCurrentA{0.0F}, rightDuty{0.0F}, rightErpm{0.0F};
   uint8_t leftFault{0U}, rightFault{0U};
+  bool leftStatusKnown{false}, leftConnected{false};
+  bool rightStatusKnown{false}, rightConnected{false};
   int32_t encoderRaw{0}, encoderSpan{0}, encoderTarget{0};
   bool calibrated{false}, homed{false}, encoderSynced{false}, encoderInverted{false};
   float encoderPositionDeg{0.0F};
@@ -140,6 +143,8 @@ struct VehicleTelemetry {
 
   bool motionReady{false};
   bool nav2Ready{false};
+  float goalRemainingDistanceM{0.0F};
+  bool goalRemainingDistanceValid{false};
   char localizationState[24]{"WAIT"};
   char gnssStatus[20]{"WAIT"};
   char imuStatus[20]{"WAIT"};

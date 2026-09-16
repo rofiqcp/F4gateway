@@ -19,7 +19,7 @@ int main() {
   auto bad=parseExtendedTelemetryLine("ESCX:PWR:2:10:1,nan,1,1,1,1,0.1,40,0",t,1020);
   assert(bad.recognized && !bad.accepted && !bad.outOfOrder && t.escx.vbusV==old);
   auto m=parseExtendedTelemetryLine("ESCX:MTR:1:15:1,51.1,2.0,0.1,100,0,51.3,5.0,0.2,300,0",t,1030);
-  assert(m.accepted && std::fabs(t.escx.rightRpm-300.0f)<0.1f);
+  assert(m.accepted && std::fabs(t.escx.rightErpm-300.0f)<0.1f);
   auto e=parseExtendedTelemetryLine("ESCX:ENC:1:8:1,123,1000,500,1,1,1,0,2.5",t,1040);
   assert(e.accepted && t.escx.encoderRaw==123 && t.escx.encoderSynced);
   auto c=parseExtendedTelemetryLine("PERX:CAM:1:10:1,1,12.5,8.2,3,0,GPU,1",t,1050);

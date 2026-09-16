@@ -24,7 +24,7 @@ status = git_text("status", "--porcelain", "--untracked-files=normal")
 git_dirty = 1 if status not in ("", "unknown") else 0
 build_epoch = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 
-# Quoted C string macros are consumed through include/BuildInfo.h.
+# Quoted C string macros are consumed through src/BuildInfo.h.
 env.Append(CPPDEFINES=[
     ("FW_GIT_SHA", '\\"{}\\"'.format(git_sha)),
     ("FW_GIT_FULL_SHA", '\\"{}\\"'.format(git_full_sha)),

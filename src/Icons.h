@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include "Config.h"
+#include "HmiConfig.h"
 
 extern HmiDisplay tft;
 

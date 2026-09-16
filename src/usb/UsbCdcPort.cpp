@@ -498,8 +498,8 @@ void UsbCdcPort::flush(uint32_t timeout_ms) {
          static_cast<uint32_t>(HAL_GetTick() - start) < timeout_ms) {
     // A flush is only a bounded drain request, never permission to starve the
     // realtime loop. Progress CDC TX in thread context, then yield through the
-    // board callback so STOP retries, HMI lease, safety I/O and MCP2515 RX keep
-    // receiving service even during the final DFU acknowledgement drain.
+    // board callback so STOP retries, HMI lease and safety I/O keep receiving
+    // service even during the final DFU acknowledgement drain.
     service();
     Board_RealtimeService();
     if (tx_head_ != tx_tail_ || tx_high_head_ != tx_high_tail_ || tx_busy_)

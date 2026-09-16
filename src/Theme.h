@@ -11,7 +11,7 @@
 // With -DLOAD_GFXFF, TFT_eSPI.h -> gfxfont.h already includes the full
 // FreeFont set (including FreeSans/FreeSansBold). Including them again
 // causes redefinition errors on PlatformIO/TFT_eSPI 2.5.x.
-#include "Config.h"
+#include "HmiConfig.h"
 
 extern HmiDisplay tft;
 

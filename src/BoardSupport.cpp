@@ -4,11 +4,6 @@
 #include <cstring>
 
 SPI_HandleTypeDef hspi1{};
-#if defined(NEO3PRO) && MCP2515_ENABLED
-SPI_HandleTypeDef hspi2{};
-#endif
-I2C_HandleTypeDef hi2c1{};
-UART_HandleTypeDef huart2{};
 TIM_HandleTypeDef htim1{};
 TIM_HandleTypeDef htim11{};
 #if BTS_WINCH_ENABLED
@@ -16,7 +11,6 @@ TIM_HandleTypeDef htim2{};
 TIM_HandleTypeDef htim4{};
 #endif
 
-HalUartPort gGnssUart(&huart2, USART2);
 
 extern "C" uint8_t _end;
 extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason);
@@ -35,8 +29,6 @@ uint8_t g_board_service_gap_head = 0U;
 uint8_t g_board_service_gap_count = 0U;
 bool g_board_service_gap_stats_enabled = false;
 uint32_t g_board_min_stack_headroom_bytes = 0xFFFFFFFFUL;
-volatile uint32_t g_dwt_last_cycles = 0U;
-volatile uint32_t g_dwt_wrap_count = 0U;
 uint32_t g_buzzer_deadline_ms = 0U;
 bool g_buzzer_active = false;
 #ifdef HMI_TEST_HOOKS
@@ -45,11 +37,6 @@ bool g_test_spi_init_fail_once = false;
 BoardSpiOwner g_spi_owner = BoardSpiOwner::NONE;
 uint32_t g_spi_contention_count = 0U;
 uint32_t g_spi_recovery_count = 0U;
-#if defined(NEO3PRO) && MCP2515_ENABLED
-volatile bool g_mcp_int_pending = false;
-volatile uint32_t g_mcp_int_count = 0U;
-void (*g_mcp_fast_irq_callback)() = nullptr;
-#endif
 
 static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with recovery bootloader
 
@@ -95,9 +82,6 @@ void Gpio_Init() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_2, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
-#ifdef NEO3
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);
-#endif
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 #if BTS_WINCH_ENABLED
   // BTS7960 outputs must be LOW before timers take ownership.
@@ -124,41 +108,8 @@ void Gpio_Init() {
   HAL_GPIO_Init(GPIOB, &gpio);
 #endif
 
-#if defined(NEO3PRO) && MCP2515_ENABLED
-  // NEO3PRO MCP2515 is kept as one compact PB10 + PB12..PB15 wiring block:
-  // PB10=INT (active-low), PB12=CS (active-low), PB13=SCK, PB14=MISO, PB15=MOSI.
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
-  gpio.Pin = GPIO_PIN_12;
-  gpio.Mode = GPIO_MODE_OUTPUT_PP;
-  gpio.Pull = GPIO_NOPULL;
-  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(GPIOB, &gpio);
-  gpio.Pin = GPIO_PIN_10;
-  gpio.Mode = GPIO_MODE_IT_FALLING;
-  gpio.Pull = GPIO_PULLUP;
-  gpio.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &gpio);
-  // MCP2515 INT is active-low. Match ArduPilot/PX4 CANIface architecture:
-  // interrupt context only latches work; SPI draining remains bounded in main/realtime context.
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0U, 0U);
-  HAL_NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
-#endif
 
-#ifdef NEO3
-  gpio.Pin = GPIO_PIN_13;
-  gpio.Mode = GPIO_MODE_OUTPUT_OD;
-  gpio.Pull = GPIO_PULLUP;
-  gpio.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &gpio);
-#endif
 
-#ifdef NEO3
-  gpio.Pin = GPIO_PIN_12;
-  gpio.Mode = GPIO_MODE_INPUT;
-  gpio.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOB, &gpio);
-#endif
 
   gpio.Pin = GPIO_PIN_13;
   gpio.Mode = GPIO_MODE_OUTPUT_PP;
@@ -202,61 +153,6 @@ void Spi1_InitBootOrFatal() {
     FatalError();
 }
 
-#if defined(NEO3PRO) && MCP2515_ENABLED
-bool Spi2_Configure() {
-  __HAL_RCC_SPI2_CLK_ENABLE();
-  GPIO_InitTypeDef gpio{};
-  gpio.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
-  gpio.Mode = GPIO_MODE_AF_PP;
-  gpio.Pull = GPIO_NOPULL;
-  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  gpio.Alternate = GPIO_AF5_SPI2;
-  HAL_GPIO_Init(GPIOB, &gpio);
-
-  hspi2.Instance = SPI2;
-  hspi2.Init.Mode = SPI_MODE_MASTER;
-  hspi2.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi2.Init.NSS = SPI_NSS_SOFT;
-  // APB1=48 MHz; /8 = 6 MHz, safely below MCP2515's 10 MHz SPI limit.
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
-  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi2.Init.CRCPolynomial = 7U;
-  return HAL_SPI_Init(&hspi2) == HAL_OK;
-}
-
-void Spi2_InitBootOrFatal() {
-  if (!Spi2_Configure())
-    FatalError();
-}
-#endif
-
-void I2c1_Init() {
-  __HAL_RCC_I2C1_CLK_ENABLE();
-  GPIO_InitTypeDef gpio{};
-  gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9;
-  gpio.Mode = GPIO_MODE_AF_OD;
-  gpio.Pull = GPIO_PULLUP;
-  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  gpio.Alternate = GPIO_AF4_I2C1;
-  HAL_GPIO_Init(GPIOB, &gpio);
-
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000U;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0U;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0U;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-    FatalError();
-}
 
 void Timers_Init() {
   __HAL_RCC_TIM1_CLK_ENABLE();
@@ -330,21 +226,6 @@ void Timers_Init() {
   HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
 }
 
-void UartPinsInit(UART_HandleTypeDef *huart) {
-  GPIO_InitTypeDef gpio{};
-  gpio.Mode = GPIO_MODE_AF_PP;
-  gpio.Pull = GPIO_PULLUP;
-  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  if (huart->Instance == USART2) {
-    __HAL_RCC_USART2_CLK_ENABLE();
-    gpio.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-    gpio.Alternate = GPIO_AF7_USART2;
-    HAL_GPIO_Init(GPIOA, &gpio);
-    HAL_NVIC_SetPriority(USART2_IRQn, 1U, 0U);
-    HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
-    HAL_NVIC_EnableIRQ(USART2_IRQn);
-  }
-}
 } // namespace
 
 extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason) {
@@ -373,22 +254,12 @@ void Board_Init() {
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootOrFatal();
-#if defined(NEO3PRO) && MCP2515_ENABLED
-  Spi2_InitBootOrFatal();
-#endif
-#ifdef NEO3
-  I2c1_Init();
-#endif
   Timers_Init();
   Board_SpiDeselectAll();
-  // The resident recovery bootloader may leave CYCCNT enabled with an arbitrary
-  // pre-application epoch. Reset it unconditionally here so every application
-  // libcanard timestamp/deadline shares one deterministic boot-local epoch.
+  // DWT powers deterministic microsecond delays used by TFT/touch timing.
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk;
   DWT->CYCCNT = 0U;
-  g_dwt_last_cycles = 0U;
-  g_dwt_wrap_count = 0U;
   DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 }
 
@@ -416,9 +287,6 @@ void Board_Service() {
     }
   }
   g_board_last_service_ms = now;
-#ifdef NEO3
-  (void)gGnssUart.service();
-#endif
   if (g_buzzer_active &&
       static_cast<int32_t>(HAL_GetTick() - g_buzzer_deadline_ms) >= 0) {
     Board_BuzzerStop();
@@ -482,16 +350,10 @@ void Board_SetRealtimeServiceCallback(void (*callback)()) {
 }
 
 void Board_RealtimeService() {
-  /* Long TFT draws are main-context blocking work. Normally yield at most once
-   * per ms, but a latched MCP2515 interrupt bypasses that throttle so its two
-   * tiny RX buffers are drained at the next HMI chunk boundary. */
+  // Long TFT draws yield at most once per millisecond so USB and safety
+  // processing stay responsive without re-entering this callback recursively.
   const uint32_t now = HAL_GetTick();
-#if defined(NEO3PRO) && MCP2515_ENABLED
-  const bool urgent_can = Board_McpIntPending();
-#else
-  const bool urgent_can = false;
-#endif
-  if (g_realtime_service_active || (!urgent_can && now == g_realtime_service_last_ms))
+  if (g_realtime_service_active || now == g_realtime_service_last_ms)
     return;
   g_realtime_service_last_ms = now;
   g_realtime_service_active = true;
@@ -499,19 +361,6 @@ void Board_RealtimeService() {
   if (g_realtime_service_callback != nullptr)
     g_realtime_service_callback();
   g_realtime_service_active = false;
-}
-
-uint64_t Board_MonotonicMicros64() {
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  const uint32_t now_cycles = DWT->CYCCNT;
-  uint32_t wraps = g_dwt_wrap_count;
-  if (now_cycles < g_dwt_last_cycles)
-    ++wraps;
-  const uint64_t cycles = (static_cast<uint64_t>(wraps) << 32U) | now_cycles;
-  if (primask == 0U) __enable_irq();
-  const uint32_t cycles_per_us = std::max<uint32_t>(1U, HAL_RCC_GetHCLKFreq() / 1000000U);
-  return cycles / cycles_per_us;
 }
 
 void Board_DelayUs(uint32_t microseconds) {
@@ -529,9 +378,6 @@ void Board_TestInjectSpiInitFailureOnce() { g_test_spi_init_fail_once = true; }
 void Board_SpiDeselectAll() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);  // TFT CS
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);  // XPT2046 CS
-#if defined(NEO3PRO) && MCP2515_ENABLED
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // MCP2515 CS
-#endif
 }
 
 BoardSpiOwner Board_SpiOwner() { return g_spi_owner; }
@@ -567,8 +413,7 @@ bool Board_SpiAcquire(BoardSpiOwner owner, uint32_t prescaler) {
     (void)SPI1->SR;
   }
   CLEAR_BIT(SPI1->CR1, SPI_CR1_SPE);
-  // ILI9341 and XPT2046 use SPI1 mode 0. MCP2515 is isolated on SPI2.
-  // Reassert SPI1 mode on every HMI owner handoff.
+  // ILI9341 and XPT2046 share SPI1 mode 0; reassert it on each owner handoff.
   CLEAR_BIT(SPI1->CR1, SPI_CR1_CPOL | SPI_CR1_CPHA);
   MODIFY_REG(SPI1->CR1, SPI_CR1_BR, prescaler);
   SET_BIT(SPI1->CR1, SPI_CR1_SPE);
@@ -585,7 +430,7 @@ void Board_SpiRelease(BoardSpiOwner owner) {
 }
 
 bool Board_ReinitSpi1() {
-  /* SPI1 is HMI-only in NEO3PRO builds. */
+  // SPI1 is dedicated to TFT/touch in the production v2 build.
   Board_SpiDeselectAll();
   g_spi_owner = BoardSpiOwner::NONE;
   ++g_spi_recovery_count;
@@ -597,39 +442,6 @@ bool Board_ReinitSpi1() {
   return Spi1_Configure() && hspi1.State == HAL_SPI_STATE_READY;
 }
 
-#if defined(NEO3PRO) && MCP2515_ENABLED
-bool Board_ReinitSpi2() {
-  // Dedicated MCP2515 bus recovery; never disturbs TFT/touch on SPI1.
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
-  (void)HAL_SPI_DeInit(&hspi2);
-  __HAL_RCC_SPI2_FORCE_RESET();
-  __NOP();
-  __NOP();
-  __HAL_RCC_SPI2_RELEASE_RESET();
-  return Spi2_Configure() && hspi2.State == HAL_SPI_STATE_READY;
-}
-
-void Board_SetMcpFastIrqCallback(void (*callback)()) {
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  g_mcp_fast_irq_callback = callback;
-  if (primask == 0U) __enable_irq();
-}
-
-bool Board_McpIntPending() {
-  return g_mcp_int_pending || HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10) == GPIO_PIN_RESET;
-}
-
-void Board_McpIntClear() {
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  g_mcp_int_pending = false;
-  if (primask == 0U) __enable_irq();
-}
-
-uint32_t Board_McpIntCount() { return g_mcp_int_count; }
-#endif
-
 void Board_RealtimeDelayMs(uint32_t duration_ms) {
   const uint32_t deadline = HAL_GetTick() + duration_ms;
   while (static_cast<int32_t>(deadline - HAL_GetTick()) > 0) {
@@ -638,10 +450,6 @@ void Board_RealtimeDelayMs(uint32_t duration_ms) {
   }
 }
 
-void Board_ReinitI2c1() {
-  (void)HAL_I2C_DeInit(&hi2c1);
-  I2c1_Init();
-}
 
 void Board_SetWatchdogCallback(void (*callback)()) {
   g_watchdog_callback = callback;
@@ -686,297 +494,16 @@ void Board_BuzzerStop() {
   g_buzzer_deadline_ms = 0U;
 }
 
-bool HalUartPort::begin(uint32_t baudrate) {
-  end();
-  handle_->Instance = instance_;
-  handle_->Init.BaudRate = baudrate;
-  handle_->Init.WordLength = UART_WORDLENGTH_8B;
-  handle_->Init.StopBits = UART_STOPBITS_1;
-  handle_->Init.Parity = UART_PARITY_NONE;
-  handle_->Init.Mode = UART_MODE_TX_RX;
-  handle_->Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  handle_->Init.OverSampling = UART_OVERSAMPLING_16;
-  UartPinsInit(handle_);
-  if (HAL_UART_Init(handle_) != HAL_OK)
-    return false;
-  rx_head_ = rx_tail_ = 0U;
-  tx_head_ = tx_tail_ = tx_pending_ = 0U;
-  tx_busy_ = false;
-  tx_dropped_ = 0U;
-  overflow_count_ = 0U;
-  error_count_ = 0U;
-  tx_segments_started_ = 0U;
-  tx_segments_completed_ = 0U;
-  rx_irq_bytes_ = 0U;
-  last_rx_irq_ms_ = HAL_GetTick();
-  max_queue_bytes_ = 0U;
-  rx_restart_required_ = false;
-  const bool started = HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) == HAL_OK;
-  rx_restart_required_ = !started;
-  return started;
-}
-
-void HalUartPort::end() {
-  const IRQn_Type irqn = USART2_IRQn;
-  HAL_NVIC_DisableIRQ(irqn);
-  if (handle_->Instance != nullptr && handle_->gState != HAL_UART_STATE_RESET) {
-    /* Recovery is a main-context operation and must finish before begin().
-     * HAL_UART_Abort_IT() completes asynchronously and can race the following
-     * HAL_UART_Init/Receive_IT, corrupting gState/RxState or tx_busy ownership.
-     */
-    (void)HAL_UART_Abort(handle_);
-    (void)HAL_UART_DeInit(handle_);
-  }
-  HAL_NVIC_ClearPendingIRQ(irqn);
-  handle_->Instance = instance_;
-  rx_head_ = rx_tail_ = 0U;
-  tx_head_ = tx_tail_ = tx_pending_ = 0U;
-  tx_busy_ = false;
-  rx_restart_required_ = false;
-}
-
-int HalUartPort::available() const {
-  const uint16_t head = rx_head_;
-  const uint16_t tail = rx_tail_;
-  return head >= tail ? static_cast<int>(head - tail)
-                      : static_cast<int>(kRxSize - tail + head);
-}
-
-int HalUartPort::read() {
-  if (rx_tail_ == rx_head_)
-    return -1;
-  const uint8_t value = rx_buffer_[rx_tail_];
-  rx_tail_ = static_cast<uint16_t>((rx_tail_ + 1U) % kRxSize);
-  return value;
-}
-
-int HalUartPort::availableForWrite() const {
-  const uint16_t head = tx_head_;
-  const uint16_t tail = tx_tail_;
-  const uint16_t used = head >= tail
-                            ? static_cast<uint16_t>(head - tail)
-                            : static_cast<uint16_t>(kTxSize - tail + head);
-  return static_cast<int>(kTxSize - used - 1U);
-}
-
-std::size_t HalUartPort::queuedForWrite() const {
-  const uint16_t head = tx_head_;
-  const uint16_t tail = tx_tail_;
-  return head >= tail ? static_cast<std::size_t>(head - tail)
-                      : static_cast<std::size_t>(kTxSize - tail + head);
-}
-
-void HalUartPort::discardPendingTx() {
-  // Safety-critical preemption: no stale motor command may remain ahead of an
-  // E-stop. Abort only the TX side; USART RX and its ring stay alive.
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  (void)HAL_UART_AbortTransmit(handle_);
-  tx_head_ = tx_tail_ = tx_pending_ = 0U;
-  tx_busy_ = false;
-  if (primask == 0U)
-    __enable_irq();
-}
-
-void HalUartPort::dropQueuedAfterActiveTx() {
-  /* Latest-value runtime traffic may replace queued stale batches, but never
-   * truncate the UART transfer already on the wire: doing so creates a partial
-   * VESC frame and forces the F103 parser into CRC/resync recovery. */
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  if (tx_busy_) {
-    tx_head_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
-  } else {
-    tx_head_ = tx_tail_;
-  }
-  if (primask == 0U)
-    __enable_irq();
-}
-
-std::size_t HalUartPort::write(const uint8_t *data, std::size_t length) {
-  if (data == nullptr || length == 0U || length >= kTxSize)
-    return 0U;
-  const uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  const uint16_t head = tx_head_;
-  const uint16_t tail = tx_tail_;
-  const uint16_t used = head >= tail
-                            ? static_cast<uint16_t>(head - tail)
-                            : static_cast<uint16_t>(kTxSize - tail + head);
-  const uint16_t free = static_cast<uint16_t>(kTxSize - used - 1U);
-  if (free < length) {
-    ++tx_dropped_;
-    if (primask == 0U)
-      __enable_irq();
-    return 0U;
-  }
-  for (std::size_t i = 0U; i < length; ++i) {
-    tx_buffer_[tx_head_] = data[i];
-    tx_head_ = static_cast<uint16_t>((tx_head_ + 1U) % kTxSize);
-  }
-  const uint16_t queued_now = static_cast<uint16_t>(used + length);
-  if (queued_now > max_queue_bytes_)
-    max_queue_bytes_ = queued_now;
-  if (primask == 0U)
-    __enable_irq();
-  (void)service();
-  return length;
-}
-
-void HalUartPort::flush() {
-  const uint32_t start = HAL_GetTick();
-  while ((tx_head_ != tx_tail_ || tx_busy_ ||
-          __HAL_UART_GET_FLAG(handle_, UART_FLAG_TC) == RESET) &&
-         static_cast<uint32_t>(HAL_GetTick() - start) < 150U) {
-    (void)service();
-    Board_RealtimeService();
-    __WFI();
-  }
-}
-
-bool HalUartPort::service() {
-  bool ok = true;
-  if (rx_restart_required_) {
-    (void)HAL_UART_AbortReceive(handle_);
-    __HAL_UART_CLEAR_OREFLAG(handle_);
-    __HAL_UART_CLEAR_NEFLAG(handle_);
-    __HAL_UART_CLEAR_FEFLAG(handle_);
-    const bool restarted =
-        HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) == HAL_OK;
-    rx_restart_required_ = !restarted;
-    ok = restarted;
-  }
-
-  if (!tx_busy_ && tx_head_ != tx_tail_) {
-    uint16_t count = 0U;
-    uint16_t tail = 0U;
-    const uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    if (!tx_busy_ && tx_head_ != tx_tail_) {
-      tail = tx_tail_;
-      count = tx_head_ > tx_tail_ ? static_cast<uint16_t>(tx_head_ - tx_tail_)
-                                  : static_cast<uint16_t>(kTxSize - tx_tail_);
-      tx_pending_ = count;
-      tx_busy_ = true;
-    }
-    if (primask == 0U)
-      __enable_irq();
-    if (count > 0U) {
-      if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
-        const uint32_t retry_primask = __get_PRIMASK();
-        __disable_irq();
-        tx_pending_ = 0U;
-        tx_busy_ = false;
-        ++error_count_;
-        if (retry_primask == 0U)
-          __enable_irq();
-        ok = false;
-      } else {
-        ++tx_segments_started_;
-      }
-    }
-  }
-  return ok;
-}
-
-void HalUartPort::irqRxComplete() {
-  ++rx_irq_bytes_;
-  last_rx_irq_ms_ = HAL_GetTick();
-  const uint16_t next = static_cast<uint16_t>((rx_head_ + 1U) % kRxSize);
-  if (next != rx_tail_) {
-    rx_buffer_[rx_head_] = rx_byte_;
-    rx_head_ = next;
-  } else {
-    ++overflow_count_;
-  }
-  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK)
-    rx_restart_required_ = true;
-}
-
-void HalUartPort::irqTxComplete() {
-  if (!tx_busy_)
-    return;
-  ++tx_segments_completed_;
-  tx_tail_ = static_cast<uint16_t>((tx_tail_ + tx_pending_) % kTxSize);
-  tx_pending_ = 0U;
-  tx_busy_ = false;
-
-  /* Chain the next queued contiguous segment immediately from the TX-complete
-   * callback. HAL sets gState=READY before invoking this callback, so starting
-   * another interrupt-driven transfer here is valid and avoids depending on
-   * UI/I2C/GNSS main-loop latency to drain the motor command ring. */
-  if (tx_head_ != tx_tail_) {
-    const uint16_t tail = tx_tail_;
-    const uint16_t count = tx_head_ > tx_tail_
-                               ? static_cast<uint16_t>(tx_head_ - tx_tail_)
-                               : static_cast<uint16_t>(kTxSize - tx_tail_);
-    tx_pending_ = count;
-    tx_busy_ = true;
-    if (HAL_UART_Transmit_IT(handle_, &tx_buffer_[tail], count) != HAL_OK) {
-      tx_pending_ = 0U;
-      tx_busy_ = false;
-      ++error_count_;
-    } else {
-      ++tx_segments_started_;
-    }
-  }
-}
-
-void HalUartPort::irqError() {
-  ++error_count_;
-  __HAL_UART_CLEAR_OREFLAG(handle_);
-  __HAL_UART_CLEAR_NEFLAG(handle_);
-  __HAL_UART_CLEAR_FEFLAG(handle_);
-  if (HAL_UART_Receive_IT(handle_, &rx_byte_, 1U) != HAL_OK)
-    rx_restart_required_ = true;
-}
-
 // HAL_Init() enables the Cortex-M SysTick timebase. The STM32Cube startup file
 // weak-aliases SysTick_Handler to Default_Handler, so a native application must
 // provide this ISR explicitly. Without it the first 1 ms tick traps the MCU in
 // the default infinite loop before USB/HMI/sensor startup can complete.
 extern "C" void SysTick_Handler() {
-  const uint32_t now_cycles = DWT->CYCCNT;
-  if (now_cycles < g_dwt_last_cycles)
-    ++g_dwt_wrap_count;
-  g_dwt_last_cycles = now_cycles;
   HAL_IncTick();
   HAL_SYSTICK_IRQHandler();
 }
 
-extern "C" void USART2_IRQHandler() { HAL_UART_IRQHandler(&huart2); }
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
-#if defined(NEO3PRO) && MCP2515_ENABLED
-extern "C" void EXTI15_10_IRQHandler() {
-  if (__HAL_GPIO_EXTI_GET_IT(GPIO_PIN_10) != RESET) {
-    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_10);
-    g_mcp_int_pending = true;
-    ++g_mcp_int_count;
-    // Like ArduPilot/PX4 CAN driver ISR: evacuate hardware FIFO only.
-    // The registered callback is strictly bounded and performs no libcanard,
-    // DSDL, USB, logging or allocation work.
-    if (g_mcp_fast_irq_callback != nullptr) g_mcp_fast_irq_callback();
-  }
-}
-#endif
-
-// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
-// handle pointer.
-extern "C" void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart2) gGnssUart.irqRxComplete();
-}
-
-// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
-// handle pointer.
-extern "C" void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart2) gGnssUart.irqTxComplete();
-}
-
-// cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
-// handle pointer.
-extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-  if (huart == &huart2) gGnssUart.irqError();
-}
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.

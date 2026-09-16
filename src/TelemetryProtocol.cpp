@@ -220,9 +220,9 @@ bool parseEsc(const Header &h, char *f[], size_t n, VehicleTelemetry &t,
     if (!acceptSequence(t.escx.motors, h.session, h.seq, now)) { outOfOrder = true; return false; }
     commitStamp(t.escx.motors, h.session, h.seq, h.age, valid, now);
     if (valid) {
-      t.escx.leftVbusV=lv; t.escx.leftCurrentA=li; t.escx.leftDuty=ld; t.escx.leftRpm=lr;
+      t.escx.leftVbusV=lv; t.escx.leftCurrentA=li; t.escx.leftDuty=ld; t.escx.leftErpm=lr;
       t.escx.leftFault=static_cast<uint8_t>(lf); t.escx.rightVbusV=rv; t.escx.rightCurrentA=ri;
-      t.escx.rightDuty=rd; t.escx.rightRpm=rr; t.escx.rightFault=static_cast<uint8_t>(rf);
+      t.escx.rightDuty=rd; t.escx.rightErpm=rr; t.escx.rightFault=static_cast<uint8_t>(rf);
     }
     return true;
   }

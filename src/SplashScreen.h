@@ -4,7 +4,7 @@
 #pragma once
 
 #include "HmiDisplay.h"
-#include "Config.h"
+#include "HmiConfig.h"
 #include "Theme.h"
 #include "Icons.h"
 

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="/usr/bin/python3"
+[[ -x "$PYTHON" ]] || { echo "[STLINK] ROS/system Python missing: $PYTHON" >&2; exit 2; }
+"$PYTHON" -c "import serial" >/dev/null 2>&1 || { echo "[STLINK] python3-serial missing for $PYTHON" >&2; exit 2; }
 OPENOCD="$HOME/.platformio/packages/tool-openocd/bin/openocd"
-BOOT="$ROOT/bootloader/.pio/build/f411_recovery_boot/firmware.bin"
+BOOT="$ROOT/bootloader/.pio-user-build/f411_recovery_boot/firmware.bin"
 APP="$ROOT/.pio/build/blackpill_f411ce_stlink/firmware.bin"
 MANIFEST="$ROOT/.pio/build/blackpill_f411ce_stlink/manifest.bin"
-CDC="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
+CDC_GLOB="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode*-if00"
+CDC=""
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 PERSIST_OLD="$TMP/persistent_old.bin"
@@ -16,14 +20,22 @@ PERSIST_NEW="$TMP/persistent_new.bin"
 probe="$($OPENOCD -f interface/stlink.cfg -f target/stm32f4x.cfg \
   -c 'adapter speed 500; init; halt; echo AGV_DBGMCU_ID=[format 0x%08X [mrw 0xE0042000]]; resume; shutdown' 2>&1 || true)"
 id="$(printf '%s\n' "$probe" | sed -n 's/.*AGV_DBGMCU_ID=\(0x[0-9A-Fa-f]*\).*/\1/p' | tail -1)"
-[[ -n "$id" ]] || { echo "[STLINK] cannot identify target MCU" >&2; printf '%s\n' "$probe" >&2; exit 3; }
+if [[ -z "$id" ]]; then
+  echo "[STLINK] cannot identify target MCU" >&2
+  printf '%s\n' "$probe" >&2
+  if printf '%s\n' "$probe" | grep -q 'LIBUSB_ERROR_ACCESS'; then
+    echo "[STLINK] permission denied. Install the repo udev rule once:" >&2
+    echo "  sudo $ROOT/scripts/install_stlink_udev.sh" >&2
+  fi
+  exit 3
+fi
 dev=$(( id & 0xFFF ))
 [[ "$dev" -eq $((0x431)) ]] || { printf '[STLINK] REFUSED target %s DEV_ID=0x%03X is not STM32F411\n' "$id" "$dev" >&2; exit 4; }
 echo "[STLINK] target verified STM32F411 DBGMCU=$id"
 
 cd "$ROOT/bootloader"; pio run -e f411_recovery_boot
 cd "$ROOT"; pio run -e blackpill_f411ce_stlink
-python3 scripts/make_app_manifest.py "$APP" "$MANIFEST"
+"$PYTHON" scripts/make_app_manifest.py "$APP" "$MANIFEST"
 [[ $(stat -c %s "$BOOT") -le $((0x4000)) ]] || { echo '[STLINK] bootloader exceeds 16 KiB' >&2; exit 5; }
 [[ $(stat -c %s "$APP") -le $((0x5C000)) ]] || { echo '[STLINK] application exceeds 368 KiB app region' >&2; exit 6; }
 [[ $(stat -c %s "$MANIFEST") -eq 32 ]] || { echo '[STLINK] invalid manifest size' >&2; exit 7; }
@@ -33,7 +45,7 @@ echo "[STLINK] backing up Sector 7 and legacy Sector 6 before layout migration"
   -c "adapter speed 500; init; reset halt; \
       dump_image $PERSIST_OLD 0x08060000 0x20000; \
       dump_image $OLD_SECTOR6 0x08040000 0x20000; shutdown"
-python3 scripts/compose_persistent_image.py \
+"$PYTHON" scripts/compose_persistent_image.py \
   --persistent "$PERSIST_OLD" --legacy-sector6 "$OLD_SECTOR6" \
   --manifest "$MANIFEST" --output "$PERSIST_NEW"
 [[ $(stat -c %s "$PERSIST_NEW") -eq $((0x20000)) ]] || { echo '[STLINK] invalid persistent image size' >&2; exit 7; }
@@ -49,8 +61,12 @@ echo "[STLINK] transactional provision boot@08000000 app@08004000 persistent@080
       reset run; shutdown"
 
 wait_cdc() {
-  local i
-  for i in $(seq 1 120); do [[ -e "$CDC" ]] && return 0; sleep 0.10; done
+  local i matches
+  for i in $(seq 1 120); do
+    matches=( $CDC_GLOB )
+    if [[ ${#matches[@]} -eq 1 && -e "${matches[0]}" ]]; then CDC="${matches[0]}"; return 0; fi
+    sleep 0.10
+  done
   return 1
 }
 if ! wait_cdc; then
@@ -84,7 +100,7 @@ fi
 real="$(readlink -f "$CDC")"
 holders="$(fuser "$real" 2>/dev/null || true)"
 if [[ -z "$holders" ]]; then
-  python3 - "$CDC" <<'PY'
+  "$PYTHON" - "$CDC" <<'PY'
 import sys,time,serial
 port=sys.argv[1]
 with serial.Serial(port,1000000,timeout=.05,write_timeout=1.0,exclusive=True) as s:

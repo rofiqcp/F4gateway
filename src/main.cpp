@@ -4,12 +4,12 @@
 // ============================================================================
 
 #include "BoardSupport.h"
-#include "BtsWinch.h"
-#include "FeatureConfig.h"
+#include "Bts7960Winch.h"
+#include "FirmwareConfig.h"
 #include "BuildInfo.h"
 #include "HmiDisplay.h"
 #include "PersistentConfigStore.h"
-#include "UsbCdcPort.h"
+#include "usb/UsbCdcPort.h"
 #include <algorithm>
 #include <cmath>
 #include <cerrno>
@@ -19,29 +19,15 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "Config.h"
-#include "Diagnostics.h"
-#include "Icons.h"
-#if defined(NEO3) && defined(NEO3PRO)
-#error "Select exactly one GNSS profile: NEO3 or NEO3PRO"
-#elif !defined(NEO3) && !defined(NEO3PRO)
-#error "GNSS profile missing: build with NEO3 or NEO3PRO"
-#endif
-#ifdef NEO3PRO
-#include "Neo3ProSensors.h"
-#else
-#include "Neo3Sensors.h"
-#endif
+#include "HmiConfig.h"
+#include "HmiDiagnostics.h"
 #include "SplashScreen.h"
 #include "Telemetry.h"
 #include "TelemetryProtocol.h"
 #include "Theme.h"
-#include "TouchButtons.h"
 #include "UiMenu.h"
-#include "UiShell.h"
-#if HMI_F4_LAYOUT
-#include "F4V2Ui.h"
-#endif
+#include "HmiOperatorUi.h"
+#include "HmiTouchService.h"
 #ifndef HMI_LEGACY_UART
 #define HMI_LEGACY_UART 0
 #endif
@@ -49,18 +35,15 @@
 HmiDisplay tft;
 VehicleTelemetry gTelemetry = defaultTelemetry();
 UiState gUi;
-#if HMI_F4_LAYOUT
-F4V2Ui gF4Ui;
-#endif
-#ifdef NEO3PRO
-Neo3ProSensors gNeo3;
-#else
-Neo3Sensors gNeo3;
-#endif
+HmiOperatorUi gOperatorUi;
 
 HmiDiagnostics gDiagnostics{};
 PersistentConfigStore gPersistentConfig;
 static bool gPersistentConfigReady = false;
+
+static void emitServiceLine(const char *line) {
+  if (line != nullptr) (void)gUsb.writeLineCritical(line, 120U);
+}
 
 static volatile uint32_t gMainLoopHeartbeatMs = 0U;
 static volatile bool gAppWatchdogArmed = false;
@@ -73,10 +56,8 @@ static bool splashReadyText = false;
 static uint32_t splashStartMs = 0;
 static uint32_t splashReadyMs = 0;
 static uint32_t lastFrameMs = 0;
-static uint8_t uiDirtyMask = UI_DIRTY_NONE;
-static inline void markUiDirty(uint8_t bits = UI_DIRTY_CONTENT) {
-  uiDirtyMask |= bits;
-}
+static bool gUiDirty = false;
+static inline void markUiDirty() { gUiDirty = true; }
 static uint32_t lastUiRefreshMs = 0;
 static uint32_t lastRosHeartbeatMs = 0;
 static uint32_t lastTouchPollMs = 0;
@@ -245,9 +226,9 @@ static void refreshWinchSafetyInputs() {
       (gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY) &&
       std::fabs(gTelemetry.speedKmh) <= 0.2F &&
       std::fabs(gTelemetry.driveActualMps) <= 0.02F;
-  BtsWinch::SafetyInputs safety{};
+  Bts7960Winch::SafetyInputs safety{};
   safety.emergencyStop = gTelemetry.eStop;
-  safety.physicalSafetyValid = !gNeo3.safetyPressed();
+  safety.physicalSafetyValid = Bts7960Winch::limitsReady();
   safety.systemFault = gTelemetry.systemStatus == SYS_FAULT ||
                        gTelemetry.state == STATE_FAULT;
   safety.hostSessionValid =
@@ -255,11 +236,12 @@ static void refreshWinchSafetyInputs() {
   safety.commandSessionValid = gTelemetry.rosConnected;
   safety.vehicleSafe =
       stationary && !navActive && !driveTestRunning && !steeringTestRunning;
-  BtsWinch::setSafetyInputs(safety);
+  Bts7960Winch::setSafetyInputs(safety);
 #endif
 }
 
 static void forceRosOffline();
+static void beginDisplayInitialization();
 
 static void serviceUsbTransportState() {
   const uint32_t generation = gUsb.transportGeneration();
@@ -292,11 +274,7 @@ static void serviceSafetyControlTx() {
 
 static void publishPage() {
   char line[48];
-#if HMI_F4_LAYOUT
-  snprintf(line, sizeof(line), "PAGE:%s", gF4Ui.wireName());
-#else
-  snprintf(line, sizeof(line), "PAGE:%s", menuWireName(gUi.menu));
-#endif
+  snprintf(line, sizeof(line), "PAGE:%s", gOperatorUi.wireName());
   printBoth(line);
 }
 
@@ -359,36 +337,22 @@ static void drawUiNow(bool full = true) {
   if (!splashComplete || gUi.menu == UiMenuId::SPLASH)
     return;
   if (!tft.displayReady() || tft.displayFaulted()) {
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
   if (gUiDrawActive) {
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
-  uint8_t dirtyMask = full ? static_cast<uint8_t>(UI_DIRTY_ALL) : uiDirtyMask;
-  if (!full && dirtyMask == UI_DIRTY_NONE)
-    dirtyMask = UI_DIRTY_ALL;
-  if (full)
-    uiDirtyMask = UI_DIRTY_NONE;
-  else
-    uiDirtyMask =
-        static_cast<uint8_t>(uiDirtyMask & static_cast<uint8_t>(~dirtyMask));
 
+  // Clear the pending flag before drawing. If transport activity changes
+  // telemetry during the frame, markUiDirty() will set it again for a later pass.
+  gUiDirty = false;
   gUiDrawActive = true;
-  /* The realtime USB/VESC service may update the model during a long TFT burst.
-   * Render immutable snapshots so a frame can never mix two pages or telemetry
-   * epochs even though transport processing remains live. */
-  const UiState uiSnapshot = gUi;
   const VehicleTelemetry telemetrySnapshot = gTelemetry;
   const uint32_t started_ms = HAL_GetTick();
   tft.beginFrame();
-#if HMI_F4_LAYOUT
-  (void)uiSnapshot; (void)dirtyMask;
-  gF4Ui.draw(telemetrySnapshot);
-#else
-  drawUiFrame(uiSnapshot, telemetrySnapshot, full, dirtyMask);
-#endif
+  gOperatorUi.draw(telemetrySnapshot, full);
   tft.endFrame();
   ++gDiagnostics.uiFrames;
   if (full)
@@ -424,15 +388,6 @@ static void enforceManualMotionGate() {
     stopSteeringTest();
 }
 
-static bool serviceEntryAllowed() {
-  const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
-                         gTelemetry.navigationStatus == NAV_NAVIGATING;
-  const bool stationary =
-      (gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY) &&
-      std::fabs(gTelemetry.speedKmh) <= 0.2F &&
-      std::fabs(gTelemetry.driveActualMps) <= 0.02F;
-  return stationary && !navActive && !driveTestRunning && !steeringTestRunning;
-}
 
 static void setMenu(UiMenuId next) {
   if (next == UiMenuId::SPLASH)
@@ -453,8 +408,18 @@ static void setMenu(UiMenuId next) {
   if (!keepDomainPage)
     gUi.pageIndex = 0U;
   gUi.detailViewIndex = 0U;
-  invalidateTouchGeneration();
+  gOperatorUi.cancelTouch();
   gUi.menu = next;
+  if (next == UiMenuId::HOME || next == UiMenuId::OVERVIEW)
+    gOperatorUi.showPage(HmiOperatorUi::Page::HOME);
+  else if (next == UiMenuId::MAIN_MENU)
+    gOperatorUi.showPage(HmiOperatorUi::Page::MAIN_MENU);
+  else if (menuDomain(next) == UiDomain::ESC)
+    gOperatorUi.showPage(HmiOperatorUi::Page::ESC);
+  else if (menuDomain(next) == UiDomain::PERCEPTION)
+    gOperatorUi.showPage(HmiOperatorUi::Page::PERCEPTION);
+  else if (menuDomain(next) == UiDomain::NAVIGATION)
+    gOperatorUi.showPage(HmiOperatorUi::Page::NAVIGATION);
   if (next != UiMenuId::SYSTEM_ROOT && menuDomain(next) != UiDomain::SYSTEM)
     gUi.serviceSession = false;
 
@@ -466,23 +431,7 @@ static void setMenu(UiMenuId next) {
   publishPage();
 }
 
-static void goHome() { setMenu(UiMenuId::HOME); }
-static void goMainMenu() { setMenu(UiMenuId::MAIN_MENU); }
 
-static void enterServiceMode() {
-  if (!serviceEntryAllowed()) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-             "SERVICE REQUIRES STOP");
-    markUiDirty(UI_DIRTY_CONTENT);
-    drawUiNow(false);
-    return;
-  }
-  gUi.serviceSession = true;
-  setMenu(UiMenuId::SYSTEM_ROOT);
-  gUi.serviceSession = true;
-  suppressTouchUntilRelease();
-}
 
 static float actualEditValue(UiEditKey key) {
   switch (key) {
@@ -502,223 +451,8 @@ static float actualEditValue(UiEditKey key) {
   }
 }
 
-static void changeDraft(UiEditKey key, int direction) {
-  if (!gUi.editing || direction == 0)
-    return;
-  if (key == UiEditKey::OPERATOR_MODE ||
-      key == UiEditKey::PERCEPTION_INFERENCE) {
-    gUi.editValue = gUi.editValue > 0.5F ? 0.0F : 1.0F;
-  } else if (key == UiEditKey::MANUAL_SPEED_PCT) {
-    gUi.editValue = std::clamp(gUi.editValue + direction * MANUAL_SPEED_STEP,
-                               static_cast<float>(MANUAL_SPEED_MIN),
-                               static_cast<float>(MANUAL_SPEED_MAX));
-  } else if (key == UiEditKey::STEERING_TEST_DEG) {
-    gUi.editValue =
-        std::clamp(gUi.editValue + direction * STEER_TEST_ANGLE_STEP_DEG,
-                   STEER_TEST_ANGLE_MIN_DEG, STEER_TEST_ANGLE_MAX_DEG);
-  } else if (key == UiEditKey::ERPM_PER_MPS) {
-    gUi.editValue = std::clamp(gUi.editValue + direction * ERPM_PER_MPS_STEP,
-                               ERPM_PER_MPS_MIN, ERPM_PER_MPS_MAX);
-  }
-  drawUiNow(true);
-}
 
-static const char *editWireKey(UiEditKey key) {
-  switch (key) {
-  case UiEditKey::OPERATOR_MODE:
-    return "MODE";
-  case UiEditKey::MANUAL_SPEED_PCT:
-    return "MANSPD";
-  case UiEditKey::STEERING_TEST_DEG:
-    return "STEERTEST";
-  case UiEditKey::ERPM_PER_MPS:
-    return "ERPMMPS";
-  case UiEditKey::PERCEPTION_INFERENCE:
-    return "PERINF";
-  case UiEditKey::NONE:
-  default:
-    return "NONE";
-  }
-}
 
-static bool editDomainFresh(UiEditKey key) {
-  if (key == UiEditKey::PERCEPTION_INFERENCE)
-    return gTelemetry.perceptionFresh;
-  if (key == UiEditKey::NONE)
-    return false;
-  return gTelemetry.escFresh;
-}
-
-static void requestConfig(UiEditKey key, float value) {
-  if (key == UiEditKey::NONE || gTelemetry.configPending ||
-      !gTelemetry.rosConnected || !editDomainFresh(key)) {
-    if (!gTelemetry.rosConnected || !editDomainFresh(key)) {
-      gTelemetry.configLastOk = false;
-      snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-               !gTelemetry.rosConnected ? "ROS OFFLINE" : "DATA STALE");
-      drawUiNow(true);
-    }
-    return;
-  }
-  uint16_t txn = gUi.nextTxn++;
-  if (txn == 0U)
-    txn = gUi.nextTxn++;
-  char line[80];
-  const char *keyName = editWireKey(key);
-  if (key == UiEditKey::ERPM_PER_MPS) {
-    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%.0f", txn, keyName, value);
-  } else if (key == UiEditKey::STEERING_TEST_DEG) {
-    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%.1f", txn, keyName, value);
-  } else if (key == UiEditKey::MANUAL_SPEED_PCT) {
-    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%d", txn, keyName,
-             static_cast<int>(lroundf(value)));
-  } else {
-    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%d", txn, keyName,
-             value > 0.5F ? 1 : 0);
-  }
-  if (!printBoth(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
-    drawUiNow(true);
-    return;
-  }
-  gTelemetry.configPending = true;
-  gTelemetry.configLastOk = false;
-  gTelemetry.configTxn = txn;
-  snprintf(gTelemetry.configKey, sizeof(gTelemetry.configKey), "%s", keyName);
-  snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-           "WAITING ACK");
-  gUi.pendingSinceMs = HAL_GetTick();
-  gUi.editing = false;
-  drawUiNow(true);
-}
-
-static void applyEditor() {
-  const UiEditKey key = menuEditKey(gUi.menu);
-  if (key == UiEditKey::NONE)
-    return;
-  if (!gUi.editing) {
-    gUi.editValue = actualEditValue(key);
-    gUi.editing = true;
-    drawUiNow(true);
-    return;
-  }
-  requestConfig(key, gUi.editValue);
-}
-
-static void selectRelative(int direction) {
-  if (direction == 0)
-    return;
-  if (menuHasChildren(gUi.menu) && gUi.menu != UiMenuId::MAIN_MENU) {
-    uint8_t count = 0U;
-    (void)menuChildren(gUi.menu, count);
-    const uint8_t pages = menuPageCount(count);
-    if (pages <= 1U)
-      return;
-    int next = static_cast<int>(gUi.pageIndex) + direction;
-    if (next < 0) next = pages - 1;
-    if (next >= pages) next = 0;
-    invalidateTouchGeneration();
-    gUi.pageIndex = static_cast<uint8_t>(next);
-    drawUiNow(true);
-    return;
-  }
-  const uint8_t views = menuViewCount(gUi.menu);
-  if (views <= 1U)
-    return;
-  int next = static_cast<int>(gUi.detailViewIndex) + direction;
-  if (next < 0) next = views - 1;
-  if (next >= views) next = 0;
-  invalidateTouchGeneration();
-  gUi.detailViewIndex = static_cast<uint8_t>(next);
-  drawUiNow(true);
-}
-
-static void chooseVisibleCard(uint8_t slot) {
-  if (slot >= DOMAIN_PAGE_SIZE)
-    return;
-  if (gUi.menu == UiMenuId::MAIN_MENU) {
-    const UiMenuId id = menuCardAt(UiMenuId::MAIN_MENU, 0U, slot);
-    if (id != UiMenuId::SPLASH)
-      setMenu(id);
-    return;
-  }
-  if (!menuHasChildren(gUi.menu))
-    return;
-  const UiMenuId id = menuCardAt(gUi.menu, gUi.pageIndex, slot);
-  if (id != UiMenuId::SPLASH)
-    setMenu(id);
-}
-
-static bool steeringTestAllowed() {
-  return gTelemetry.rosConnected && gTelemetry.escFresh &&
-         gTelemetry.mode == MODE_MANUAL && gTelemetry.escReady &&
-         gTelemetry.encoderReady && !gTelemetry.eStop &&
-         gTelemetry.state == STATE_STOPPED;
-}
-
-static void runSteeringTest(float targetDeg) {
-  if (!steeringTestAllowed()) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-             "STEER TEST LOCKED");
-    drawUiNow(false);
-    return;
-  }
-  char line[48];
-  const float limited = std::clamp(targetDeg, -STEER_TEST_ANGLE_MAX_DEG,
-                                   STEER_TEST_ANGLE_MAX_DEG);
-  snprintf(line, sizeof(line), "CMD:STEER:%.1f", limited);
-  if (!gUsb.writeLineHighPriority(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB CONTROL BUSY");
-    drawUiNow(false);
-    return;
-  }
-  steeringTestRunning = true;
-  snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
-           "%s", "RUNNING");
-  markUiDirty();
-}
-
-static bool driveTestAllowed() {
-  return gTelemetry.rosConnected && gTelemetry.escFresh &&
-         gTelemetry.mode == MODE_MANUAL && gTelemetry.escReady &&
-         !gTelemetry.eStop && gTelemetry.state == STATE_STOPPED;
-}
-
-static void runDriveTest(bool forward) {
-  if (driveTestRunning) {
-    // Direction reversal must pass through an explicit STOP.
-    stopDriveTest();
-    return;
-  }
-  if (!driveTestAllowed()) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-             "DRIVE TEST LOCKED");
-    drawUiNow(false);
-    return;
-  }
-  char line[48];
-  snprintf(line, sizeof(line), "CMD:DRIVE:%s:%u", forward ? "FWD" : "REV",
-           gTelemetry.manualSpeedPct);
-  // Start/lease refresh is high priority. If the ring is momentarily full, the
-  // cooperative lease service below retries while the physical button remains
-  // in its bounded drive-test session. ROS independently expires the lease.
-  if (!gUsb.writeLineHighPriority(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB CONTROL BUSY");
-    drawUiNow(false);
-    return;
-  }
-  driveTestRunning = true;
-  gDriveTestDirection = forward ? 1 : -1;
-  gDriveLeaseLastTxMs = HAL_GetTick();
-  driveTestDeadlineMs = gDriveLeaseLastTxMs + DRIVE_TEST_MAX_MS;
-  gTelemetry.state = STATE_RUNNING;
-  markUiDirty();
-}
 
 static void serviceManualDriveLease() {
   if (!driveTestRunning || gDriveTestDirection == 0) return;
@@ -734,277 +468,23 @@ static void serviceManualDriveLease() {
   if (gUsb.writeLineHighPriority(line)) gDriveLeaseLastTxMs = now;
 }
 
-static void selectWaypoint(int direction) {
-  int index = static_cast<int>(gTelemetry.selectedWaypoint) + direction;
-  if (index < 0)
-    index = HMI_WAYPOINT_COUNT - 1;
-  if (index >= HMI_WAYPOINT_COUNT)
-    index = 0;
-  char line[32];
-  snprintf(line, sizeof(line), "CMD:WP:SELECT:%d", index);
-  if (!printBoth(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
-    drawUiNow(false);
-    return;
-  }
-  // Jangan ubah state authoritative sebelum mirror ROS kembali.
-}
 
-static void goSelectedWaypoint() {
-  const uint8_t index = gTelemetry.selectedWaypoint < HMI_WAYPOINT_COUNT
-                            ? gTelemetry.selectedWaypoint
-                            : 0U;
-  if (!gTelemetry.rosConnected || !gTelemetry.navigationFresh ||
-      gTelemetry.mode != MODE_AUTO || gTelemetry.systemStatus != SYS_READY ||
-      !gTelemetry.waypointSaved[index]) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-             "MISSION LOCKED");
-    drawUiNow(false);
-    return;
-  }
-  char line[32];
-  snprintf(line, sizeof(line), "CMD:WP:GO:%u", index);
-  if (!printBoth(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
-    drawUiNow(false);
-  }
-}
-
-static void saveSelectedWaypoint() {
-  const uint8_t index = gTelemetry.selectedWaypoint < HMI_WAYPOINT_COUNT
-                            ? gTelemetry.selectedWaypoint
-                            : 0U;
-  if (!gTelemetry.rosConnected || !gTelemetry.navigationFresh ||
-      !gTelemetry.gpsReady || gTelemetry.state != STATE_STOPPED) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
-             "SAVE REQUIRES GPS+STOP");
-    drawUiNow(false);
-    return;
-  }
-  char line[32];
-  snprintf(line, sizeof(line), "CMD:WP:SAVE:%u", index);
-  if (!printBoth(line)) {
-    gTelemetry.configLastOk = false;
-    snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s", "USB TX BUSY");
-    drawUiNow(false);
-  }
-}
-
-static void stopNavigation() {
-  // Navigation STOP shares the same fail-safe high-priority/latching contract
-  // as manual drive and steering STOP. A congested telemetry ring cannot lose it.
-  gNavStopPending = true;
-  serviceSafetyControlTx();
-}
-
-static void handleOk() {
-  if (gTelemetry.configPending)
-    return;
-  if (gUi.menu == UiMenuId::SYSTEM_TFT_TEST) {
-    (void)runTftSelfTest();
-    return;
-  }
-  const UiMenuId contextualTarget =
-      menuDetailActionTarget(gUi.menu, gUi.detailViewIndex);
-  if (contextualTarget != UiMenuId::SPLASH) {
-    setMenu(contextualTarget);
-    return;
-  }
-  if (menuEditKey(gUi.menu) != UiEditKey::NONE) {
-    applyEditor();
-    return;
-  }
-  if (gUi.menu == UiMenuId::NAV_MISSION) {
-    if (gUi.detailViewIndex == 0U)
-      goSelectedWaypoint();
-    else if (gUi.detailViewIndex == 1U)
-      saveSelectedWaypoint();
-    else
-      stopNavigation();
-    return;
-  }
-  if (gUi.menu == UiMenuId::NAV_MISSION_GO) {
-    goSelectedWaypoint();
-    return;
-  }
-  if (gUi.menu == UiMenuId::NAV_MISSION_SAVE) {
-    saveSelectedWaypoint();
-    return;
-  }
-  if (gUi.menu == UiMenuId::NAV_MISSION_STOP) {
-    stopNavigation();
-    return;
-  }
-}
-
-static void handleSoftKey(SoftKey key) {
-  if (key == SoftKey::NONE)
-    return;
-
-  if (key == SoftKey::MENU) {
-    goMainMenu();
-    return;
-  }
-
-  if (key == SoftKey::TOP_LEFT) {
-    if (gUi.menu == UiMenuId::MAIN_MENU) {
-      goHome();
-    } else if (menuIsOperatorDomainRoot(gUi.menu)) {
-      goMainMenu();
-    } else if (gUi.menu == UiMenuId::SYSTEM_ROOT) {
-      goHome();
-    } else if (gUi.menu != UiMenuId::HOME && gUi.menu != UiMenuId::OVERVIEW) {
-      setMenu(menuParent(gUi.menu));
-    }
-    return;
-  }
-
-  if (key == SoftKey::CARD_0 || key == SoftKey::CARD_1 ||
-      key == SoftKey::CARD_2) {
-    const uint8_t slot =
-        key == SoftKey::CARD_0 ? 0U : (key == SoftKey::CARD_1 ? 1U : 2U);
-    chooseVisibleCard(slot);
-    return;
-  }
-
-  if (gUi.menu == UiMenuId::ESC_MANUAL_TEST) {
-    if (key == SoftKey::TEST_STOP) {
-      stopAllManualTest();
-      drawUiNow(false);
-      return;
-    }
-    if (key == SoftKey::TEST_FORWARD) {
-      runDriveTest(true);
-      return;
-    }
-    if (key == SoftKey::TEST_REVERSE) {
-      runDriveTest(false);
-      return;
-    }
-    if (key == SoftKey::TEST_LEFT) {
-      runSteeringTest(-gTelemetry.steeringTestAngleDeg);
-      return;
-    }
-    if (key == SoftKey::TEST_RIGHT) {
-      runSteeringTest(gTelemetry.steeringTestAngleDeg);
-      return;
-    }
-    return;
-  }
-
-  if (menuHasChildren(gUi.menu)) {
-    if (key == SoftKey::LEFT)
-      selectRelative(-1);
-    else if (key == SoftKey::RIGHT)
-      selectRelative(+1);
-    return;
-  }
-
-  const UiEditKey editKey = menuEditKey(gUi.menu);
-  if (editKey != UiEditKey::NONE) {
-    if (gTelemetry.configPending)
-      return;
-    if (key == SoftKey::LEFT || key == SoftKey::RIGHT) {
-      if (!gUi.editing) {
-        gUi.editValue = actualEditValue(editKey);
-        gUi.editing = true;
-      }
-      changeDraft(editKey, key == SoftKey::LEFT ? -1 : +1);
-      return;
-    }
-    if (key == SoftKey::OK) {
-      handleOk();
-      return;
-    }
-    return;
-  }
-
-  if ((gUi.menu == UiMenuId::NAV_MISSION ||
-       menuDetailActionTarget(gUi.menu, gUi.detailViewIndex) != UiMenuId::SPLASH) &&
-      key == SoftKey::OK) {
-    handleOk();
-    return;
-  }
-
-  if (gUi.menu == UiMenuId::NAV_MISSION_GO ||
-      gUi.menu == UiMenuId::NAV_MISSION_SAVE) {
-    if (key == SoftKey::LEFT)
-      selectWaypoint(-1);
-    else if (key == SoftKey::RIGHT)
-      selectWaypoint(+1);
-    else if (key == SoftKey::OK)
-      handleOk();
-    return;
-  }
-  if (gUi.menu == UiMenuId::NAV_MISSION_STOP && key == SoftKey::OK) {
-    handleOk();
-    return;
-  }
-
-  if (key == SoftKey::LEFT)
-    selectRelative(-1);
-  else if (key == SoftKey::RIGHT)
-    selectRelative(+1);
-}
 
 static void handleTouch() {
   if (!tft.displayReady() || tft.displayFaulted())
     return;
-#if HMI_F4_LAYOUT
-  if (gF4Ui.pollTouch(gTelemetry)) {
+  if (HmiTouchService::active()) {
+    HmiTouchService::service();
+    if (HmiTouchService::consumeRedrawRequest()) { markUiDirty(); drawUiNow(true); }
+    return;
+  }
+  if (gOperatorUi.pollTouch(gTelemetry)) {
     ++gDiagnostics.touchActions;
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     drawUiNow(true);
     publishPage();
   }
   return;
-#else
-  const TouchEvent ev = pollTouch(gUi);
-  if (ev.key == SoftKey::NONE)
-    return;
-  lastUiInteractionMs = HAL_GetTick();
-
-  // STOP remains the only normal control that executes on initial press.
-  if (ev.type == TouchEvent::PRESS) {
-    if (gUi.menu == UiMenuId::ESC_MANUAL_TEST && ev.key == SoftKey::TEST_STOP) {
-      ++gDiagnostics.touchActions;
-      handleSoftKey(ev.key);
-    }
-    return;
-  }
-  if (ev.type == TouchEvent::HOLD) {
-    if (ev.key == SoftKey::MENU &&
-        (gUi.menu == UiMenuId::HOME || gUi.menu == UiMenuId::OVERVIEW)) {
-      ++gDiagnostics.touchActions;
-      enterServiceMode();
-      return;
-    }
-    if (isManualMotionKey(ev.key)) {
-      ++gDiagnostics.touchActions;
-      handleSoftKey(ev.key);
-    }
-    return;
-  }
-  if (ev.type == TouchEvent::REPEAT) {
-    ++gDiagnostics.touchActions;
-    handleSoftKey(ev.key);
-    return;
-  }
-  if (ev.type == TouchEvent::RELEASE) {
-    if (isManualMotionKey(ev.key)) {
-      ++gDiagnostics.touchActions;
-      stopAllManualTest();
-      drawUiNow(false);
-    } else {
-      ++gDiagnostics.touchActions;
-      handleSoftKey(ev.key);
-    }
-  }
-#endif
 }
 
 static bool eqIgnoreCase(const char *a, const char *b) {
@@ -1201,6 +681,11 @@ static void sanitizeTelemetry() {
   if (!std::isfinite(gTelemetry.objectDistanceM) ||
       gTelemetry.objectDistanceM < 0.0F)
     gTelemetry.objectDistanceM = 0.0F;
+  if (!std::isfinite(gTelemetry.goalRemainingDistanceM) ||
+      gTelemetry.goalRemainingDistanceM < 0.0F) {
+    gTelemetry.goalRemainingDistanceM = 0.0F;
+    gTelemetry.goalRemainingDistanceValid = false;
+  }
   if (!std::isfinite(gTelemetry.confidencePct))
     gTelemetry.confidencePct = 0.0F;
   gTelemetry.confidencePct = std::clamp(gTelemetry.confidencePct, 0.0F, 100.0F);
@@ -1261,7 +746,7 @@ static void markRosHeartbeat() {
     rosHeartbeatStable = false;
     gTelemetry.rosConnected = true;
     publishLinkState();
-    markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
+    markUiDirty();
   } else {
     const uint32_t gap = static_cast<uint32_t>(now - lastRosHeartbeatMs);
     if (gap <= ROS_HEARTBEAT_STABLE_GAP_MS) {
@@ -1280,7 +765,7 @@ static void markRosHeartbeat() {
 static void forceRosOffline() {
   // ROS/host loss is fail-closed for drive, steering, navigation, and fork.
 #if BTS_WINCH_ENABLED
-  BtsWinch::emergencyStop();
+  Bts7960Winch::emergencyStop();
 #endif
   stopAllManualTest();
   gNavStopPending = true;
@@ -1303,6 +788,8 @@ static void forceRosOffline() {
   gTelemetry.motionReady = false;
   gTelemetry.nav2Ready = false;
   gTelemetry.navigationStatus = NAV_STOPPED;
+  gTelemetry.goalRemainingDistanceM = 0.0F;
+  gTelemetry.goalRemainingDistanceValid = false;
   gTelemetry.escFresh = false;
   gTelemetry.perceptionFresh = false;
   gTelemetry.navigationFresh = false;
@@ -1321,7 +808,7 @@ static void forceRosOffline() {
     snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
              "ROS LINK LOST");
   }
-  markUiDirty(UI_DIRTY_ALL);
+  markUiDirty();
   if (wasConnected)
     publishLinkState();
 }
@@ -1362,14 +849,8 @@ static bool startsWithAny(const char *command, const char *const *prefixes,
 // authoritative exclusively from accepted, host-session-bound F4X3 frames.
 
 static void markUiForCommand(const char *command) {
-  uint8_t bits = UI_DIRTY_CONTENT;
-  static const char *const topPrefixes[] = {
-      "ROS:", "ESTOP:", "ESC:", "VESC_LINK:", "PER:", "MOTION:", "NAV2:"};
-  if (startsWithAny(command, topPrefixes,
-                    sizeof(topPrefixes) / sizeof(topPrefixes[0]))) {
-    bits = static_cast<uint8_t>(bits | UI_DIRTY_TOPBAR);
-  }
-  markUiDirty(bits);
+  (void)command;
+  markUiDirty();
 }
 
 static void updateDomainFreshness(uint32_t now) {
@@ -1401,7 +882,7 @@ static void updateDomainFreshness(uint32_t now) {
   if (oldEsc != gTelemetry.escFresh || oldPer != gTelemetry.perceptionFresh ||
       oldNav != gTelemetry.navigationFresh || oldExtendedMask != extendedFreshMask(gTelemetry) ||
       oldVbusValid != gTelemetry.vbusValid)
-    markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
+    markUiDirty();
 }
 
 static bool pinHigh(GPIO_TypeDef *port, uint16_t pin) {
@@ -1443,14 +924,12 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.stackHeadroomBytes = Board_StackHeadroomBytes();
   gDiagnostics.minStackHeadroomBytes = Board_MinStackHeadroomBytes();
   if (oldTftOk != gDiagnostics.tftOk)
-    markUiDirty(UI_DIRTY_TOPBAR | UI_DIRTY_CONTENT);
+    markUiDirty();
   gDiagnostics.rosHeartbeatAgeMs =
       gTelemetry.rosConnected ? static_cast<uint32_t>(now - lastRosHeartbeatMs)
                               : 0xFFFFFFFFUL;
 
-  gDiagnostics.gnssUartOk = gNeo3.gnssUartOk();
-  gDiagnostics.magOk = gNeo3.magOk();
-  // ESC is direct USB on the host; F411 owns no motor UART.
+  // ESC transport is direct USB on the host; F411 owns no ESC UART.
   gDiagnostics.vescUartOk = false;
   gDiagnostics.vescUartErrors = 0U;
   gDiagnostics.vescUartOverflow = 0U;
@@ -1458,56 +937,18 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.vescFrameErrors = 0U;
   gDiagnostics.vescRecoveryCount = 0U;
   gDiagnostics.vescLastFrameAgeMs = 0xFFFFFFFFUL;
-#ifdef NEO3PRO
+  gDiagnostics.gnssUartOk = false;
+  gDiagnostics.magOk = false;
   gDiagnostics.gnssUartErrors = 0U;
   gDiagnostics.gnssUartOverflow = 0U;
   gDiagnostics.gnssUartTxDropped = 0U;
-  gDiagnostics.magErrors = gNeo3.canDecodeErrors();
-  gDiagnostics.canOk = gNeo3.canOk();
-  gDiagnostics.canSpiErrors = gNeo3.canSpiErrors();
-  gDiagnostics.canRxFrames = gNeo3.canRxFrames();
-  gDiagnostics.canTransfers = gNeo3.canTransfers();
-  gDiagnostics.canDecodeErrors = gNeo3.canDecodeErrors();
-  gDiagnostics.canRecoveries = gNeo3.canRecoveries();
-  gDiagnostics.canOverflows = gNeo3.canOverflows();
-  gDiagnostics.canOscillatorMhz = gNeo3.canOscillatorMhz();
-  gDiagnostics.canLastFrameAgeMs = gNeo3.lastCanFrameAgeMs(now);
-#else
-  gDiagnostics.gnssUartErrors = gGnssUart.errorCount();
-  gDiagnostics.gnssUartOverflow = gGnssUart.overflowCount();
-  gDiagnostics.gnssUartTxDropped = gGnssUart.txDropped();
-  gDiagnostics.magErrors = gNeo3.magErrorCount();
-  gDiagnostics.canOk = false;
-  gDiagnostics.canSpiErrors = 0U;
-  gDiagnostics.canRxFrames = 0U;
-  gDiagnostics.canTransfers = 0U;
-  gDiagnostics.canDecodeErrors = 0U;
-  gDiagnostics.canRecoveries = 0U;
-  gDiagnostics.canOverflows = 0U;
-  gDiagnostics.canOscillatorMhz = 0U;
-  gDiagnostics.canLastFrameAgeMs = 0xFFFFFFFFUL;
-#endif
-
-#ifdef NEO3PRO
-  // Reuse legacy diagnostic fields to display the compact MCP2515 GPIO block.
-  gDiagnostics.pb12McpCs = pinHigh(GPIOB, GPIO_PIN_12);
-  gDiagnostics.pb10McpInt = pinHigh(GPIOB, GPIO_PIN_10);
-#else
-  gDiagnostics.pb12McpCs = false;
-  gDiagnostics.pb10McpInt = false;
-#endif
-  gDiagnostics.pa2GnssTx = pinHigh(GPIOA, GPIO_PIN_2);
-  gDiagnostics.pa3GnssRx = pinHigh(GPIOA, GPIO_PIN_3);
-  gDiagnostics.pb8I2cScl = pinHigh(GPIOB, GPIO_PIN_8);
-  gDiagnostics.pb9I2cSda = pinHigh(GPIOB, GPIO_PIN_9);
-#ifdef NEO3
-  gDiagnostics.pb12Safety = pinHigh(GPIOB, GPIO_PIN_12);
-  gDiagnostics.pb13SafetyLed = pinHigh(GPIOB, GPIO_PIN_13);
-#else
-  // NEO3PRO reuses PB12/PB13 for MCP2515 SPI2 block; legacy safety diagnostics are not applicable.
+  gDiagnostics.magErrors = 0U;
+  gDiagnostics.pa2GnssTx = false;
+  gDiagnostics.pa3GnssRx = false;
+  gDiagnostics.pb8I2cScl = false;
+  gDiagnostics.pb9I2cSda = false;
   gDiagnostics.pb12Safety = true;
-  gDiagnostics.pb13SafetyLed = pinHigh(GPIOB, GPIO_PIN_13);
-#endif
+  gDiagnostics.pb13SafetyLed = false;
   gDiagnostics.pa8Buzzer = pinHigh(GPIOA, GPIO_PIN_8);
   gDiagnostics.pa5SpiSck = pinHigh(GPIOA, GPIO_PIN_5);
   gDiagnostics.pa6SpiMiso = pinHigh(GPIOA, GPIO_PIN_6);
@@ -1542,7 +983,6 @@ static void setExternalMenu(const char *name) {
 static void handleSerialCommand(char *command);
 
 static bool motionSafeForHeavyMaintenance() {
-  gNeo3.pollSafetyIo();
   const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
   const bool stateSafe =
@@ -1550,7 +990,7 @@ static bool motionSafeForHeavyMaintenance() {
   return stateSafe && std::fabs(gTelemetry.speedKmh) <= 0.2F &&
          std::fabs(gTelemetry.driveActualMps) <= 0.02F && !navActive &&
          !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop &&
-         !gNeo3.safetyPressed();
+         true;
 }
 
 static bool runTftSelfTest() {
@@ -1559,21 +999,21 @@ static bool runTftSelfTest() {
     gTelemetry.configLastOk = false;
     snprintf(gTelemetry.configMessage, sizeof(gTelemetry.configMessage), "%s",
              "TFT TEST LOCKED");
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return false;
   }
-  invalidateTouchGeneration();
+  gOperatorUi.cancelTouch();
   const uint16_t colors[3] = {C_FAULT, C_READY, 0x001FU};
   for (uint8_t i = 0U; i < 3U; ++i) {
     if (!motionSafeForHeavyMaintenance()) {
-      markUiDirty(UI_DIRTY_ALL);
+      markUiDirty();
       drawUiNow(true);
       return false;
     }
     tft.fillScreen(colors[i]);
     Board_RealtimeDelayMs(200U);
   }
-  markUiDirty(UI_DIRTY_ALL);
+  markUiDirty();
   drawUiNow(true);
   return true;
 }
@@ -1592,8 +1032,11 @@ static bool commandAllowedBeforeHostSession(const char *command) {
   static const char *const exact[] = {
       "PING", "GET:STATE", "USB:STATUS", "USB:RECOVER", "FAULT:STATUS",
       "FW:INFO", "TFT:STATUS", "TOUCH:STATUS", "TFT:DIAG",
-      "BOOT:DFU:ARM", "BOOT:DFU:CONFIRM", "BOOT:DFU",
-      "NEO:STATUS", "NEO:CAN:STATUS"};
+      "STATUS", "WINCH STATUS", "LIMITS", "WINCH LIMITS", "LS", "LS STATUS",
+      "CONFIG", "GET CONFIG", "WINCH CONFIG",
+      "RAWTOUCH", "TOUCHTEST", "WINCH TOUCHTEST", "CALIBRATE", "TOUCHCAL", "CALSTOP",
+      "HMI RESET", "TFT RESET", "HMI REDRAW",
+      "BOOT:DFU:ARM", "BOOT:DFU:CONFIRM", "BOOT:DFU"};
   for (const char *item : exact)
     if (std::strcmp(command, item) == 0) return true;
   return false;
@@ -1605,8 +1048,7 @@ static void handleSerialCommand(char *command) {
   if (*command == '\0')
     return;
   const bool transportRealtime =
-      !std::strncmp(command, "VESC:", 5) || !std::strncmp(command, "NEO:", 4) ||
-      hostCommandRealtimeCritical(command);
+      !std::strncmp(command, "VESC:", 5) || hostCommandRealtimeCritical(command);
   if (gRealtimeParserActive && !transportRealtime) {
     (void)enqueueDeferredCommand(command);
     return;
@@ -1648,7 +1090,6 @@ static void handleSerialCommand(char *command) {
     forceRosOffline();
     publishPage();
     publishLinkState();
-    (void)gNeo3.handleHostCommand("NEO:STATUS");
     return;
   }
 
@@ -1666,20 +1107,23 @@ static void handleSerialCommand(char *command) {
   if (!std::strcmp(command, "WINCH STATUS") || !std::strcmp(command, "STATUS")) {
     char line[144];
     std::snprintf(line, sizeof(line),
-                  "WINCH:STATE=%s:PWM=%u:APPLIED=%u:TOP=%u:BOTTOM=%u:LIMIT_FAULT=%u:TIMEOUT=%u:GATE=%u",
-                  BtsWinch::stateName(), static_cast<unsigned>(BtsWinch::configuredPwm()),
-                  static_cast<unsigned>(BtsWinch::appliedPwm()),
-                  BtsWinch::topLimitActive()?1U:0U, BtsWinch::bottomLimitActive()?1U:0U,
-                  BtsWinch::limitFault()?1U:0U, BtsWinch::movementTimedOut()?1U:0U,
-                  BtsWinch::motionAllowed()?1U:0U);
+                  "WINCH:STATE=%s:PWM=%u:APPLIED=%u:TOP=%u:BOTTOM=%u:LS_READY=%u:LIMIT_FAULT=%u:TIMEOUT=%u:GATE=%u",
+                  Bts7960Winch::stateName(), static_cast<unsigned>(Bts7960Winch::configuredPwm()),
+                  static_cast<unsigned>(Bts7960Winch::appliedPwm()),
+                  Bts7960Winch::topLimitActive()?1U:0U, Bts7960Winch::bottomLimitActive()?1U:0U,
+                  Bts7960Winch::limitsReady()?1U:0U,
+                  Bts7960Winch::limitFault()?1U:0U, Bts7960Winch::movementTimedOut()?1U:0U,
+                  Bts7960Winch::motionAllowed()?1U:0U);
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
-  if (!std::strcmp(command, "LIMITS") || !std::strcmp(command, "WINCH LIMITS")) {
+  if (!std::strcmp(command, "LIMITS") || !std::strcmp(command, "WINCH LIMITS") ||
+      !std::strcmp(command, "LS") || !std::strcmp(command, "LS STATUS")) {
     char line[128];
-    std::snprintf(line, sizeof(line), "LIMITS:TOP=%u:BOTTOM=%u:TOP_RAW=%u:BOTTOM_RAW=%u",
-                  BtsWinch::topLimitActive()?1U:0U, BtsWinch::bottomLimitActive()?1U:0U,
-                  BtsWinch::topLimitRaw()?1U:0U, BtsWinch::bottomLimitRaw()?1U:0U);
+    std::snprintf(line, sizeof(line), "LIMITS:READY=%u:TOP=%u:BOTTOM=%u:TOP_RAW=%u:BOTTOM_RAW=%u",
+                  Bts7960Winch::limitsReady()?1U:0U,
+                  Bts7960Winch::topLimitActive()?1U:0U, Bts7960Winch::bottomLimitActive()?1U:0U,
+                  Bts7960Winch::topLimitRaw()?1U:0U, Bts7960Winch::bottomLimitRaw()?1U:0U);
     (void)gUsb.writeLineCritical(line,120U);
     return;
   }
@@ -1687,40 +1131,40 @@ static void handleSerialCommand(char *command) {
       !std::strcmp(command, "WINCH CONFIG")) {
     char line[80];
     std::snprintf(line, sizeof(line), "CONFIG:WINCH_PWM=%u",
-                  static_cast<unsigned>(BtsWinch::configuredPwm()));
+                  static_cast<unsigned>(Bts7960Winch::configuredPwm()));
     (void)gUsb.writeLineCritical(line,120U);
     return;
   }
   if (!std::strcmp(command, "CONFIG RESET") || !std::strcmp(command, "WINCH CONFIG RESET")) {
-    if (BtsWinch::resetPwm(true)) (void)gUsb.writeLineCritical("ACK:WINCH:CONFIG_RESET",120U);
+    if (Bts7960Winch::resetPwm(true)) (void)gUsb.writeLineCritical("ACK:WINCH:CONFIG_RESET",120U);
     else (void)gUsb.writeLineCritical("ERR:WINCH:CONFIG_RESET",120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
   if (!std::strcmp(command, "WINCH FAULT CLEAR")) {
     refreshWinchSafetyInputs();
-    if (BtsWinch::clearFault()) (void)gUsb.writeLineCritical("ACK:WINCH:FAULT_CLEAR",120U);
+    if (Bts7960Winch::clearFault()) (void)gUsb.writeLineCritical("ACK:WINCH:FAULT_CLEAR",120U);
     else (void)gUsb.writeLineCritical("ERR:WINCH:FAULT_CLEAR",120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
   if (!std::strncmp(command, "WINCH PWM ", 10) || !std::strncmp(command, "PWM ", 4)) {
     uint32_t pwm=0U; const char *value = command + (!std::strncmp(command,"WINCH PWM ",10)?10:4);
-    if (!parseU32Strict(value,pwm) || pwm>BtsWinch::PWM_MAX || !BtsWinch::setPwm(static_cast<uint16_t>(pwm),true))
+    if (!parseU32Strict(value,pwm) || pwm>Bts7960Winch::PWM_MAX || !Bts7960Winch::setPwm(static_cast<uint16_t>(pwm),true))
       (void)gUsb.writeLineCritical("ERR:WINCH:PWM",120U);
     else (void)gUsb.writeLineCritical("ACK:WINCH:PWM",120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
   refreshWinchSafetyInputs();
-  if (BtsWinch::processCommand(command)) {
+  if (Bts7960Winch::processCommand(command)) {
     const bool stopCommand = !std::strcmp(command, "STOP") ||
                              !std::strcmp(command, "WINCH STOP");
-    const bool accepted = stopCommand || BtsWinch::direction() != 0 ||
-                          BtsWinch::motionPending();
+    const bool accepted = stopCommand || Bts7960Winch::direction() != 0 ||
+                          Bts7960Winch::motionPending();
     (void)gUsb.writeLineCritical(
         accepted ? "ACK:WINCH:CMD" : "ERR:WINCH:SAFETY_GATE", 120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     return;
   }
 #endif
@@ -1728,10 +1172,6 @@ static void handleSerialCommand(char *command) {
   // F411 never owns ESC transport. Reject stale/legacy gateway commands explicitly.
   if (!strncmp(command, "VESC:", 5)) {
     (void)gUsb.writeLineCritical("ERR:VESC:DIRECT_ESC_ONLY", 120U);
-    return;
-  }
-  if (!strncmp(command, "NEO:", 4)) {
-    (void)gNeo3.handleHostCommand(command);
     return;
   }
   if (!strncmp(command, "ACK:CFG:", 8)) {
@@ -1898,6 +1338,26 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
+  if (HmiTouchService::handleCommand(command)) {
+#if BTS_WINCH_ENABLED
+    Bts7960Winch::emergencyStop();
+#endif
+    gOperatorUi.cancelTouch();
+    return;
+  }
+  if (!std::strcmp(command, "HMI RESET") || !std::strcmp(command, "TFT RESET") ||
+      !std::strcmp(command, "HMI REDRAW")) {
+#if BTS_WINCH_ENABLED
+    Bts7960Winch::emergencyStop();
+#endif
+    stopAllManualTest();
+    HmiTouchService::cancel();
+    gOperatorUi.cancelTouch();
+    (void)gUsb.writeLineCritical("ACK:HMI:RECOVERY", 120U);
+    beginDisplayInitialization();
+    return;
+  }
+
   if (!strcmp(command, "TFT:STATUS")) {
     char line[96];
     const bool idOk = (gTftControllerId & 0xFFFFU) == 0x9341U;
@@ -1923,7 +1383,7 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned>(tft.touchLastY()),
                   gDiagnostics.pa4TouchCs ? 1U : 0U,
                   static_cast<unsigned long>(gDiagnostics.spiBusConflictCount),
-                  menuWireName(gUi.menu));
+                  gOperatorUi.wireName());
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
@@ -1999,7 +1459,7 @@ static void handleSerialCommand(char *command) {
     }
     tft.testInjectTxFailureOnce();
     (void)gUsb.writeLineCritical("ACK:TEST:TX_FAIL_ARMED", 120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     drawUiNow(true);
     return;
   }
@@ -2014,12 +1474,12 @@ static void handleSerialCommand(char *command) {
       (void)gUsb.writeLineCritical("ERR:TFT:WAIT_SAFE", 120U);
       return;
     }
-    invalidateTouchGeneration();
+    gOperatorUi.cancelTouch();
     const bool verified = tft.verifyCurrentWriteClock();
     sampleDiagnostics(HAL_GetTick());
     (void)gUsb.writeLineCritical(verified ? "ACK:TFT:VERIFY" : "ERR:TFT:VERIFY",
                                  120U);
-    markUiDirty(UI_DIRTY_ALL);
+    markUiDirty();
     drawUiNow(true);
     return;
   }
@@ -2103,7 +1563,7 @@ static void handleSerialCommand(char *command) {
       }
     }
     updateExtendedFreshness(gTelemetry, telemetryNow);
-    markUiDirty(UI_DIRTY_CONTENT | UI_DIRTY_TOPBAR);
+    markUiDirty();
     enforceManualMotionGate();
     return;
   }
@@ -2159,7 +1619,7 @@ static void handleSerialCommand(char *command) {
     bool value = false; (void)parseBoolStrict(command + 6, value); gTelemetry.eStop = value;
     if (gTelemetry.eStop) {
 #if BTS_WINCH_ENABLED
-      BtsWinch::emergencyStop();
+      Bts7960Winch::emergencyStop();
 #endif
       if (driveTestRunning || steeringTestRunning)
         stopAllManualTest();
@@ -2230,6 +1690,12 @@ static void handleSerialCommand(char *command) {
     gTelemetry.motionReady = parseBool(command + 7);
   } else if (!strncmp(command, "NAV2:", 5)) {
     gTelemetry.nav2Ready = parseBool(command + 5);
+  } else if (!strncmp(command, "GOAL_DIST:", 10)) {
+    const float value = static_cast<float>(atof(command + 10));
+    gTelemetry.goalRemainingDistanceValid =
+        std::isfinite(value) && value >= 0.0F;
+    gTelemetry.goalRemainingDistanceM =
+        gTelemetry.goalRemainingDistanceValid ? value : 0.0F;
   } else if (!strncmp(command, "LOCSTATE:", 9)) {
     snprintf(gTelemetry.localizationState, sizeof(gTelemetry.localizationState),
              "%.23s", command + 9);
@@ -2306,10 +1772,6 @@ static void serviceDeferredCommands(uint8_t budget = 8U) {
     gDeferredCommandTail = static_cast<uint8_t>((gDeferredCommandTail + 1U) %
                                                 kDeferredCommandSlots);
     handleSerialCommand(command);
-#ifdef NEO3PRO
-    // Dedicated SPI2 allows sensor RX to preempt host command bursts safely.
-    gNeo3.pollRealtime();
-#endif
     gMainLoopHeartbeatMs = HAL_GetTick();
   }
 }
@@ -2318,7 +1780,7 @@ static void
 pollSerialGui(std::size_t byteBudget = 256U) {
   // Host traffic is untrusted with respect to realtime scheduling. Bound both
   // bytes and complete commands per service pass so a PC flood cannot starve
-  // MCP2515 RX, watchdog heartbeat, touch, or UI refresh.
+  // watchdog heartbeat, touch, safety control, or UI refresh.
   gUsb.poll();
   const uint32_t usbResync = gUsb.rxResyncCount();
   if (usbResync != gLastUsbRxResyncCount) {
@@ -2335,12 +1797,6 @@ pollSerialGui(std::size_t byteBudget = 256U) {
     if (value < 0)
       break;
     ++processed;
-#ifdef NEO3PRO
-    if ((processed & 0x1FU) == 0U) {
-      gNeo3.pollRealtime();
-      gMainLoopHeartbeatMs = HAL_GetTick();
-    }
-#endif
     const char c = static_cast<char>(value);
     if (c == '\r')
       continue;
@@ -2354,9 +1810,6 @@ pollSerialGui(std::size_t byteBudget = 256U) {
       if (serialRxLen > 0U) {
         handleSerialCommand(serialRx);
         --commandBudget;
-#ifdef NEO3PRO
-        gNeo3.pollRealtime();
-#endif
         gMainLoopHeartbeatMs = HAL_GetTick();
       }
       serialRxLen = 0U;
@@ -2469,9 +1922,8 @@ static void serviceDisplayRecovery(uint32_t now) {
     serviceDisplayInitialization(now);
     if (gDisplayInitState != DisplayInitState::IDLE || !gDisplayInitLastSuccess)
       return;
-    invalidateTouchGeneration();
-    invalidateUiChromeCaches();
-    markUiDirty(UI_DIRTY_ALL);
+    gOperatorUi.cancelTouch();
+        markUiDirty();
     if (splashComplete)
       drawUiNow(true);
     else
@@ -2488,8 +1940,10 @@ static void serviceDisplayRecovery(uint32_t now) {
    * motion session before resetting the controller, then rebuild the display
    * asynchronously so safety/VESC service continues each main-loop iteration.
    */
-  invalidateTouchGeneration();
-  invalidateUiChromeCaches();
+  gOperatorUi.cancelTouch();
+  #if BTS_WINCH_ENABLED
+  Bts7960Winch::emergencyStop();
+#endif
   if (driveTestRunning || steeringTestRunning ||
       gUi.menu == UiMenuId::ESC_MANUAL_TEST)
     stopAllManualTest();
@@ -2504,9 +1958,8 @@ static void restartSplash() {
   splashProgress = 0U;
   splashReadyText = false;
   lastFrameMs = 0U;
-  invalidateTouchGeneration();
-  invalidateUiChromeCaches();
-  uiDirtyMask = UI_DIRTY_NONE;
+  gOperatorUi.cancelTouch();
+    gUiDirty = false;
   lastUiRefreshMs = 0U;
   gTelemetry.systemStatus = SYS_INITIALIZING;
   if (tft.displayReady() && !tft.displayFaulted())
@@ -2554,16 +2007,14 @@ static bool updateProgressBar() {
   if (now - splashReadyMs >= READY_HOLD) {
     splashComplete = true;
     Board_ResetServiceGapStats();
-    beginTouch();
+    gOperatorUi.cancelTouch();
     if (gTelemetry.systemStatus == SYS_INITIALIZING)
       gTelemetry.systemStatus = SYS_NOT_READY;
     gUi.menu = UiMenuId::HOME;
     gUi.pageIndex = 0U;
     gUi.detailViewIndex = 0U;
     gUi.serviceSession = false;
-#if HMI_F4_LAYOUT
-    gF4Ui.reset();
-#endif
+    gOperatorUi.reset();
     drawUiNow(true);
     publishPage();
     return false;
@@ -2578,7 +2029,8 @@ int main() {
   Board_Init();
   gPersistentConfigReady = gPersistentConfig.begin();
 #if BTS_WINCH_ENABLED
-  BtsWinch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
+  Bts7960Winch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
+  HmiTouchService::begin(emitServiceLine);
 #endif
   bool usbInitOk = false;
   for (uint8_t attempt = 0U; attempt < 3U && !usbInitOk; ++attempt) {
@@ -2591,7 +2043,6 @@ int main() {
   HAL_Delay(50U);
   printBoth("ADV HMI native realtime menu firmware - boot");
   if (!gPersistentConfigReady) printBoth("ERR:EEPROM:INIT");
-  gNeo3.begin();
   Board_SetRealtimeServiceCallback([]() {
     // USB completion IRQ never starts the next packet. Service it here in
     // thread context so long TFT transfers cannot starve CDC progress.
@@ -2599,22 +2050,15 @@ int main() {
     serviceUsbTransportState();
     serviceSafetyControlTx();
     serviceManualDriveLease();
-    gNeo3.pollSafetyIo();
-#if BTS_WINCH_ENABLED
+  #if BTS_WINCH_ENABLED
     refreshWinchSafetyInputs();
-    BtsWinch::update();
+    Bts7960Winch::update();
 #endif
-    // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
-    // on dedicated SPI2, so bounded receive draining can safely run from the
-    // cooperative realtime-yield path without touching the HMI SPI1 bus.
+    // Keep USB/HMI command parsing live during long TFT bursts so safety and
+    // transport state continue to progress while pixels are being written.
     gRealtimeParserActive = true;
     pollSerialGui(512U);
     gRealtimeParserActive = false;
-#ifdef NEO3PRO
-    // HMI display writes yield here between bounded chunks. Drain MCP2515 on
-    // its dedicated SPI2; the realtime path never resets/probes the CAN bus.
-    gNeo3.pollRealtime();
-#endif
   });
   (void)initDisplayBlockingAtBoot();
   restartSplash();
@@ -2628,10 +2072,9 @@ int main() {
      * chains in its ISR, so this is a fallback rather than the realtime clock.
      */
     Board_Service();
-    gNeo3.pollSafetyIo();
-#if BTS_WINCH_ENABLED
+  #if BTS_WINCH_ENABLED
     refreshWinchSafetyInputs();
-    BtsWinch::update();
+    Bts7960Winch::update();
 #endif
     gUsb.service();
     serviceUsbTransportState();
@@ -2647,12 +2090,10 @@ int main() {
       __DSB();
       gCrashCounterCleared = true;
     }
-    gNeo3.pollSafetyIo();
-    pollSerialGui();
+      pollSerialGui();
     serviceDeferredCommands();
 
 
-    gNeo3.poll();
     Board_Service();
     pollSerialGui();
     serviceDeferredCommands();
@@ -2674,7 +2115,7 @@ int main() {
       lastSystemUiMarkMs = serviceNow;
       markUiDirty();
     }
-    if (splashComplete && isSystemMenu(gUi.menu) && !touchWasDown &&
+    if (splashComplete && menuDomain(gUi.menu) == UiDomain::SYSTEM && !gOperatorUi.touchDown() &&
         static_cast<uint32_t>(serviceNow - lastUiInteractionMs) >=
             DIAGNOSTIC_AUTO_RETURN_MS) {
       setMenu(UiMenuId::HOME);
@@ -2691,7 +2132,7 @@ int main() {
         lastTouchPollMs = now;
         handleTouch();
       }
-      if (uiDirtyMask != UI_DIRTY_NONE && !touchWasDown &&
+      if (gUiDirty && !gOperatorUi.touchDown() &&
           static_cast<uint32_t>(now - lastUiRefreshMs) >= DISPLAY_REFRESH_MS) {
         drawUiNow(false);
       }

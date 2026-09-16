@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 import argparse, glob, os, signal, struct, subprocess, sys, time, zlib
 from pathlib import Path
 

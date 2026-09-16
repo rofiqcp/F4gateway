@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
-h=Path(__file__).parents[1]/'include/UsbCdcPort.h'
+h=Path(__file__).parents[1]/'src/usb/UsbCdcPort.h'
 c=Path(__file__).parents[1]/'src/usb/UsbCdcPort.cpp'
 m=Path(__file__).parents[1]/'src/main.cpp'
 s=h.read_text()+c.read_text()+m.read_text()

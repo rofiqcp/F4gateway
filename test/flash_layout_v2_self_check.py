@@ -9,7 +9,6 @@ boot_ini = (ROOT / "bootloader/platformio.ini").read_text()
 linker = (ROOT / "linker/STM32F411CEUX_APP.ld").read_text()
 boot = (ROOT / "bootloader/src/main.c").read_text()
 isr = (ROOT / "bootloader/src/isr_vectors.S").read_text()
-dna = (ROOT / "src/DroneCanDnaDatabase.h").read_text()
 cfg = (ROOT / "src/PersistentConfigStore.h").read_text()
 usbd = (ROOT / "bootloader/include/usbd_conf.h").read_text()
 cdc = (ROOT / "scripts/cdc_boot_upload.py").read_text()
@@ -29,7 +28,7 @@ checks = {
 }
 checks.update({
     "EEPROM partition": "kStorageBase = 0x08064000UL" in cfg and "kStorageLimit = 0x0806C000UL" in cfg,
-    "DNA partition": "kStorageBase = 0x0807E000UL" in dna and "kStorageLimit = 0x08080000UL" in dna,
+    "legacy persistent tail reserved": "DNA_OFFSET" in (ROOT / "scripts/compose_persistent_image.py").read_text(),
     "sector7 never erased": "FLASH_SECTOR_7" not in boot.split("static bool begin_update", 1)[1].split("static bool program_chunk", 1)[0],
     "app sectors1-6 erased": "FLASH_SECTOR_1" in boot and "s <= FLASH_SECTOR_6" in boot,
     "manifest capacity guard": "manifest_next_address() == 0U" in boot,

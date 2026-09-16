@@ -12,7 +12,7 @@ fi
 
 # The runtime/boot CDC permissions are deliberately scoped to this exact
 # BlackPill. Never grant USBDEVFS reset access to arbitrary 0483:5740 devices.
-BLACKPILL_SERIAL="338133833134"
+BLACKPILL_SERIAL="33A433673134"
 for pid in 5740 5741; do
   if ! grep -Eq "SUBSYSTEM==\"usb\".*idProduct}==\"${pid}\".*ATTR\{serial\}==\"${BLACKPILL_SERIAL}\"" "$RULE_SRC"; then
     echo "Refusing to install non identity-scoped BlackPill rule for PID ${pid}" >&2

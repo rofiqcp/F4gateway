@@ -5,7 +5,6 @@ ROOT = Path(__file__).resolve().parents[1]
 h = (ROOT / "src/PersistentConfigStore.h").read_text()
 cpp = (ROOT / "src/PersistentConfigStore.cpp").read_text()
 main = (ROOT / "src/main.cpp").read_text()
-dna = (ROOT / "src/DroneCanDnaDatabase.h").read_text()
 
 checks = {
     "EEPROM base": "kStorageBase = 0x08064000UL" in h,
@@ -17,7 +16,7 @@ checks = {
     "payload verified before commit": "memcmp(reinterpret_cast<const void *>(address), &record, 44U)" in cpp,
     "same-value write elided": "std::memcmp(current.data, data, length) == 0" in cpp,
     "no sector erase": "HAL_FLASHEx_Erase" not in cpp,
-    "DNA separated": "kStorageBase = 0x0807E000UL" in dna,
+    "MCP persistent DB removed": not (ROOT / "src/DroneCanDnaDatabase.h").exists(),
 }
 
 checks.update({

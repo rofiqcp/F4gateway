@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-h=(root/'include/UsbCdcPort.h').read_text()
+h=(root/'src/usb/UsbCdcPort.h').read_text()
 c=(root/'src/usb/UsbCdcPort.cpp').read_text()
 cdc=(root/'src/usb/usbd_cdc_if.cpp').read_text()
 main=(root/'src/main.cpp').read_text()
