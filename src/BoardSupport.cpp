@@ -4,13 +4,17 @@
 #include <cstring>
 
 SPI_HandleTypeDef hspi1{};
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 SPI_HandleTypeDef hspi2{};
 #endif
 I2C_HandleTypeDef hi2c1{};
 UART_HandleTypeDef huart2{};
 TIM_HandleTypeDef htim1{};
 TIM_HandleTypeDef htim11{};
+#if BTS_WINCH_ENABLED
+TIM_HandleTypeDef htim2{};
+TIM_HandleTypeDef htim4{};
+#endif
 
 HalUartPort gGnssUart(&huart2, USART2);
 
@@ -41,7 +45,7 @@ bool g_test_spi_init_fail_once = false;
 BoardSpiOwner g_spi_owner = BoardSpiOwner::NONE;
 uint32_t g_spi_contention_count = 0U;
 uint32_t g_spi_recovery_count = 0U;
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 volatile bool g_mcp_int_pending = false;
 volatile uint32_t g_mcp_int_count = 0U;
 void (*g_mcp_fast_irq_callback)() = nullptr;
@@ -95,6 +99,11 @@ void Gpio_Init() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET);
 #endif
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+#if BTS_WINCH_ENABLED
+  // BTS7960 outputs must be LOW before timers take ownership.
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+#endif
 
   GPIO_InitTypeDef gpio{};
   gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2;
@@ -106,7 +115,16 @@ void Gpio_Init() {
   gpio.Pin = GPIO_PIN_4;
   HAL_GPIO_Init(GPIOA, &gpio);
 
-#ifdef NEO3PRO
+#if BTS_WINCH_ENABLED
+  // Same electrical contract as /forclift/f4: active-low limit switches.
+  gpio.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_PULLUP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &gpio);
+#endif
+
+#if defined(NEO3PRO) && MCP2515_ENABLED
   // NEO3PRO MCP2515 is kept as one compact PB10 + PB12..PB15 wiring block:
   // PB10=INT (active-low), PB12=CS (active-low), PB13=SCK, PB14=MISO, PB15=MOSI.
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
@@ -184,7 +202,7 @@ void Spi1_InitBootOrFatal() {
     FatalError();
 }
 
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 bool Spi2_Configure() {
   __HAL_RCC_SPI2_CLK_ENABLE();
   GPIO_InitTypeDef gpio{};
@@ -272,6 +290,34 @@ void Timers_Init() {
   gpio.Alternate = GPIO_AF1_TIM1;
   HAL_GPIO_Init(GPIOA, &gpio);
 
+#if BTS_WINCH_ENABLED
+  // BTS7960: PB8=TIM4_CH3 RPWM, PA2=TIM2_CH3 LPWM.
+  // Internal PWM contract remains 0..1023; ARR=999 gives exact 1 kHz at 96 MHz.
+  __HAL_RCC_TIM2_CLK_ENABLE();
+  __HAL_RCC_TIM4_CLK_ENABLE();
+  TIM_OC_InitTypeDef btsOc{};
+  btsOc.OCMode = TIM_OCMODE_PWM1;
+  btsOc.Pulse = 0U;
+  btsOc.OCPolarity = TIM_OCPOLARITY_HIGH;
+  btsOc.OCFastMode = TIM_OCFAST_DISABLE;
+  for (TIM_HandleTypeDef *timer : {&htim2, &htim4}) {
+    timer->Instance = timer == &htim2 ? TIM2 : TIM4;
+    timer->Init.Prescaler = 95U;
+    timer->Init.CounterMode = TIM_COUNTERMODE_UP;
+    timer->Init.Period = 999U;
+    timer->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    timer->Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_PWM_Init(timer) != HAL_OK ||
+        HAL_TIM_PWM_ConfigChannel(timer, &btsOc, TIM_CHANNEL_3) != HAL_OK) FatalError();
+  }
+  GPIO_InitTypeDef btsGpio{};
+  btsGpio.Mode = GPIO_MODE_AF_PP; btsGpio.Pull = GPIO_NOPULL; btsGpio.Speed = GPIO_SPEED_FREQ_LOW;
+  btsGpio.Pin = GPIO_PIN_2; btsGpio.Alternate = GPIO_AF1_TIM2; HAL_GPIO_Init(GPIOA, &btsGpio);
+  btsGpio.Pin = GPIO_PIN_8; btsGpio.Alternate = GPIO_AF2_TIM4; HAL_GPIO_Init(GPIOB, &btsGpio);
+  (void)HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  (void)HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+#endif
+
   htim11.Instance = TIM11;
   htim11.Init.Prescaler = 9599U;
   htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
@@ -327,7 +373,7 @@ void Board_Init() {
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootOrFatal();
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
   Spi2_InitBootOrFatal();
 #endif
 #ifdef NEO3
@@ -440,7 +486,7 @@ void Board_RealtimeService() {
    * per ms, but a latched MCP2515 interrupt bypasses that throttle so its two
    * tiny RX buffers are drained at the next HMI chunk boundary. */
   const uint32_t now = HAL_GetTick();
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
   const bool urgent_can = Board_McpIntPending();
 #else
   const bool urgent_can = false;
@@ -483,7 +529,7 @@ void Board_TestInjectSpiInitFailureOnce() { g_test_spi_init_fail_once = true; }
 void Board_SpiDeselectAll() {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);  // TFT CS
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);  // XPT2046 CS
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET); // MCP2515 CS
 #endif
 }
@@ -551,7 +597,7 @@ bool Board_ReinitSpi1() {
   return Spi1_Configure() && hspi1.State == HAL_SPI_STATE_READY;
 }
 
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 bool Board_ReinitSpi2() {
   // Dedicated MCP2515 bus recovery; never disturbs TFT/touch on SPI1.
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_12, GPIO_PIN_SET);
@@ -605,6 +651,19 @@ void Board_WatchdogStart() {
   (void)HAL_TIM_Base_Start_IT(&htim11);
 }
 void Board_WatchdogStop() { (void)HAL_TIM_Base_Stop_IT(&htim11); }
+
+#if BTS_WINCH_ENABLED
+void Board_BtsSetPwm(uint16_t rpwm, uint16_t lpwm) {
+  rpwm = std::min<uint16_t>(rpwm, 1023U);
+  lpwm = std::min<uint16_t>(lpwm, 1023U);
+  // Never energize both half-bridge directions at once.
+  if (rpwm != 0U && lpwm != 0U) { rpwm = 0U; lpwm = 0U; }
+  const uint32_t r = (static_cast<uint32_t>(rpwm) * 999U + 511U) / 1023U;
+  const uint32_t l = (static_cast<uint32_t>(lpwm) * 999U + 511U) / 1023U;
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, r);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, l);
+}
+#endif
 
 void Board_BuzzerStart(uint16_t frequency_hz, uint16_t duration_ms) {
   if (frequency_hz < 20U)
@@ -887,7 +946,7 @@ extern "C" void SysTick_Handler() {
 
 extern "C" void USART2_IRQHandler() { HAL_UART_IRQHandler(&huart2); }
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 extern "C" void EXTI15_10_IRQHandler() {
   if (__HAL_GPIO_EXTI_GET_IT(GPIO_PIN_10) != RESET) {
     __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_10);

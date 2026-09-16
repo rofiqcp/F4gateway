@@ -4,6 +4,8 @@
 // ============================================================================
 
 #include "BoardSupport.h"
+#include "BtsWinch.h"
+#include "FeatureConfig.h"
 #include "BuildInfo.h"
 #include "HmiDisplay.h"
 #include "PersistentConfigStore.h"
@@ -37,6 +39,9 @@
 #include "TouchButtons.h"
 #include "UiMenu.h"
 #include "UiShell.h"
+#if HMI_F4_LAYOUT
+#include "F4V2Ui.h"
+#endif
 #ifndef HMI_LEGACY_UART
 #define HMI_LEGACY_UART 0
 #endif
@@ -44,6 +49,9 @@
 HmiDisplay tft;
 VehicleTelemetry gTelemetry = defaultTelemetry();
 UiState gUi;
+#if HMI_F4_LAYOUT
+F4V2Ui gF4Ui;
+#endif
 #ifdef NEO3PRO
 Neo3ProSensors gNeo3;
 #else
@@ -229,6 +237,28 @@ static void latchAllSafetyStops() {
   gNavStopPending = true;
 }
 
+static void refreshWinchSafetyInputs() {
+#if BTS_WINCH_ENABLED
+  const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
+                         gTelemetry.navigationStatus == NAV_NAVIGATING;
+  const bool stationary =
+      (gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY) &&
+      std::fabs(gTelemetry.speedKmh) <= 0.2F &&
+      std::fabs(gTelemetry.driveActualMps) <= 0.02F;
+  BtsWinch::SafetyInputs safety{};
+  safety.emergencyStop = gTelemetry.eStop;
+  safety.physicalSafetyValid = !gNeo3.safetyPressed();
+  safety.systemFault = gTelemetry.systemStatus == SYS_FAULT ||
+                       gTelemetry.state == STATE_FAULT;
+  safety.hostSessionValid =
+      gUsb.connected() && gUsb.hostSessionEstablished();
+  safety.commandSessionValid = gTelemetry.rosConnected;
+  safety.vehicleSafe =
+      stationary && !navActive && !driveTestRunning && !steeringTestRunning;
+  BtsWinch::setSafetyInputs(safety);
+#endif
+}
+
 static void forceRosOffline();
 
 static void serviceUsbTransportState() {
@@ -262,7 +292,11 @@ static void serviceSafetyControlTx() {
 
 static void publishPage() {
   char line[48];
+#if HMI_F4_LAYOUT
+  snprintf(line, sizeof(line), "PAGE:%s", gF4Ui.wireName());
+#else
   snprintf(line, sizeof(line), "PAGE:%s", menuWireName(gUi.menu));
+#endif
   printBoth(line);
 }
 
@@ -349,7 +383,12 @@ static void drawUiNow(bool full = true) {
   const VehicleTelemetry telemetrySnapshot = gTelemetry;
   const uint32_t started_ms = HAL_GetTick();
   tft.beginFrame();
+#if HMI_F4_LAYOUT
+  (void)uiSnapshot; (void)dirtyMask;
+  gF4Ui.draw(telemetrySnapshot);
+#else
   drawUiFrame(uiSnapshot, telemetrySnapshot, full, dirtyMask);
+#endif
   tft.endFrame();
   ++gDiagnostics.uiFrames;
   if (full)
@@ -915,6 +954,15 @@ static void handleSoftKey(SoftKey key) {
 static void handleTouch() {
   if (!tft.displayReady() || tft.displayFaulted())
     return;
+#if HMI_F4_LAYOUT
+  if (gF4Ui.pollTouch(gTelemetry)) {
+    ++gDiagnostics.touchActions;
+    markUiDirty(UI_DIRTY_ALL);
+    drawUiNow(true);
+    publishPage();
+  }
+  return;
+#else
   const TouchEvent ev = pollTouch(gUi);
   if (ev.key == SoftKey::NONE)
     return;
@@ -956,6 +1004,7 @@ static void handleTouch() {
       handleSoftKey(ev.key);
     }
   }
+#endif
 }
 
 static bool eqIgnoreCase(const char *a, const char *b) {
@@ -1229,8 +1278,10 @@ static void markRosHeartbeat() {
 }
 
 static void forceRosOffline() {
-  // ROS/host loss is fail-closed for BOTH manual and autonomous authority.
-  // stopAllManualTest() re-latches drive/steer; navigation STOP is independent.
+  // ROS/host loss is fail-closed for drive, steering, navigation, and fork.
+#if BTS_WINCH_ENABLED
+  BtsWinch::emergencyStop();
+#endif
   stopAllManualTest();
   gNavStopPending = true;
   serviceSafetyControlTx();
@@ -1609,6 +1660,70 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLineHighPriority("ERR:HOST:SESSION:REQUIRED");
     return;
   }
+
+#if BTS_WINCH_ENABLED
+  // Local BTS7960 fork/winch contract, aligned with /forclift/f4.
+  if (!std::strcmp(command, "WINCH STATUS") || !std::strcmp(command, "STATUS")) {
+    char line[144];
+    std::snprintf(line, sizeof(line),
+                  "WINCH:STATE=%s:PWM=%u:APPLIED=%u:TOP=%u:BOTTOM=%u:LIMIT_FAULT=%u:TIMEOUT=%u:GATE=%u",
+                  BtsWinch::stateName(), static_cast<unsigned>(BtsWinch::configuredPwm()),
+                  static_cast<unsigned>(BtsWinch::appliedPwm()),
+                  BtsWinch::topLimitActive()?1U:0U, BtsWinch::bottomLimitActive()?1U:0U,
+                  BtsWinch::limitFault()?1U:0U, BtsWinch::movementTimedOut()?1U:0U,
+                  BtsWinch::motionAllowed()?1U:0U);
+    (void)gUsb.writeLineCritical(line, 120U);
+    return;
+  }
+  if (!std::strcmp(command, "LIMITS") || !std::strcmp(command, "WINCH LIMITS")) {
+    char line[128];
+    std::snprintf(line, sizeof(line), "LIMITS:TOP=%u:BOTTOM=%u:TOP_RAW=%u:BOTTOM_RAW=%u",
+                  BtsWinch::topLimitActive()?1U:0U, BtsWinch::bottomLimitActive()?1U:0U,
+                  BtsWinch::topLimitRaw()?1U:0U, BtsWinch::bottomLimitRaw()?1U:0U);
+    (void)gUsb.writeLineCritical(line,120U);
+    return;
+  }
+  if (!std::strcmp(command, "CONFIG") || !std::strcmp(command, "GET CONFIG") ||
+      !std::strcmp(command, "WINCH CONFIG")) {
+    char line[80];
+    std::snprintf(line, sizeof(line), "CONFIG:WINCH_PWM=%u",
+                  static_cast<unsigned>(BtsWinch::configuredPwm()));
+    (void)gUsb.writeLineCritical(line,120U);
+    return;
+  }
+  if (!std::strcmp(command, "CONFIG RESET") || !std::strcmp(command, "WINCH CONFIG RESET")) {
+    if (BtsWinch::resetPwm(true)) (void)gUsb.writeLineCritical("ACK:WINCH:CONFIG_RESET",120U);
+    else (void)gUsb.writeLineCritical("ERR:WINCH:CONFIG_RESET",120U);
+    markUiDirty(UI_DIRTY_ALL);
+    return;
+  }
+  if (!std::strcmp(command, "WINCH FAULT CLEAR")) {
+    refreshWinchSafetyInputs();
+    if (BtsWinch::clearFault()) (void)gUsb.writeLineCritical("ACK:WINCH:FAULT_CLEAR",120U);
+    else (void)gUsb.writeLineCritical("ERR:WINCH:FAULT_CLEAR",120U);
+    markUiDirty(UI_DIRTY_ALL);
+    return;
+  }
+  if (!std::strncmp(command, "WINCH PWM ", 10) || !std::strncmp(command, "PWM ", 4)) {
+    uint32_t pwm=0U; const char *value = command + (!std::strncmp(command,"WINCH PWM ",10)?10:4);
+    if (!parseU32Strict(value,pwm) || pwm>BtsWinch::PWM_MAX || !BtsWinch::setPwm(static_cast<uint16_t>(pwm),true))
+      (void)gUsb.writeLineCritical("ERR:WINCH:PWM",120U);
+    else (void)gUsb.writeLineCritical("ACK:WINCH:PWM",120U);
+    markUiDirty(UI_DIRTY_ALL);
+    return;
+  }
+  refreshWinchSafetyInputs();
+  if (BtsWinch::processCommand(command)) {
+    const bool stopCommand = !std::strcmp(command, "STOP") ||
+                             !std::strcmp(command, "WINCH STOP");
+    const bool accepted = stopCommand || BtsWinch::direction() != 0 ||
+                          BtsWinch::motionPending();
+    (void)gUsb.writeLineCritical(
+        accepted ? "ACK:WINCH:CMD" : "ERR:WINCH:SAFETY_GATE", 120U);
+    markUiDirty(UI_DIRTY_ALL);
+    return;
+  }
+#endif
 
   // F411 never owns ESC transport. Reject stale/legacy gateway commands explicitly.
   if (!strncmp(command, "VESC:", 5)) {
@@ -2042,8 +2157,13 @@ static void handleSerialCommand(char *command) {
     bool value = false; (void)parseBoolStrict(command + 10, value); gTelemetry.vescConnected = value;
   } else if (!strncmp(command, "ESTOP:", 6)) {
     bool value = false; (void)parseBoolStrict(command + 6, value); gTelemetry.eStop = value;
-    if (gTelemetry.eStop && (driveTestRunning || steeringTestRunning))
-      stopAllManualTest();
+    if (gTelemetry.eStop) {
+#if BTS_WINCH_ENABLED
+      BtsWinch::emergencyStop();
+#endif
+      if (driveTestRunning || steeringTestRunning)
+        stopAllManualTest();
+    }
   } else if (!strncmp(command, "MANUAL_SPEED:", 13)) {
     gTelemetry.manualSpeedPct = static_cast<uint8_t>(
         std::clamp(atoi(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
@@ -2441,6 +2561,9 @@ static bool updateProgressBar() {
     gUi.pageIndex = 0U;
     gUi.detailViewIndex = 0U;
     gUi.serviceSession = false;
+#if HMI_F4_LAYOUT
+    gF4Ui.reset();
+#endif
     drawUiNow(true);
     publishPage();
     return false;
@@ -2454,6 +2577,9 @@ int main() {
   __HAL_RCC_CLEAR_RESET_FLAGS();
   Board_Init();
   gPersistentConfigReady = gPersistentConfig.begin();
+#if BTS_WINCH_ENABLED
+  BtsWinch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
+#endif
   bool usbInitOk = false;
   for (uint8_t attempt = 0U; attempt < 3U && !usbInitOk; ++attempt) {
     usbInitOk = gUsb.begin();
@@ -2474,6 +2600,10 @@ int main() {
     serviceSafetyControlTx();
     serviceManualDriveLease();
     gNeo3.pollSafetyIo();
+#if BTS_WINCH_ENABLED
+    refreshWinchSafetyInputs();
+    BtsWinch::update();
+#endif
     // Keep USB/HMI command parsing live during TFT bursts. NEO3PRO MCP2515 is
     // on dedicated SPI2, so bounded receive draining can safely run from the
     // cooperative realtime-yield path without touching the HMI SPI1 bus.
@@ -2498,6 +2628,11 @@ int main() {
      * chains in its ISR, so this is a fallback rather than the realtime clock.
      */
     Board_Service();
+    gNeo3.pollSafetyIo();
+#if BTS_WINCH_ENABLED
+    refreshWinchSafetyInputs();
+    BtsWinch::update();
+#endif
     gUsb.service();
     serviceUsbTransportState();
     serviceSafetyControlTx();

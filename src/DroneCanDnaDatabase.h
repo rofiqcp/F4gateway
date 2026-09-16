@@ -1,5 +1,6 @@
 #pragma once
-#ifdef NEO3PRO
+#include "FeatureConfig.h"
+#if defined(NEO3PRO) && MCP2515_ENABLED
 #include <cstddef>
 #include <cstdint>
 

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "FeatureConfig.h"
+
 #ifdef NEO3PRO
+#if MCP2515_ENABLED
 
 #include <cstdint>
 #include <cmath>
@@ -411,4 +414,29 @@ private:
   uint32_t sensor_usb_drops_{0U};
 };
 
-#endif
+#else
+class Neo3ProSensors {
+public:
+  bool begin() { return true; }
+  void poll() {}
+  void pollRealtime() {}
+  void irqFastDrain() {}
+  void pollSafetyIo() {}
+  bool safetyPressed() const { return false; }
+  bool handleHostCommand(const char *) { return false; }
+  bool gnssUartOk() const { return false; }
+  bool magOk() const { return false; }
+  bool canOk() const { return false; }
+  uint32_t magErrorCount() const { return 0U; }
+  uint32_t canSpiErrors() const { return 0U; }
+  uint32_t canRxFrames() const { return 0U; }
+  uint32_t canTransfers() const { return 0U; }
+  uint32_t canDecodeErrors() const { return 0U; }
+  uint32_t canRecoveries() const { return 0U; }
+  uint32_t canOverflows() const { return 0U; }
+  uint8_t canOscillatorMhz() const { return 0U; }
+  uint32_t lastCanFrameAgeMs(uint32_t) const { return 0xFFFFFFFFUL; }
+  uint8_t primaryNodeId() const { return 0U; }
+};
+#endif // MCP2515_ENABLED
+#endif // NEO3PRO

@@ -1,17 +1,23 @@
 #pragma once
 
 #include "stm32f4xx_hal.h"
+#include "FeatureConfig.h"
 #include <cstddef>
 #include <cstdint>
 
 extern SPI_HandleTypeDef hspi1;
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 extern SPI_HandleTypeDef hspi2;
 #endif
 extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim11;
+#if BTS_WINCH_ENABLED
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim4;
+void Board_BtsSetPwm(uint16_t rpwm, uint16_t lpwm);
+#endif
 
 enum class BoardSpiOwner : uint8_t {
   NONE = 0U,
@@ -42,7 +48,7 @@ void Board_RealtimeService();
 void Board_DelayUs(uint32_t microseconds);
 void Board_RealtimeDelayMs(uint32_t duration_ms);
 bool Board_ReinitSpi1();
-#ifdef NEO3PRO
+#if defined(NEO3PRO) && MCP2515_ENABLED
 bool Board_ReinitSpi2();
 void Board_SetMcpFastIrqCallback(void (*callback)());
 bool Board_McpIntPending();
