@@ -51,7 +51,7 @@ inline UiDomain menuDomain(UiMenuId id) {
   case UiMenuId::ESC_STEERING_CAL:
   case UiMenuId::ESC_DRIVE_LIVE:
   case UiMenuId::ESC_MANUAL_SPEED:
-  case UiMenuId::ESC_DRIVE_SCALE:
+  case UiMenuId::ESC_ERPM_PER_MPS:
     return UiDomain::ESC;
   case UiMenuId::PERCEPTION_ROOT:
   case UiMenuId::PERCEPTION_OVERVIEW:
@@ -166,7 +166,7 @@ inline const char *menuTitle(UiMenuId id) {
   case UiMenuId::ESC_STEERING_CAL: return "STEERING CAL";
   case UiMenuId::ESC_DRIVE_LIVE: return "DRIVE LIVE";
   case UiMenuId::ESC_MANUAL_SPEED: return "MANUAL SPEED";
-  case UiMenuId::ESC_DRIVE_SCALE: return "DRIVE SCALE";
+  case UiMenuId::ESC_ERPM_PER_MPS: return "eRPM / m/s";
   case UiMenuId::PERCEPTION_DETECTION_LIVE: return "DETECTION LIVE";
   case UiMenuId::PERCEPTION_INFERENCE: return "INFERENCE";
   case UiMenuId::NAV_IMU: return "IMU";
@@ -238,7 +238,7 @@ inline UiMenuId menuParent(UiMenuId id) {
   case UiMenuId::ESC_STEERING_CAL: return UiMenuId::ESC_STEERING;
   case UiMenuId::ESC_DRIVE_LIVE:
   case UiMenuId::ESC_MANUAL_SPEED:
-  case UiMenuId::ESC_DRIVE_SCALE: return UiMenuId::ESC_DRIVE;
+  case UiMenuId::ESC_ERPM_PER_MPS: return UiMenuId::ESC_DRIVE;
   case UiMenuId::PERCEPTION_DETECTION_LIVE: return UiMenuId::PERCEPTION_DETECTION;
   case UiMenuId::PERCEPTION_INFERENCE: return UiMenuId::PERCEPTION_CAMERA;
   case UiMenuId::NAV_IMU:
@@ -313,7 +313,7 @@ inline UiMenuId menuDetailActionTarget(UiMenuId id, uint8_t view) {
   if (id == UiMenuId::ESC_STEERING && view == 2U)
     return UiMenuId::ESC_STEERING_TEST_ANGLE;
   if (id == UiMenuId::ESC_DRIVE && view == 1U)
-    return UiMenuId::ESC_DRIVE_SCALE;
+    return UiMenuId::ESC_ERPM_PER_MPS;
   if (id == UiMenuId::ESC_DRIVE && view == 2U)
     return UiMenuId::ESC_MANUAL_SPEED;
   if (id == UiMenuId::PERCEPTION_CAMERA && view == 0U)
@@ -324,7 +324,7 @@ inline UiMenuId menuDetailActionTarget(UiMenuId id, uint8_t view) {
 inline const char *menuDetailActionLabel(UiMenuId id, uint8_t view) {
   const UiMenuId target = menuDetailActionTarget(id, view);
   if (target == UiMenuId::ESC_STEERING_TEST_ANGLE) return "ANGLE";
-  if (target == UiMenuId::ESC_DRIVE_SCALE) return "SCALE";
+  if (target == UiMenuId::ESC_ERPM_PER_MPS) return "eRPM/m/s";
   if (target == UiMenuId::ESC_MANUAL_SPEED) return "SPEED";
   if (target == UiMenuId::PERCEPTION_INFERENCE) return "INFER";
   return nullptr;
@@ -348,7 +348,7 @@ inline uint8_t menuViewCount(UiMenuId id) {
   case UiMenuId::SYSTEM_TFT_TEST:
   case UiMenuId::ESC_STEERING_TEST_ANGLE:
   case UiMenuId::ESC_MANUAL_SPEED:
-  case UiMenuId::ESC_DRIVE_SCALE:
+  case UiMenuId::ESC_ERPM_PER_MPS:
   case UiMenuId::PERCEPTION_INFERENCE:
   case UiMenuId::NAV_MISSION_GO:
   case UiMenuId::NAV_MISSION_SAVE:
@@ -363,7 +363,7 @@ inline UiEditKey menuEditKey(UiMenuId id) {
   if (id == UiMenuId::ESC_MODE) return UiEditKey::OPERATOR_MODE;
   if (id == UiMenuId::ESC_MANUAL_SPEED) return UiEditKey::MANUAL_SPEED_PCT;
   if (id == UiMenuId::ESC_STEERING_TEST_ANGLE) return UiEditKey::STEERING_TEST_DEG;
-  if (id == UiMenuId::ESC_DRIVE_SCALE) return UiEditKey::DRIVE_SCALE;
+  if (id == UiMenuId::ESC_ERPM_PER_MPS) return UiEditKey::ERPM_PER_MPS;
   if (id == UiMenuId::PERCEPTION_INFERENCE) return UiEditKey::PERCEPTION_INFERENCE;
   return UiEditKey::NONE;
 }

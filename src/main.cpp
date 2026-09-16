@@ -453,8 +453,8 @@ static float actualEditValue(UiEditKey key) {
     return static_cast<float>(gTelemetry.manualSpeedPct);
   case UiEditKey::STEERING_TEST_DEG:
     return gTelemetry.steeringTestAngleDeg;
-  case UiEditKey::DRIVE_SCALE:
-    return gTelemetry.driveScale;
+  case UiEditKey::ERPM_PER_MPS:
+    return gTelemetry.driveErpmPerMps;
   case UiEditKey::PERCEPTION_INFERENCE:
     return gTelemetry.perceptionInference ? 1.0F : 0.0F;
   case UiEditKey::NONE:
@@ -477,9 +477,9 @@ static void changeDraft(UiEditKey key, int direction) {
     gUi.editValue =
         std::clamp(gUi.editValue + direction * STEER_TEST_ANGLE_STEP_DEG,
                    STEER_TEST_ANGLE_MIN_DEG, STEER_TEST_ANGLE_MAX_DEG);
-  } else if (key == UiEditKey::DRIVE_SCALE) {
-    gUi.editValue = std::clamp(gUi.editValue + direction * DRIVE_SCALE_STEP,
-                               DRIVE_SCALE_MIN, DRIVE_SCALE_MAX);
+  } else if (key == UiEditKey::ERPM_PER_MPS) {
+    gUi.editValue = std::clamp(gUi.editValue + direction * ERPM_PER_MPS_STEP,
+                               ERPM_PER_MPS_MIN, ERPM_PER_MPS_MAX);
   }
   drawUiNow(true);
 }
@@ -492,8 +492,8 @@ static const char *editWireKey(UiEditKey key) {
     return "MANSPD";
   case UiEditKey::STEERING_TEST_DEG:
     return "STEERTEST";
-  case UiEditKey::DRIVE_SCALE:
-    return "DRVSCALE";
+  case UiEditKey::ERPM_PER_MPS:
+    return "ERPMMPS";
   case UiEditKey::PERCEPTION_INFERENCE:
     return "PERINF";
   case UiEditKey::NONE:
@@ -526,8 +526,8 @@ static void requestConfig(UiEditKey key, float value) {
     txn = gUi.nextTxn++;
   char line[80];
   const char *keyName = editWireKey(key);
-  if (key == UiEditKey::DRIVE_SCALE) {
-    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%.4f", txn, keyName, value);
+  if (key == UiEditKey::ERPM_PER_MPS) {
+    snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%.0f", txn, keyName, value);
   } else if (key == UiEditKey::STEERING_TEST_DEG) {
     snprintf(line, sizeof(line), "CMD:CFG:%u:%s:%.1f", txn, keyName, value);
   } else if (key == UiEditKey::MANUAL_SPEED_PCT) {
@@ -1034,9 +1034,9 @@ static bool legacyTelemetryPayloadValid(const char *command) {
 
   // Every scalar that can refresh a domain must be fully parseable and finite.
   static const char *const floatPrefixes[] = {
-      "SPD:", "DRIVE_TGT:", "DRIVE_ACT:", "RPM:", "ERPM:", "VBUS:",
+      "SPD:", "DRIVE_TGT:", "DRIVE_ACT:", "ERPM:", "VBUS:",
       "STEER_TARGET:", "STEER_ACTUAL:", "STEER_ERR:", "CFGSTEERTEST:",
-      "CFGDRVSCALE:", "LAT:", "LON:", "HDOP:", "HACC:", "GAGE:", "HEAD:",
+      "CFGERPMMPS:", "LAT:", "LON:", "HDOP:", "HACC:", "GAGE:", "HEAD:",
       "GYROZ:", "FPS:", "DIST:", "CONF:"};
   for (const char *prefix : floatPrefixes) {
     if ((p = after(prefix)) != nullptr) {
@@ -1045,7 +1045,7 @@ static bool legacyTelemetryPayloadValid(const char *command) {
       if (!std::strcmp(prefix, "LON:") && (d < -180.0 || d > 180.0)) return false;
       if (!std::strcmp(prefix, "CFGSTEERTEST:") &&
           (d < STEER_TEST_ANGLE_MIN_DEG || d > STEER_TEST_ANGLE_MAX_DEG)) return false;
-      if (!std::strcmp(prefix, "CFGDRVSCALE:") && (d < DRIVE_SCALE_MIN || d > DRIVE_SCALE_MAX)) return false;
+      if (!std::strcmp(prefix, "CFGERPMMPS:") && (d < ERPM_PER_MPS_MIN || d > ERPM_PER_MPS_MAX)) return false;
       if (!std::strcmp(prefix, "CONF:") && (d < 0.0 || d > 100.0)) return false;
       if ((!std::strcmp(prefix, "HDOP:") || !std::strcmp(prefix, "HACC:") ||
            !std::strcmp(prefix, "GAGE:") || !std::strcmp(prefix, "FPS:") ||
@@ -1155,8 +1155,8 @@ static void sanitizeTelemetry() {
   if (!std::isfinite(gTelemetry.confidencePct))
     gTelemetry.confidencePct = 0.0F;
   gTelemetry.confidencePct = std::clamp(gTelemetry.confidencePct, 0.0F, 100.0F);
-  if (!std::isfinite(gTelemetry.driveScale))
-    gTelemetry.driveScale = 1.0F;
+  if (!std::isfinite(gTelemetry.driveErpmPerMps))
+    gTelemetry.driveErpmPerMps = 8000.0F;
   if (!std::isfinite(gTelemetry.steeringTestAngleDeg))
     gTelemetry.steeringTestAngleDeg = STEER_TEST_ANGLE_DEFAULT_DEG;
   gTelemetry.steeringTestAngleDeg =
@@ -2016,8 +2016,6 @@ static void handleSerialCommand(char *command) {
     gTelemetry.driveTargetMps = static_cast<float>(atof(command + 10));
   } else if (!strncmp(command, "DRIVE_ACT:", 10)) {
     gTelemetry.driveActualMps = static_cast<float>(atof(command + 10));
-  } else if (!strncmp(command, "RPM:", 4)) {
-    gTelemetry.motorRpm = static_cast<float>(atof(command + 4));
   } else if (!strncmp(command, "ERPM:", 5)) {
     gTelemetry.motorErpm = static_cast<float>(atof(command + 5));
   } else if (!strncmp(command, "VBUS:", 5)) {
@@ -2051,8 +2049,8 @@ static void handleSerialCommand(char *command) {
         std::clamp(atoi(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
   } else if (!strncmp(command, "CFGSTEERTEST:", 13)) {
     gTelemetry.steeringTestAngleDeg = static_cast<float>(atof(command + 13));
-  } else if (!strncmp(command, "CFGDRVSCALE:", 13)) {
-    gTelemetry.driveScale = static_cast<float>(atof(command + 13));
+  } else if (!strncmp(command, "CFGERPMMPS:", 13)) {
+    gTelemetry.driveErpmPerMps = static_cast<float>(atof(command + 13));
   } else if (!strncmp(command, "CFGPERINF:", 10)) {
     gTelemetry.perceptionInference = parseBool(command + 10);
   } else if (!strncmp(command, "GPS:", 4)) {

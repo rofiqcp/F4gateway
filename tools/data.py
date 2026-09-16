@@ -61,6 +61,9 @@ class DirectRecorder:
         self.nav_cfg = self.root / "src/navigation/config"
         self.mag_cfg = self._load_yaml_params(self.nav_cfg / "mag_heading.yaml", "mag_heading_fusion")
         self.imu_cfg = self._load_yaml_params(self.nav_cfg / "imu.yaml", "data_imu_node")
+        self.data_heading_cfg = self._load_data_heading(self.nav_cfg / "data_heading_calibration.yaml")
+        self.align_cfg = self.data_heading_cfg.get("cross_sensor_alignment", {})
+        self.yah_align_trim_rad = 0.0
         self.start_wall_ns = time.time_ns(); self.start_mono_ns = time.monotonic_ns(); self.sample_seq = 0
         self.lock = open("/tmp/agv_f4_direct_data.lock", "w")
         try:
@@ -114,6 +117,31 @@ class DirectRecorder:
             return yaml.safe_load(path.read_text())[key]["ros__parameters"]
         except Exception:
             return {}
+
+    @staticmethod
+    def _load_data_heading(path: Path) -> Dict[str, Any]:
+        try:
+            root = yaml.safe_load(path.read_text()) or {}
+            return root.get("data_heading_calibration", {}) if isinstance(root, dict) else {}
+        except Exception:
+            return {}
+
+    def _align_yah(self, yaw_enu: float, neo_enu: float = NAN) -> float:
+        if not math.isfinite(yaw_enu): return yaw_enu
+        c = self.align_cfg if isinstance(self.align_cfg, dict) else {}
+        if not c.get("enabled", False): return yaw_enu
+        base = apply_lut(yaw_enu, c.get("heading_lut_input_rad", []), c.get("heading_lut_correction_rad", []))
+        a = c.get("adaptive_trim", {}) if isinstance(c.get("adaptive_trim", {}), dict) else {}
+        gz = self.imu_gyro_rps[2] if len(self.imu_gyro_rps) >= 3 else NAN
+        if a.get("enabled", False) and math.isfinite(neo_enu) and math.isfinite(gz):
+            if abs(gz) <= float(a.get("gyro_stationary_max_rps", 0.02)):
+                current = norm_angle(base + self.yah_align_trim_rad)
+                err = norm_angle(neo_enu - current)
+                if abs(err) <= float(a.get("update_gate_rad", 0.0872664626)):
+                    alpha = max(0.0, min(1.0, float(a.get("alpha", 0.10))))
+                    limit = abs(float(a.get("max_abs_trim_rad", 0.0349065850)))
+                    self.yah_align_trim_rad = max(-limit, min(limit, self.yah_align_trim_rad + alpha * err))
+        return norm_angle(base + self.yah_align_trim_rad)
 
     @staticmethod
     def _takeover(dev: str) -> None:
@@ -235,7 +263,7 @@ class DirectRecorder:
         return out
 
     def _snapshot_configs(self) -> None:
-        for p in (self.nav_cfg / "mag_heading.yaml", self.nav_cfg / "yahboom_mag_calibration.yaml", self.nav_cfg / "imu.yaml",
+        for p in (self.nav_cfg / "mag_heading.yaml", self.nav_cfg / "data_heading_calibration.yaml", self.nav_cfg / "yahboom_mag_calibration.yaml", self.nav_cfg / "imu.yaml",
                   self.f4root / ".pio/build/blackpill_f411ce_neo3pro/firmware.identity.json"):
             if p.exists():
                 try: shutil.copy2(p, self.outdir / p.name)
@@ -332,8 +360,14 @@ class DirectRecorder:
         qx = float(m[0])*(mx-float(bx)) + float(m[1])*(my-float(by)); qy = float(m[2])*(mx-float(bx)) + float(m[3])*(my-float(by))
         roll = math.radians(self.imu_rpy[0]) if math.isfinite(self.imu_rpy[0]) else 0.0
         pitch = math.radians(self.imu_rpy[1]) if math.isfinite(self.imu_rpy[1]) else 0.0
-        cr,sr,cp,sp = math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
-        xh = qx*cp + mz*sp; yh = qx*sr*sp + qy*cr - mz*sr*cp
+        # Planar XY calibration normalizes qx/qy, while mz remains in uT.
+        # Mixing normalized XY with raw Z corrupts heading units. Until a full
+        # 3-D calibration is enabled, use the calibrated planar vector directly.
+        if bool(p.get("neo3_full_calibration_enabled", False)):
+            cr,sr,cp,sp = math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
+            xh = qx*cp + mz*sp; yh = qx*sr*sp + qy*cr - mz*sr*cp
+        else:
+            xh, yh = qx, qy
         if math.hypot(xh,yh) < 1e-9: return
         yaw = norm_angle(float(p.get("neo3_mag_yaw_sign",1.0))*math.atan2(yh,xh) + float(p.get("neo3_mag_yaw_offset_rad",0.0)) - float(p.get("magnetic_declination_rad",0.0)))
         if p.get("neo3_heading_lut_enabled", False): yaw = apply_lut(yaw, p.get("neo3_heading_lut_input_rad",[]), p.get("neo3_heading_lut_correction_rad",[]))
@@ -390,6 +424,8 @@ class DirectRecorder:
         utc_ok=gnss_fresh and gp.get("time_std",-1)==2 and gp.get("gnss_us",0)>0
         meas=int(gp.get("gnss_us",0))*1000 if utc_ok else wall
         accnorm=math.sqrt(sum(x*x for x in self.imu_acc)) if imu_fresh and all(math.isfinite(x) for x in self.imu_acc) else NAN
+        yah_out=self._align_yah(self.yah_yaw,self.neo_yaw if self.neo_valid and mag_fresh else NAN) if imu_fresh else NAN
+        yah_source="yahboom_calibrated_direct+neo3_cross_align" if imu_fresh and self.align_cfg.get("enabled",False) else ("yahboom_calibrated_direct" if imu_fresh else "yahboom_stale")
         row={k:"" for k in UNIFIED_FIELDS}
         row.update({
             "source_mode":"DIRECT_SERIAL", "sample_seq":self.sample_seq, "wall_utc_ns":wall, "utc_iso8601":iso_utc(wall), "ros_now_ns":-1, "monotonic_ns":mono,
@@ -409,7 +445,7 @@ class DirectRecorder:
             "neo3_mag_x_ut":self.neo_mag[0] if mag_fresh else NAN, "neo3_mag_y_ut":self.neo_mag[1] if mag_fresh else NAN,
             "neo3_mag_z_ut":self.neo_mag[2] if mag_fresh else NAN, "neo3_mag_norm_ut":self.neo_norm if mag_fresh else NAN,
             "neo3_node_id":gp.get("node",-1),
-            "yaw_yahboom_deg":deg(self.yah_yaw) if imu_fresh else NAN, "yaw_yahboom_source":"yahboom_calibrated_direct" if imu_fresh else "yahboom_stale", "yaw_yahboom_valid":int(self.yah_valid and imu_fresh),
+            "yaw_yahboom_deg":deg(yah_out) if imu_fresh else NAN, "yaw_yahboom_source":yah_source, "yaw_yahboom_valid":int(self.yah_valid and imu_fresh),
             "yah_mag_raw_x_lsb":self.yah_mag_raw[0] if imu_fresh else NAN, "yah_mag_raw_y_lsb":self.yah_mag_raw[1] if imu_fresh else NAN, "yah_mag_raw_z_lsb":self.yah_mag_raw[2] if imu_fresh else NAN, "yah_mag_corrected_x":self.yah_q[0] if imu_fresh else NAN, "yah_mag_corrected_y":self.yah_q[1] if imu_fresh else NAN, "yahboom_corrected_norm":self.yah_norm if imu_fresh else NAN,
             "yaw_inertial_deg":deg(self.inertial_yaw) if imu_fresh else NAN, "yaw_inertial_source":self.inertial_source+":gyro_integral" if imu_fresh else "imu_stale", "yaw_inertial_valid":int(imu_fresh and math.isfinite(self.inertial_yaw)), "gyro_integrated_yaw_deg":deg(self.inertial_yaw) if imu_fresh else NAN,
             "yaw_gnss_heading_deg":deg(self.gnss_heading) if gnss_fresh else NAN, "yaw_imu_orientation_deg":self.imu_rpy[2] if imu_fresh else NAN, "map_yaw_from_enu_deg":0.0,

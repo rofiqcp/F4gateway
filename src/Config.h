@@ -71,7 +71,7 @@ enum class UiMenuId : uint8_t {
   ESC_STEERING_CAL,
   ESC_DRIVE_LIVE,
   ESC_MANUAL_SPEED,
-  ESC_DRIVE_SCALE,
+  ESC_ERPM_PER_MPS,
   PERCEPTION_DETECTION_LIVE,
   PERCEPTION_INFERENCE,
   NAV_IMU,
@@ -113,7 +113,7 @@ enum class SoftKey : uint8_t {
   TEST_LEFT, TEST_FORWARD, TEST_STOP, TEST_RIGHT, TEST_REVERSE
 };
 enum class UiEditKey : uint8_t {
-  NONE = 0, OPERATOR_MODE, MANUAL_SPEED_PCT, STEERING_TEST_DEG, DRIVE_SCALE, PERCEPTION_INFERENCE
+  NONE = 0, OPERATOR_MODE, MANUAL_SPEED_PCT, STEERING_TEST_DEG, ERPM_PER_MPS, PERCEPTION_INFERENCE
 };
 
 static constexpr uint8_t HMI_WAYPOINT_COUNT = 4;
@@ -210,9 +210,9 @@ static constexpr float STEER_TEST_ANGLE_DEFAULT_DEG = 20.0F;
 static constexpr float STEER_TEST_ANGLE_MIN_DEG = 5.0F;
 static constexpr float STEER_TEST_ANGLE_MAX_DEG = 30.0F;
 static constexpr float STEER_TEST_ANGLE_STEP_DEG = 5.0F;
-static constexpr float DRIVE_SCALE_MIN = 0.20F;
-static constexpr float DRIVE_SCALE_MAX = 5.00F;
-static constexpr float DRIVE_SCALE_STEP = 0.01F;
+static constexpr float ERPM_PER_MPS_MIN = 100.0F;
+static constexpr float ERPM_PER_MPS_MAX = 50000.0F;
+static constexpr float ERPM_PER_MPS_STEP = 100.0F;
 
 // Touch dan refresh: parser telemetry tetap jauh lebih cepat dari paint TFT.
 static constexpr uint16_t TOUCH_THRESHOLD = 200;

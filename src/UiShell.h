@@ -306,7 +306,7 @@ inline void drawMenuNodeIcon(UiMenuId id, int cx, int cy, uint16_t c,
     iconGauge(cx, cy, c, bg);
     break;
   case UiMenuId::ESC_MODE:
-  case UiMenuId::ESC_DRIVE_SCALE:
+  case UiMenuId::ESC_ERPM_PER_MPS:
   case UiMenuId::ESC_CALIBRATION:
   case UiMenuId::PERCEPTION_CALIBRATION:
     iconGear(cx, cy, c, bg);
@@ -732,16 +732,16 @@ inline void drawEditor(const UiState &ui, const VehicleTelemetry &d,
                         ? static_cast<float>(d.manualSpeedPct)
                         : (key == UiEditKey::STEERING_TEST_DEG
                                ? d.steeringTestAngleDeg
-                               : (key == UiEditKey::DRIVE_SCALE
-                                      ? d.driveScale
+                               : (key == UiEditKey::ERPM_PER_MPS
+                                      ? d.driveErpmPerMps
                                       : (d.perceptionInference ? 1.0F
                                                                : 0.0F)))));
   if (key == UiEditKey::MANUAL_SPEED_PCT)
     snprintf(value, sizeof(value), "%.0f %%", shown);
   else if (key == UiEditKey::STEERING_TEST_DEG)
     snprintf(value, sizeof(value), "%.0f deg", shown);
-  else if (key == UiEditKey::DRIVE_SCALE)
-    snprintf(value, sizeof(value), "%.3f", shown);
+  else if (key == UiEditKey::ERPM_PER_MPS)
+    snprintf(value, sizeof(value), "%.0f eRPM/(m/s)", shown);
   else if (key == UiEditKey::OPERATOR_MODE)
     snprintf(value, sizeof(value), "%s", shown > 0.5F ? "MANUAL" : "AUTO");
   else
@@ -878,8 +878,8 @@ inline void drawEscLeaf(UiMenuId id, const UiState &ui,
       drawMetricRow(135, "ESC", d.escFresh && d.escReady ? "READY" : "WAIT",
                     d.escFresh && d.escReady ? C_READY : C_WARNING);
     } else if (view == 1U) {
-      snprintf(a, sizeof(a), "%.0f / %.0f", d.motorErpm, d.motorRpm);
-      drawMetricRow(48, "eRPM / RPM", a, C_INK);
+      snprintf(a, sizeof(a), "%.0f", d.motorErpm);
+      drawMetricRow(48, "Motor eRPM", a, C_INK);
       drawMetricRow(77, "VESC link", d.vescConnected ? "ONLINE" : "OFFLINE",
                     healthColor(d.vescConnected));
       if (d.escx.power.valid) {
@@ -932,15 +932,15 @@ inline void drawEscLeaf(UiMenuId id, const UiState &ui,
     if (view == 0U) {
       drawMetricFloat(48, "Target", d.driveTargetMps, "m/s", 2, C_ACCENT);
       drawMetricFloat(77, "Actual", d.driveActualMps, "m/s", 2, C_ACCENT);
-      snprintf(a, sizeof(a), "%.0f", d.motorErpm); drawMetricRow(106, "Electrical RPM", a, C_INK);
-      snprintf(a, sizeof(a), "%.0f", d.motorRpm); drawMetricRow(135, "Mechanical RPM", a, C_INK);
+      snprintf(a, sizeof(a), "%.0f", d.motorErpm); drawMetricRow(106, "Motor eRPM", a, C_INK);
+      drawMetricFloat(135, "Vehicle speed", d.driveActualMps, "m/s", 2, C_INK);
     } else if (view == 1U) {
-      snprintf(a, sizeof(a), "%.3f", d.driveScale); drawMetricRow(48, "Drive scale", a, C_ACCENT);
+      snprintf(a, sizeof(a), "%.0f", d.driveErpmPerMps); drawMetricRow(48, "eRPM / (m/s)", a, C_ACCENT);
       if (fabsf(d.driveActualMps) > 0.02F) {
         snprintf(a, sizeof(a), "%.0f", d.motorErpm / d.driveActualMps);
         drawMetricRow(77, "eRPM per m/s", a, C_INK);
       } else drawNaRow(77, "eRPM per m/s");
-      drawNaRow(106, "Odometry scale");
+      drawMetricFloat(106, "Vehicle speed", d.driveActualMps, "m/s", 2, C_INK);
       if (d.vbusValid) drawMetricFloat(135, "Vbus", d.vbusV, "V", 1, C_INK); else drawNaRow(135, "Vbus");
     } else {
       snprintf(a, sizeof(a), "%u %%", static_cast<unsigned>(d.manualSpeedPct));
@@ -985,14 +985,14 @@ inline void drawEscLeaf(UiMenuId id, const UiState &ui,
 
   if (id == UiMenuId::ESC_MOTOR_TELEMETRY) {
     if (!d.escx.motors.valid) {
-      drawNaRow(48, "Motor telemetry"); drawNaRow(77, "Current"); drawNaRow(106, "RPM");
+      drawNaRow(48, "Motor telemetry"); drawNaRow(77, "Current"); drawNaRow(106, "eRPM");
       drawMetricRow(135, "Data", "N/A", C_DISABLED); return;
     }
     if (view == 0U) {
       snprintf(a, sizeof(a), "%.1f V / %.1f A", d.escx.leftVbusV, d.escx.leftCurrentA);
       drawMetricRow(48, "LEFT Vbus/current", a, C_INK);
       snprintf(a, sizeof(a), "%.0f / %.1f%%", d.escx.leftRpm, 100.0F*d.escx.leftDuty);
-      drawMetricRow(77, "LEFT RPM / duty", a, C_INK);
+      drawMetricRow(77, "LEFT eRPM / duty", a, C_INK);
       snprintf(a, sizeof(a), "%u", static_cast<unsigned>(d.escx.leftFault));
       drawMetricRow(106, "LEFT fault", a, d.escx.leftFault ? C_FAULT : C_READY);
       drawMetricRow(135, "LEFT role", "STEERING", C_ACCENT);
@@ -1000,7 +1000,7 @@ inline void drawEscLeaf(UiMenuId id, const UiState &ui,
       snprintf(a, sizeof(a), "%.1f V / %.1f A", d.escx.rightVbusV, d.escx.rightCurrentA);
       drawMetricRow(48, "RIGHT Vbus/current", a, C_INK);
       snprintf(a, sizeof(a), "%.0f / %.1f%%", d.escx.rightRpm, 100.0F*d.escx.rightDuty);
-      drawMetricRow(77, "RIGHT RPM / duty", a, C_INK);
+      drawMetricRow(77, "RIGHT eRPM / duty", a, C_INK);
       snprintf(a, sizeof(a), "%u", static_cast<unsigned>(d.escx.rightFault));
       drawMetricRow(106, "RIGHT fault", a, d.escx.rightFault ? C_FAULT : C_READY);
       drawMetricRow(135, "RIGHT role", "DRIVE", C_ACCENT);
@@ -1047,7 +1047,7 @@ inline void drawEscLeaf(UiMenuId id, const UiState &ui,
       drawNaRow(48,"Left reference"); drawNaRow(77,"Center reference"); drawNaRow(106,"Right reference");
       drawMetricRow(135,"Action","ROS WEB / SERVICE",C_DISABLED);
     } else {
-      snprintf(a,sizeof(a),"%.3f",d.driveScale); drawMetricRow(48,"Drive scale",a,C_ACCENT);
+      snprintf(a,sizeof(a),"%.0f",d.driveErpmPerMps); drawMetricRow(48,"eRPM / (m/s)",a,C_ACCENT);
       drawNaRow(77,"Wheel radius");
       if(fabsf(d.driveActualMps)>0.02F){snprintf(a,sizeof(a),"%.0f",d.motorErpm/d.driveActualMps);drawMetricRow(106,"eRPM per m/s",a,C_INK);}else drawNaRow(106,"eRPM per m/s");
       drawNaRow(135,"Odometry scale");
@@ -1467,7 +1467,7 @@ inline void drawNavigationLeaf(UiMenuId id, const UiState &ui,
     if(!d.navx.odom.valid){drawNaRow(48,"Odom X");drawNaRow(77,"Odom Y");drawNaRow(106,"Odom yaw");drawMetricRow(135,"Data","N/A",C_DISABLED);return;}
     if(view==0U){drawMetricFloat(48,"Linear speed",d.navx.odomLinearMps,"m/s",2,C_ACCENT);drawMetricFloat(77,"Yaw rate",d.navx.odomYawRateRps,"rad/s",2,C_INK);drawMetricFloat(106,"Steering",d.steeringActualDeg,"deg",1,C_INK);drawMetricRow(135,"Data",groupStatus(d.navx.odom),menuCardStatusColor(groupStatus(d.navx.odom)));}
     else if(view==1U){drawMetricFloat(48,"Odom X",d.navx.odomX,"m",2,C_INK);drawMetricFloat(77,"Odom Y",d.navx.odomY,"m",2,C_INK);drawMetricFloat(106,"Odom yaw",d.navx.odomYawDeg,"deg",1,C_ACCENT);formatAgeMs(d.navx.odom.sourceAgeMs,text,sizeof(text));drawMetricRow(135,"Odom age",text,ageColor(d.navx.odom.sourceAgeMs));}
-    else{drawMetricFloat(48,"ESC speed",d.driveActualMps,"m/s",2,C_INK);drawMetricFloat(77,"Filtered speed",d.navx.odomLinearMps,"m/s",2,C_ACCENT);drawMetricFloat(106,"Speed error",d.driveActualMps-d.navx.odomLinearMps,"m/s",2,C_INK);snprintf(text,sizeof(text),"%.3f",d.driveScale);drawMetricRow(135,"Drive scale",text,C_ACCENT);}return;
+    else{drawMetricFloat(48,"ESC speed",d.driveActualMps,"m/s",2,C_INK);drawMetricFloat(77,"Filtered speed",d.navx.odomLinearMps,"m/s",2,C_ACCENT);drawMetricFloat(106,"Speed error",d.driveActualMps-d.navx.odomLinearMps,"m/s",2,C_INK);snprintf(text,sizeof(text),"%.0f",d.driveErpmPerMps);drawMetricRow(135,"eRPM/(m/s)",text,C_ACCENT);}return;
   }
   if (id == UiMenuId::NAV_MISSION) {
     const uint8_t index=d.selectedWaypoint<HMI_WAYPOINT_COUNT?d.selectedWaypoint:0U;

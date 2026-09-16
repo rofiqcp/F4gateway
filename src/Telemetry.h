@@ -101,7 +101,6 @@ struct VehicleTelemetry {
   float driveTargetMps{0.0F};
   float driveActualMps{0.0F};
   float motorErpm{0.0F};
-  float motorRpm{0.0F};
   float vbusV{0.0F};
   bool vbusValid{false};
   float steeringTargetDeg{0.0F};
@@ -112,7 +111,7 @@ struct VehicleTelemetry {
   bool escReady{false};
   bool encoderReady{false};
   uint8_t manualSpeedPct{MANUAL_SPEED_DEFAULT};
-  float driveScale{1.0F};
+  float driveErpmPerMps{8000.0F};
 
   bool gpsReady{false};
   GpsFixState gpsFix{GPS_NO_FIX};
