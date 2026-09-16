@@ -16,6 +16,9 @@ constexpr uint8_t SID_GET_NODE_INFO = 1U;
 constexpr uint64_t SIG_GET_NODE_INFO = 0xEE468A8121C46A9EULL;
 constexpr uint8_t SID_PARAM_GETSET = 11U;
 constexpr uint64_t SIG_PARAM_GETSET = 0xA7B622F939D1A4D5ULL;
+constexpr uint8_t SID_RESTART_NODE = 5U;
+constexpr uint64_t SIG_RESTART_NODE = 0x569E05394A3017F0ULL;
+constexpr uint64_t RESTART_NODE_MAGIC = 0xACCE551B1EULL;
 constexpr uint16_t DTID_NODE_STATUS = 341U;
 constexpr uint64_t SIG_NODE_STATUS = 0x0F0868D0C1A7C6F1ULL;
 constexpr uint16_t DTID_MAG1 = 1001U;
@@ -1452,6 +1455,11 @@ bool Neo3ProSensors::shouldAccept(const CanardInstance *ins, uint64_t *signature
       *signature = SIG_PARAM_GETSET;
       return true;
     }
+    if (id == SID_RESTART_NODE) {
+      if (self != nullptr && source_node_id != self->primary_node_id_) return false;
+      *signature = SIG_RESTART_NODE;
+      return true;
+    }
     return false;
   }
 
@@ -1748,14 +1756,29 @@ void Neo3ProSensors::decodeGetNodeInfoResponse(const CanardRxTransfer *t) {
 
 void Neo3ProSensors::decodeParamGetSetResponse(const CanardRxTransfer *t) {
   if (!t || t->transfer_type != CanardTransferTypeResponse || params_.pending == 0U) return;
+  const uint8_t which = params_.pending;
   uint8_t tag = 0U;
   if (!decodeScalar(t, 5U, 3U, false, &tag)) { ++can_decode_errors_; params_.pending = 0U; return; }
-  if (tag != 1U) { // AP_Int8/AP_Int16/AP_Int32 are represented by integer_value.
-    ++can_decode_errors_; params_.pending = 0U; return;
+  if (tag != 1U) { // Unknown parameter or non-integer value.
+    params_.pending = 0U;
+    // AP_Periph 4.6+ renamed GPS_RATE_MS -> GPS1_RATE_MS. Probe the current
+    // name first, then fall back to the legacy name without touching any other parameter.
+    if (which == 7U && params_.gps_rate_target_ms >= 50 && params_.gps_rate_target_ms <= 200) {
+      const bool ok = requestParamSetInt(primary_node_id_, "GPS_RATE_MS", params_.gps_rate_target_ms, 8U);
+      writeUsbLine(ok ? "ACK:NEO:GPS:RATE:FALLBACK" : "ERR:NEO:GPS:RATE:FALLBACK_TX");
+      return;
+    }
+    if (which == 8U) {
+      params_.gps_rate_valid = false;
+      params_.gps_rate_target_ms = 0;
+      writeUsbLine("ERR:NEO:GPS:RATE:PARAM_NOT_FOUND");
+      return;
+    }
+    ++can_decode_errors_;
+    return;
   }
   int64_t value = 0;
   if (!decodeScalar(t, 8U, 64U, true, &value)) { ++can_decode_errors_; params_.pending = 0U; return; }
-  const uint8_t which = params_.pending;
   params_.pending = 0U;
   const char *param_name = nullptr;
   if (which == 1U) { params_.can_node = value; params_.can_node_valid = true; param_name = "CAN_NODE"; }
@@ -1764,6 +1787,26 @@ void Neo3ProSensors::decodeParamGetSetResponse(const CanardRxTransfer *t) {
   else if (which == 4U) { params_.baro_enable = value; params_.baro_enable_valid = true; param_name = "BARO_ENABLE"; }
   else if (which == 5U) { params_.gps1_type = value; params_.gps1_type_valid = true; param_name = "GPS1_TYPE"; }
   else if (which == 6U) { params_.compass_enable = value; params_.compass_enable_valid = true; param_name = "COMPASS_ENABLE"; }
+  else if (which == 7U || which == 8U) {
+    params_.gps_rate_ms = value;
+    params_.gps_rate_valid = true;
+    params_.gps_rate_legacy_name = (which == 8U);
+    params_.gps_rate_target_ms = 0;
+    param_name = which == 8U ? "GPS_RATE_MS" : "GPS1_RATE_MS";
+    char ack[96];
+    const long hz = value > 0 ? static_cast<long>(1000 / value) : 0L;
+    std::snprintf(ack, sizeof(ack), "ACK:NEO:GPS:RATE:APPLIED:%ld:%ld:%s", hz, static_cast<long>(value), param_name);
+    writeUsbLine(ack);
+    // AP_Periph applies GPS_RATE_MS/GPS1_RATE_MS after a node restart on this
+    // CUAV NEO3 Pro build. Restart only the verified GNSS node; F411/ROS/ESC stay alive.
+    uint8_t payload[5]{};
+    uint64_t magic = RESTART_NODE_MAGIC;
+    canardEncodeScalar(payload, 0U, 40U, &magic);
+    const bool restart_ok = requestService(primary_node_id_, SIG_RESTART_NODE, SID_RESTART_NODE,
+                                           &restart_node_transfer_id_, payload, sizeof(payload));
+    writeUsbLine(restart_ok ? "ACK:NEO:GPS:RATE:RESTART_REQUEST"
+                            : "ERR:NEO:GPS:RATE:RESTART_TX");
+  }
   if (param_name != nullptr) {
     std::snprintf(last_param_name_, sizeof(last_param_name_), "%s", param_name);
     last_param_value_ = value;
@@ -2449,6 +2492,35 @@ bool Neo3ProSensors::handleHostCommand(const char *command) {
   }
   if (std::strcmp(command, "NEO:CAN:RECOVER") == 0) {
     recoverCan(); publishHardware(true); return true;
+  }
+  if (std::strncmp(command, "NEO:GPS:RATE:", 13U) == 0) {
+    unsigned hz = 0U; char extra = '\0';
+    if (std::sscanf(command + 13U, "%u%c", &hz, &extra) != 1 ||
+        (hz != 5U && hz != 8U && hz != 10U)) {
+      writeUsbLine("ERR:NEO:GPS:RATE:ARGS"); return true;
+    }
+    if (!identity_.verified_cuav_gps || primary_node_id_ == 0U || !node_.seen ||
+        static_cast<uint32_t>(HAL_GetTick() - node_.received_ms) > 3000U) {
+      writeUsbLine("ERR:NEO:GPS:RATE:NODE"); return true;
+    }
+    // Idempotent production behavior: reconnect/retry commands must not reboot
+    // a NEO3 Pro that is already streaming at the requested rate.
+    if (gnss_.seen && static_cast<uint32_t>(HAL_GetTick() - gnss_.received_ms) <= 2000U &&
+        std::isfinite(gnss_.rate_hz) && std::abs(gnss_.rate_hz - static_cast<float>(hz)) <= 0.75F) {
+      char ack[80];
+      std::snprintf(ack, sizeof(ack), "ACK:NEO:GPS:RATE:ALREADY:%u:%.2f", hz,
+                    static_cast<double>(gnss_.rate_hz));
+      writeUsbLine(ack);
+      return true;
+    }
+    const int64_t period_ms = static_cast<int64_t>(1000U / hz);
+    params_.gps_rate_valid = false;
+    params_.gps_rate_legacy_name = false;
+    params_.gps_rate_target_ms = period_ms;
+    const bool ok = requestParamSetInt(primary_node_id_, "GPS1_RATE_MS", period_ms, 7U);
+    writeUsbLine(ok ? "ACK:NEO:GPS:RATE:REQUEST" : "ERR:NEO:GPS:RATE:BUSY");
+    if (!ok) params_.gps_rate_target_ms = 0;
+    return true;
   }
   if (std::strcmp(command, "NEO:BARO:ON") == 0 || std::strcmp(command, "NEO:BARO:OFF") == 0) {
     if (!identity_.verified_cuav_gps || primary_node_id_ == 0U) {

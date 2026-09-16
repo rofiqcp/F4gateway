@@ -161,7 +161,11 @@ private:
     int64_t baro_enable{0};
     int64_t gps1_type{0};
     int64_t compass_enable{0};
-    uint8_t pending{0U}; // 1 CAN_NODE, 2 CAN_BAUDRATE, 3 LED, 4 BARO, 5 GPS1_TYPE, 6 COMPASS_ENABLE
+    bool gps_rate_valid{false};
+    bool gps_rate_legacy_name{false};
+    int64_t gps_rate_ms{0};
+    int64_t gps_rate_target_ms{0};
+    uint8_t pending{0U}; // 1 CAN_NODE, 2 CAN_BAUDRATE, 3 LED, 4 BARO, 5 GPS1_TYPE, 6 COMPASS_ENABLE, 7 GPS1_RATE_MS, 8 GPS_RATE_MS
     uint32_t request_ms{0U};
   } params_{};
 
@@ -283,6 +287,7 @@ private:
   bool oscillator_locked_{false};
   uint8_t active_osc_mhz_{0U};
   uint8_t probe_index_{0U};
+  uint8_t restart_node_transfer_id_{0U};
   uint8_t primary_node_id_{0U};
   uint8_t discovery_node_id_{0U};
   uint32_t last_identity_request_ms_{0U};
