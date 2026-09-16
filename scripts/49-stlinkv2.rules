@@ -1,2 +1,0 @@
-# ST-LINK/V2 debug probe used to provision/recover F4gateway.
-SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", MODE="0660", GROUP="plugdev", TAG+="uaccess"

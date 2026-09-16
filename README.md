@@ -1,76 +1,132 @@
-# F4gateway
+# F4gateway v2
 
-Firmware STM32F411CEU6 untuk gateway/HMI AGV. Repository ini dipin sebagai Git submodule pada repository `rofiqcp/agv` branch `v1`.
+Firmware STM32F411CEU6 untuk gateway USB CDC, HMI TFT/touch, dan kontrol fork BTS7960 pada AGV forklift. Branch produksi saat ini adalah `v2`; repository ini dipakai sebagai Git submodule oleh workspace `/home/otomasi2/forclift`.
 
-## Hardware
+## Hardware utama
 
-- MCU: STM32F411CEU6 / WeAct BlackPill
-- Framework: STM32Cube HAL melalui PlatformIO
-- Clock: 96 MHz
-- HMI: ILI9341 320x240 + touch
-- USB: CDC 1,000,000 baud ke mini-PC/ROS
-- Gateway: komunikasi F411 ke ESC/F103 dan sensor NEO-3
+- MCU: STM32F411CEU6 / WeAct BlackPill.
+- Framework: STM32Cube HAL melalui PlatformIO, clock 96 MHz.
+- HMI: ILI9341 320x240 + XPT2046 touch pada shared SPI bus.
+- USB runtime: USB CDC FS, 1,000,000 baud ke bridge ROS 2.
+- Fork BTS7960: RPWM PB8 (UP), LPWM PA2 (DOWN), PWM 1 kHz / 10-bit.
+- Limit switch aktif-LOW + pull-up: PB6 = TOP, PB7 = BOTTOM.
 
-## Clone
+MCP2515, libcanard/DroneCAN, dan NEO-3 tidak lagi menjadi bagian firmware produksi `v2`.
+
+## Fitur fork dan keselamatan
+
+- PWM default 500 dari rentang 0..1023.
+- `UP/DOWN HOME`, timed 1 s, timed 2 s, dan STOP.
+- Debounce/confirmation LS 30 ms dan reversal dead-time 50 ms.
+- HOME watchdog 30 s.
+- Kedua LS aktif bersamaan dilatch sebagai fault; satu LS aktif adalah kondisi endpoint yang valid.
+- Perintah ROS memakai host/session safety gate; kontrol fork lokal HMI tetap memakai common safety gate.
+- HMI menampilkan state fork, TOP/BOTTOM LS, `LS READY`, dan fault secara eksplisit.
+
+## USB CDC dan recovery bootloader
+
+Application berjalan dari `0x08004000`. Resident recovery bootloader berada pada Sector 0 dan update normal dilakukan melalui USB CDC tanpa ST-Link.
+
+Layout flash:
+
+- `0x08000000..0x08003FFF`: resident USB CDC recovery bootloader, 16 KiB.
+- `0x08004000..0x0805FFFF`: application, maksimum 368 KiB.
+- `0x08060000..0x08063FFF`: manifest journal.
+- `0x08064000..0x0806BFFF`: persistent config journal.
+- `0x0806C000..0x0807DFFF`: persistent reserved area.
+- `0x0807E000..0x0807FFFF`: legacy migration reserve; tidak ada runtime DroneCAN/MCP2515 pada v2.
+
+Boot protocol: `proto=3`, layout `AGVBL3-04000-60000`.
+
+## Prasyarat Jetson / ROS 2 Humble
+
+Gunakan Python system ROS secara eksplisit:
 
 ```bash
-git clone -b v1 https://github.com/rofiqcp/F4gateway.git
-cd F4gateway
+/usr/bin/python3 --version
+sudo apt install -y python3-serial
+/usr/bin/python3 -c "import serial; print(serial.__version__)"
 ```
 
-Jika bekerja melalui repository AGV:
+Install udev rule sekali per Jetson:
 
 ```bash
-git clone --recurse-submodules -b v1 https://github.com/rofiqcp/agv.git
-cd agv
-git submodule update --init --recursive
+sudo ./scripts/install_stm32_udev_rules.sh
 ```
+
+Rule runtime/boot CDC di-scope ke BlackPill serial `33A433673134`; ST-Link memakai VID:PID STMicroelectronics yang sesuai.
 
 ## Build
 
 ```bash
-python3 -m pip install --user platformio
-pio run
+pio run -e blackpill_f411ce_v2
 ```
-## Upload
 
-Normal update melalui resident USB CDC bootloader:
+Build produksi harus selesai `SUCCESS` sebelum flash atau update pointer submodule.
+
+## Upload normal via USB CDC ACM
 
 ```bash
-pio run -t upload
+pio run -e blackpill_f411ce_v2 -t upload
 ```
 
-Recovery/provisioning melalui ST-Link:
+Uploader melakukan handshake runtime `ACK:PONG`, masuk ke resident `BOOT_CDC`, memverifikasi protocol/layout, erase application region, transfer chunk+CRC, menerima `ACK:END:OK`, lalu memastikan runtime CDC kembali dan `ACK:PONG` sehat.
+
+## Provisioning awal / recovery via ST-Link
 
 ```bash
-pio run -e blackpill_f411ce_stlink -t upload
+./scripts/provision_recovery_stlink.sh
 ```
 
-ROM DFU tersedia sebagai recovery alternatif:
+Script memverifikasi MCU STM32F411, membangun bootloader+application, menjaga/migrasi persistent area, menulis image secara transactional melalui SWD, dan memverifikasi hasil. Python di script dikunci ke `/usr/bin/python3` agar sama dengan environment ROS/system.
+
+ROM DFU tersedia sebagai jalur recovery alternatif melalui environment `blackpill_f411ce_romdfu`.
+
+## Diagnostik runtime
+
+Command read-only yang aman antara lain:
+
+```text
+PING
+FW:INFO
+LIMITS
+WINCH STATUS
+TFT:STATUS
+TOUCH:STATUS
+USB:STATUS
+```
+
+Kondisi normal setelah boot mencakup `ACK:PONG`, `LS_READY=1`, TFT `OK`, dan USB CDC runtime kembali ter-enumerasi.
+
+## Pengujian
 
 ```bash
-pio run -e blackpill_f411ce_romdfu -t upload
+for t in test/*_self_check.py; do
+  /usr/bin/python3 "$t" || exit 1
+done
 ```
 
-Default application berada pada `0x08004000`; Sector 0 (16 KiB) dipakai recovery bootloader dan Sector 7 dipakai persistent journal, jadi jangan menulis image application mentah ke `0x08000000`.
+Test penting mencakup parity fitur project F4 lama, BTS7960/LS safety, HMI display/touch, flash layout, persistent config, USB transport/session, recovery bootloader, dan verifikasi MCP2515 removal.
 
-Layout flash STM32F411CE 512 KiB yang dipakai:
+## Struktur repository
 
-- `0x08000000..0x08003FFF` — resident recovery bootloader, maksimum 16 KiB.
-- `0x08004000..0x0805FFFF` — application, maksimum 368 KiB.
-- `0x08060000..0x08063FFF` — append-only manifest journal, 512 slot x 32 byte.
-- `0x08064000..0x0806BFFF` — EEPROM emulation/config journal, 32 KiB (682 record slots).
-- `0x0806C000..0x0807DFFF` — reserved persistent area, 72 KiB.
-- `0x0807E000..0x0807FFFF` — compact DroneCAN DNA journal, 8 KiB (409 journal records).
+- `src/`: firmware application dan semua header production.
+- `src/usb/`: USB CDC application stack.
+- `bootloader/`: resident USB CDC recovery bootloader.
+- `linker/`: linker script application relocated ke `0x08004000`.
+- `scripts/`: build provenance, manifest, provisioning, CDC/DFU uploader, udev installer.
+- `test/`: static/regression self-check.
+- `tools/`: utilitas diagnosis/telemetry operator; bukan production firmware.
 
-Bootloader layout ini memakai protocol generation 3 (`AGVBL3-04000-60000`). Board yang masih memakai layout lama `0x08008000` harus diprovision satu kali melalui ST-Link; uploader CDC/ROM-DFU baru menolak layout lama sebelum melakukan erase. Provisioning ST-Link membackup Sector 7 dan journal DNA lama di Sector 6, memigrasikannya ke partition baru, lalu menghapus penuh Sector 1-6 sebelum menulis application baru.
+`include/` dan `lib/` legacy tidak dipakai lagi; source production dikonsolidasikan di `src/`.
 
-## Branch dan integrasi AGV
+## Git dan submodule
 
-Branch default repository ini adalah `v1`. Workflow sinkronisasi:
+Gunakan branch `v2` untuk firmware ini. Urutan sinkronisasi:
 
-1. Commit dan push perubahan firmware di `F4gateway`.
-2. Di repository AGV, update pointer submodule `F4gateway` ke commit tersebut.
-3. Commit dan push pointer submodule pada branch AGV `v1`.
+1. Build dan jalankan self-check.
+2. Commit/push `F4gateway` branch `v2`.
+3. Pada repository induk `forclift`, update pointer submodule `F4gateway` dan pastikan `.gitmodules` memakai `branch = v2`.
+4. Commit/push repository induk.
 
-Build terakhir harus lolos `pio run` sebelum pointer submodule diperbarui.
+Jangan commit `.pio`, build output, Python cache, editor state, atau backup sementara.

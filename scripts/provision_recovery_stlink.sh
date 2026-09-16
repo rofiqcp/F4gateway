@@ -25,7 +25,7 @@ if [[ -z "$id" ]]; then
   printf '%s\n' "$probe" >&2
   if printf '%s\n' "$probe" | grep -q 'LIBUSB_ERROR_ACCESS'; then
     echo "[STLINK] permission denied. Install the repo udev rule once:" >&2
-    echo "  sudo $ROOT/scripts/install_stlink_udev.sh" >&2
+    echo "  sudo $ROOT/scripts/install_stm32_udev_rules.sh" >&2
   fi
   exit 3
 fi

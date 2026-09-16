@@ -8,7 +8,7 @@ main=(root/'src/main.cpp').read_text()
 board=(root/'src/BoardSupport.cpp').read_text()
 boot=(root/'bootloader/src/main.c').read_text()
 rules=(root/'99-blackpill-stm32.rules').read_text()
-req=[('init hook decl','onUsbClassInit()',h),('deinit hook decl','onUsbClassDeInit()',h),('main service','void service()',h),('class init hook','gUsb.onUsbClassInit();',cdc),('class deinit hook','gUsb.onUsbClassDeInit();',cdc),('session queue drop','resetSessionState(true, true)',c),('ST TxState cross-check','hcdc->TxState == 0U',c),('bounded repair','kTxStallRepairMs',c),('explicit recovery','USB:RECOVER',main),('observable status','USB:STATUS',main),('main-context service','gUsb.service();',main),('exact runtime serial','ATTR{serial}=="338133833134"',rules),('exact boot serial','ATTRS{serial}=="338133833134"',rules)]
+req=[('init hook decl','onUsbClassInit()',h),('deinit hook decl','onUsbClassDeInit()',h),('main service','void service()',h),('class init hook','gUsb.onUsbClassInit();',cdc),('class deinit hook','gUsb.onUsbClassDeInit();',cdc),('session queue drop','resetSessionState(true, true)',c),('ST TxState cross-check','hcdc->TxState == 0U',c),('bounded repair','kTxStallRepairMs',c),('explicit recovery','USB:RECOVER',main),('observable status','USB:STATUS',main),('main-context service','gUsb.service();',main),('exact runtime serial','ATTR{serial}=="33A433673134"',rules),('exact boot serial','ATTRS{serial}=="33A433673134"',rules)]
 for name,tok,text in req:
     if tok not in text: raise SystemExit(f'FAIL {name}: missing {tok}')
 

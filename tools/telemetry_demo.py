@@ -4,7 +4,7 @@ import sys
 import time
 import serial
 
-port = sys.argv[1] if len(sys.argv) > 1 else "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
+port = sys.argv[1] if len(sys.argv) > 1 else "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_33A433673134-if00"
 lines = [
     "SYS:READY",
     "MODE:MANUAL",

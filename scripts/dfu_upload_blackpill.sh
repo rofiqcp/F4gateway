@@ -72,7 +72,7 @@ run_dfu readback-persistent -a 0 -d 0483:df11 -s "0x08060000:131072" -U "$PERSIS
 cmp "$PERSIST_NEW" "$PERSIST_READBACK"
 echo "[USB-DFU] persistent journal restored and verified"
 
-CDC="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
+CDC="/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_33A433673134-if00"
 leave_bootloader() {
   local attempt rc=1 tick
   for attempt in 1 2 3; do

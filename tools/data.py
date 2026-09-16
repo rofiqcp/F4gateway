@@ -18,7 +18,7 @@ import serial
 import yaml
 
 AGV_ROOT = Path(os.environ.get("AGV_ROOT", str(Path(__file__).resolve().parents[2]))).expanduser().resolve()
-F411_BY_ID = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_338133833134-if00"
+F411_BY_ID = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_33A433673134-if00"
 YAHBOOM_BY_ID = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
 F411_REOPEN_BACKOFF_S = 0.50
 F411_DATA_STALE_S = 1.50
