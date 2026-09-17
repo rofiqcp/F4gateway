@@ -119,11 +119,9 @@ private:
       card(X2,"OPERATOR",d.state==STATE_RUNNING?"RUN":"STOP","MOTION",d.state==STATE_RUNNING?C_GREEN2:C_DIM);
       card(X3,"STEERING",yn(d.encoderReady),"POSITION",d.encoderReady?C_GREEN2:C_WARN);
     }else{
-      card(X1,"LEFT STATUS",d.escx.leftStatusKnown?(d.escx.leftConnected?"ONLINE":"OFF"):"N/A",
-           "ESC LEFT",d.escx.leftStatusKnown?(d.escx.leftConnected?C_GREEN2:C_RED2):C_DIM);
-      card(X2,"RIGHT STATUS",d.escx.rightStatusKnown?(d.escx.rightConnected?"ONLINE":"OFF"):"N/A",
-           "ESC RIGHT",d.escx.rightStatusKnown?(d.escx.rightConnected?C_GREEN2:C_RED2):C_DIM);
-      card(X3,"SYSTEM",d.escFresh?"HEALTHY":"CHECK","ESC HEALTH",d.escFresh?C_GREEN2:C_RED2);
+      card(X1,"DRIVE VESC",d.vescDriveConnected?"ONLINE":"OFF","DUAL HALL",d.vescDriveConnected?C_GREEN2:C_RED2);
+      card(X2,"STEER VESC",d.vescSteerConnected?"ONLINE":"OFF","LEFT ENCODER",d.vescSteerConnected?C_GREEN2:C_RED2);
+      card(X3,"ENCODER",d.encoderReady?"READY":"WAIT","SYNC / HOME / CAL",d.encoderReady?C_GREEN2:C_WARN);
     }
     footer(s);
   }

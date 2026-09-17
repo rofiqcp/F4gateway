@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 extern HmiDisplay tft;
 
@@ -49,9 +50,20 @@ void finishCalibration() {
   if (spanX < kMinSpan || spanY < kMinSpan) {
     emit("ERR:TOUCH:CAL:SPAN"); gMode=Mode::NORMAL; gRedraw=true; return;
   }
-  // HmiDisplay rotate flag maps SCREEN-X from RAW-Y and SCREEN-Y from RAW-X.
-  // Bit 2 reverses screen Y, matching the proven /forclift/f4 orientation.
-  const uint16_t p[5] = {minY, spanY, minX, spanX, 0x0005U};
+  // Infer panel orientation from the four corner samples. F4 v1 proved that
+  // this installed panel is normally unrotated (RAW-X -> screen X) with Y
+  // inverted. Keeping inference here also makes field recalibration robust.
+  const int32_t leftX=(int32_t(gRawX[0])+gRawX[2])/2, rightX=(int32_t(gRawX[1])+gRawX[3])/2;
+  const int32_t leftY=(int32_t(gRawY[0])+gRawY[2])/2, rightY=(int32_t(gRawY[1])+gRawY[3])/2;
+  const int32_t topX=(int32_t(gRawX[0])+gRawX[1])/2, bottomX=(int32_t(gRawX[2])+gRawX[3])/2;
+  const int32_t topY=(int32_t(gRawY[0])+gRawY[1])/2, bottomY=(int32_t(gRawY[2])+gRawY[3])/2;
+  const bool rotate = std::abs(rightY-leftY) > std::abs(rightX-leftX) &&
+                      std::abs(bottomX-topX) > std::abs(bottomY-topY);
+  const bool invertX = rotate ? (rightY < leftY) : (rightX < leftX);
+  const bool invertY = rotate ? (bottomX < topX) : (bottomY < topY);
+  uint16_t flags = uint16_t((rotate?1U:0U) | (invertX?2U:0U) | (invertY?4U:0U));
+  const uint16_t p[5] = {rotate?minY:minX, rotate?spanY:spanX,
+                         rotate?minX:minY, rotate?spanX:spanY, flags};
   tft.setTouch(p);
   char line[128];
   std::snprintf(line,sizeof(line),"ACK:TOUCH:CAL:XRAW=%u-%u:YRAW=%u-%u:CENTER=%u,%u",

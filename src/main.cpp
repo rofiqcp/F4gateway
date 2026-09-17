@@ -228,7 +228,9 @@ static void refreshWinchSafetyInputs() {
       std::fabs(gTelemetry.driveActualMps) <= 0.02F;
   Bts7960Winch::SafetyInputs safety{};
   safety.emergencyStop = gTelemetry.eStop;
-  safety.physicalSafetyValid = Bts7960Winch::limitsReady();
+  // Physical plausibility is independent of the latched fault so a recovered
+  // contradictory-limit event can be explicitly cleared while stopped.
+  safety.physicalSafetyValid = Bts7960Winch::limitInputsPlausible();
   safety.systemFault = gTelemetry.systemStatus == SYS_FAULT ||
                        gTelemetry.state == STATE_FAULT;
   safety.hostSessionValid =
@@ -596,7 +598,7 @@ static bool legacyTelemetryPayloadValid(const char *command) {
   }
 
   static const char *const boolPrefixes[] = {
-      "ROS:", "ESC:", "ENC:", "VESC_LINK:", "ESTOP:", "CFGPERINF:",
+      "ROS:", "ESC:", "ENC:", "VESC_LINK:", "VESC_DRIVE:", "VESC_STEER:", "ESTOP:", "CFGPERINF:",
       "GPS:", "IMU:", "MAG:", "CAM:", "PER:", "DRV:", "OBS:", "MOTION:", "NAV2:"};
   for (const char *prefix : boolPrefixes)
     if ((p = after(prefix)) != nullptr) return parseBoolStrict(p, b);
@@ -1022,7 +1024,7 @@ static bool hostCommandRealtimeCritical(const char *command) {
   if (command == nullptr) return false;
   static const char *const prefixes[] = {
       "HOST:HELLO:", "F4X3:", "ROS:", "SYS:", "MODE:", "STATE:",
-      "ESTOP:", "ESC:", "ENC:", "VESC_LINK:", "MOTION:", "NAV2:", "NAV:"};
+      "ESTOP:", "ESC:", "ENC:", "VESC_LINK:", "VESC_DRIVE:", "VESC_STEER:", "MOTION:", "NAV2:", "NAV:"};
   return startsWithAny(command, prefixes, sizeof(prefixes) / sizeof(prefixes[0]));
 }
 
@@ -1120,7 +1122,7 @@ static void handleSerialCommand(char *command) {
   if (!std::strcmp(command, "LIMITS") || !std::strcmp(command, "WINCH LIMITS") ||
       !std::strcmp(command, "LS") || !std::strcmp(command, "LS STATUS")) {
     char line[128];
-    std::snprintf(line, sizeof(line), "LIMITS:READY=%u:TOP=%u:BOTTOM=%u:TOP_RAW=%u:BOTTOM_RAW=%u",
+    std::snprintf(line, sizeof(line), "LIMITS:READY=%u:TOP=%u:BOTTOM=%u:TOP_RAW_ACTIVE=%u:BOTTOM_RAW_ACTIVE=%u",
                   Bts7960Winch::limitsReady()?1U:0U,
                   Bts7960Winch::topLimitActive()?1U:0U, Bts7960Winch::bottomLimitActive()?1U:0U,
                   Bts7960Winch::topLimitRaw()?1U:0U, Bts7960Winch::bottomLimitRaw()?1U:0U);
@@ -1615,6 +1617,10 @@ static void handleSerialCommand(char *command) {
     bool value = false; (void)parseBoolStrict(command + 4, value); gTelemetry.encoderReady = value;
   } else if (!strncmp(command, "VESC_LINK:", 10)) {
     bool value = false; (void)parseBoolStrict(command + 10, value); gTelemetry.vescConnected = value;
+  } else if (!strncmp(command, "VESC_DRIVE:", 11)) {
+    bool value = false; (void)parseBoolStrict(command + 11, value); gTelemetry.vescDriveConnected = value;
+  } else if (!strncmp(command, "VESC_STEER:", 11)) {
+    bool value = false; (void)parseBoolStrict(command + 11, value); gTelemetry.vescSteerConnected = value;
   } else if (!strncmp(command, "ESTOP:", 6)) {
     bool value = false; (void)parseBoolStrict(command + 6, value); gTelemetry.eStop = value;
     if (gTelemetry.eStop) {

@@ -381,8 +381,11 @@ bool topLimitRaw() { return readTopRaw(); }
 bool bottomLimitRaw() { return readBottomRaw(); }
 bool limitFault() { return gLimitFaultLatched; }
 bool movementTimedOut() { return gMovementTimeoutLatched; }
+bool limitInputsPlausible() {
+  return gInitialized && !(gTopConfirmed && gBottomConfirmed);
+}
 bool limitsReady() {
-  return gInitialized && !(gTopConfirmed && gBottomConfirmed) && !gLimitFaultLatched;
+  return limitInputsPlausible() && !gLimitFaultLatched;
 }
 bool initialized() { return gInitialized; }
 bool motionAllowed(int8_t direction) {
@@ -393,7 +396,7 @@ bool motionAllowed(int8_t direction) {
 }
 bool clearFault() {
   if (!gInitialized || gDirection != 0 || gPendingMotion ||
-      gTopConfirmed || gBottomConfirmed || !gSafety.physicalSafetyValid ||
+      !limitInputsPlausible() || gTopConfirmed || gBottomConfirmed ||
       gSafety.emergencyStop || gSafety.systemFault)
     return false;
   gLimitFaultLatched = false;

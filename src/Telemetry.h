@@ -89,6 +89,8 @@ struct VehicleTelemetry {
   bool rosConnected{false};
   bool eStop{false};
   bool vescConnected{false};
+  bool vescDriveConnected{false};
+  bool vescSteerConnected{false};
   bool escFresh{false};
   bool perceptionFresh{false};
   bool navigationFresh{false};

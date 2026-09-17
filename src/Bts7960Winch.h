@@ -63,6 +63,7 @@ bool topLimitRaw();
 bool bottomLimitRaw();
 bool limitFault();
 bool movementTimedOut();
+bool limitInputsPlausible();
 bool limitsReady();
 bool initialized();
 bool motionAllowed(int8_t direction = 0);

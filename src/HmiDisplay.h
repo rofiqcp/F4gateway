@@ -161,11 +161,13 @@ private:
   uint16_t text_fg_{0xFFFFU};
   uint16_t text_bg_{0x0000U};
   uint16_t padding_{0U};
-  uint16_t touch_x0_{300U};
-  uint16_t touch_x1_{3300U};
-  uint16_t touch_y0_{300U};
-  uint16_t touch_y1_{3300U};
-  bool touch_rotate_{true};
+  // Proven physical-panel calibration from F4 v1: RAW-X follows screen X,
+  // RAW-Y falls as screen Y increases.  Do not swap X/Y in landscape mode.
+  uint16_t touch_x0_{580U};
+  uint16_t touch_x1_{3440U};
+  uint16_t touch_y0_{330U};
+  uint16_t touch_y1_{3310U};
+  bool touch_rotate_{false};
   bool touch_invert_x_{false};
   bool touch_invert_y_{true};
   uint32_t press_time_ms_{0U};
