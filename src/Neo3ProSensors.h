@@ -165,8 +165,13 @@ private:
     bool gps_rate_legacy_name{false};
     int64_t gps_rate_ms{0};
     int64_t gps_rate_target_ms{0};
-    uint8_t pending{0U}; // 1 CAN_NODE, 2 CAN_BAUDRATE, 3 LED, 4 BARO, 5 GPS1_TYPE, 6 COMPASS_ENABLE, 7 GPS1_RATE_MS, 8 GPS_RATE_MS
+    bool gps_rate_set_inflight{false};
+    uint8_t pending{0U}; // 1..8 fixed probes; 32+ compass calibration readback
     uint32_t request_ms{0U};
+    bool compass_cal_probe_active{false};
+    bool compass_cal_probe_done{false};
+    uint8_t compass_cal_probe_index{0U};
+    uint32_t compass_cal_probe_next_ms{0U};
   } params_{};
 
   struct RawCanSlot {
@@ -275,9 +280,11 @@ private:
   void publishButton(bool pressed);
   void publishNodeIdentity();
   void publishParamProbe(const char *name, int64_t value);
+  void publishParamProbeText(const char *name, const char *value_text);
   void publishHardware(bool force = false);
   void writeUsbLine(const char *line);
   void writeV2Record(const char *prefix, const char *body);
+  bool writeV2RecordHighPriority(const char *prefix, const char *body);
   uint32_t gnssTowMs() const;
 
   CanardInstance canard_{};
@@ -395,9 +402,13 @@ private:
   uint32_t last_temp_usb_ms_{0U};
   uint32_t last_node_usb_ms_{0U};
   uint32_t last_gnssmeta_usb_ms_{0U};
+  uint32_t gnss_usb_epoch_ms_{0U};
+  uint8_t gnss_usb_phase_{0U};
+  uint32_t last_ecef_usb_ms_{0U};
   uint32_t last_gnssstat_usb_ms_{0U};
   uint32_t last_heading_usb_ms_{0U};
   char last_param_name_[24]{};
+  char last_param_value_text_[32]{};
   int64_t last_param_value_{0};
   uint32_t gnss_sequence_{0U};
   uint32_t gnss_pro_sequence_{0U};

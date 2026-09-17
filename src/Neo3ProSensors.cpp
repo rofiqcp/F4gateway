@@ -62,6 +62,13 @@ constexpr uint32_t CAN_NODE_STALE_MS = 5000U;
 constexpr uint32_t CAN_RX_REALTIME_BUDGET_US = 700U;
 constexpr uint32_t CAN_RX_MAIN_BUDGET_US = 2200U;
 constexpr int64_t NEO3PRO_LED_BRIGHTNESS_TARGET = 30;
+constexpr uint8_t COMPASS_CAL_PENDING_BASE = 32U;
+constexpr const char *COMPASS_CAL_PARAM_NAMES[] = {
+    "COMPASS_OFS_X", "COMPASS_OFS_Y", "COMPASS_OFS_Z",
+    "COMPASS_DIA_X", "COMPASS_DIA_Y", "COMPASS_DIA_Z",
+    "COMPASS_ODI_X", "COMPASS_ODI_Y", "COMPASS_ODI_Z",
+    "COMPASS_SCALE", "COMPASS_ORIENT", "COMPASS_DEV_ID"};
+constexpr uint8_t COMPASS_CAL_PARAM_COUNT = static_cast<uint8_t>(sizeof(COMPASS_CAL_PARAM_NAMES) / sizeof(COMPASS_CAL_PARAM_NAMES[0]));
 // Decouple DroneCAN RX from USB formatting/queueing. RX always consumes every
 // transfer; USB publishes the latest coherent state at bounded rates.
 constexpr uint32_t USB_MAG_PERIOD_MS = 40U;
@@ -69,6 +76,7 @@ constexpr uint32_t USB_BARO_PERIOD_MS = 100U;
 constexpr uint32_t USB_TEMP_PERIOD_MS = 500U;
 constexpr uint32_t USB_NODE_PERIOD_MS = 500U;
 constexpr uint32_t USB_GNSS_META_PERIOD_MS = 100U;
+constexpr uint32_t USB_ECEF_PERIOD_MS = 500U;
 constexpr uint32_t USB_GNSSSTAT_PERIOD_MS = 200U;
 constexpr uint32_t USB_HEADING_PERIOD_MS = 100U;
 constexpr uint32_t DIRTY_GNSS_FIX = 1UL << 0;
@@ -1045,6 +1053,14 @@ void Neo3ProSensors::serviceDiscovery(uint32_t now_ms) {
                                  NEO3PRO_LED_BRIGHTNESS_TARGET, 3U);
       } else if (!params_.baro_enable_valid)
         (void)requestParamRead(primary_node_id_, "BARO_ENABLE", 4U);
+      else if (!params_.compass_cal_probe_done && !params_.compass_cal_probe_active) {
+        params_.compass_cal_probe_active = true;
+        params_.compass_cal_probe_index = 0U;
+        params_.compass_cal_probe_next_ms = now_ms;
+      } else if (params_.compass_cal_probe_active && params_.compass_cal_probe_index < COMPASS_CAL_PARAM_COUNT &&
+                 static_cast<int32_t>(now_ms - params_.compass_cal_probe_next_ms) >= 0)
+        (void)requestParamRead(primary_node_id_, COMPASS_CAL_PARAM_NAMES[params_.compass_cal_probe_index],
+                               static_cast<uint8_t>(COMPASS_CAL_PENDING_BASE + params_.compass_cal_probe_index));
     }
     return;
   }
@@ -1256,7 +1272,7 @@ void Neo3ProSensors::serviceTelemetry(uint32_t now_ms) {
     publishNodeIdentity(); telemetry_dirty_ &= ~DIRTY_NODEINFO;
   }
   if (telemetry_dirty_ & DIRTY_PARAM) {
-    publishParamProbe(last_param_name_, last_param_value_); telemetry_dirty_ &= ~DIRTY_PARAM;
+    publishParamProbeText(last_param_name_, last_param_value_text_); telemetry_dirty_ &= ~DIRTY_PARAM;
   }
   if (telemetry_dirty_ & DIRTY_BUTTON) {
     publishButton(safetyPressed()); telemetry_dirty_ &= ~DIRTY_BUTTON;
@@ -1270,11 +1286,46 @@ void Neo3ProSensors::serviceTelemetry(uint32_t now_ms) {
     publishGnssStatus(); telemetry_dirty_ &= ~DIRTY_GNSSSTAT; last_gnssstat_usb_ms_ = now_ms;
   }
   if (telemetry_dirty_ & DIRTY_GNSS_FIX) {
-    publishGnssPro(); publishGnssCov(); if (ecef_.valid) publishEcef(); publishGnss();
-    telemetry_dirty_ &= ~(DIRTY_GNSS_FIX | DIRTY_GNSS_META | DIRTY_ECEF);
+    // One measurement epoch is emitted exactly once as PRO -> COV -> PVT.
+    // If the high-priority CDC queue applies backpressure, resume from the
+    // failed phase instead of repeating already-queued metadata for this epoch.
+    if (gnss_usb_epoch_ms_ != gnss_.received_ms) {
+      gnss_usb_epoch_ms_ = gnss_.received_ms;
+      gnss_usb_phase_ = 0U;
+    }
+    while (gnss_usb_phase_ < 3U) {
+      const uint32_t drops_before = sensor_usb_drops_;
+      if (gnss_usb_phase_ == 0U) publishGnssPro();
+      else if (gnss_usb_phase_ == 1U) publishGnssCov();
+      else publishGnss();
+      if (sensor_usb_drops_ != drops_before) return;
+      ++gnss_usb_phase_;
+    }
+    telemetry_dirty_ &= ~(DIRTY_GNSS_FIX | DIRTY_GNSS_META);
     last_gnssmeta_usb_ms_ = now_ms;
-  } else if ((telemetry_dirty_ & DIRTY_GNSS_META) && now_ms - last_gnssmeta_usb_ms_ >= USB_GNSS_META_PERIOD_MS) {
-    publishGnssPro(); telemetry_dirty_ &= ~DIRTY_GNSS_META; last_gnssmeta_usb_ms_ = now_ms;
+  } else if (telemetry_dirty_ & DIRTY_GNSS_META) {
+    // Metadata updates for an epoch whose PVT has already been emitted are not
+    // replayed; replaying them created wire duplicates and could starve commands.
+    if (gnss_usb_epoch_ms_ == gnss_.received_ms && gnss_usb_phase_ >= 3U) {
+      telemetry_dirty_ &= ~DIRTY_GNSS_META;
+    } else if (now_ms - last_gnssmeta_usb_ms_ >= USB_GNSS_META_PERIOD_MS) {
+      const uint32_t drops_before = sensor_usb_drops_;
+      publishGnssPro();
+      if (sensor_usb_drops_ != drops_before) return;
+      publishGnssCov();
+      if (sensor_usb_drops_ != drops_before) return;
+      telemetry_dirty_ &= ~DIRTY_GNSS_META;
+      last_gnssmeta_usb_ms_ = now_ms;
+    }
+  }
+  if ((telemetry_dirty_ & DIRTY_ECEF) && ecef_.valid &&
+      now_ms - last_ecef_usb_ms_ >= USB_ECEF_PERIOD_MS) {
+    const uint32_t drops_before = sensor_usb_drops_;
+    publishEcef();
+    if (sensor_usb_drops_ == drops_before) {
+      telemetry_dirty_ &= ~DIRTY_ECEF;
+      last_ecef_usb_ms_ = now_ms;
+    }
   }
   if ((telemetry_dirty_ & DIRTY_HEADING) && now_ms - last_heading_usb_ms_ >= USB_HEADING_PERIOD_MS) {
     publishHeading(); telemetry_dirty_ &= ~DIRTY_HEADING; last_heading_usb_ms_ = now_ms;
@@ -1757,25 +1808,65 @@ void Neo3ProSensors::decodeGetNodeInfoResponse(const CanardRxTransfer *t) {
 void Neo3ProSensors::decodeParamGetSetResponse(const CanardRxTransfer *t) {
   if (!t || t->transfer_type != CanardTransferTypeResponse || params_.pending == 0U) return;
   const uint8_t which = params_.pending;
+  const bool compass_probe = which >= COMPASS_CAL_PENDING_BASE && which < static_cast<uint8_t>(COMPASS_CAL_PENDING_BASE + COMPASS_CAL_PARAM_COUNT);
+  const uint8_t compass_index = compass_probe ? static_cast<uint8_t>(which - COMPASS_CAL_PENDING_BASE) : 0U;
+  const char *compass_name = compass_probe ? COMPASS_CAL_PARAM_NAMES[compass_index] : nullptr;
   uint8_t tag = 0U;
   if (!decodeScalar(t, 5U, 3U, false, &tag)) { ++can_decode_errors_; params_.pending = 0U; return; }
-  if (tag != 1U) { // Unknown parameter or non-integer value.
+
+  auto finish_compass_probe = [&](const char *value_text) {
+    std::snprintf(last_param_name_, sizeof(last_param_name_), "%s", compass_name ? compass_name : "COMPASS");
+    std::snprintf(last_param_value_text_, sizeof(last_param_value_text_), "%s", value_text ? value_text : "INVALID");
+    telemetry_dirty_ |= DIRTY_PARAM;
     params_.pending = 0U;
-    // AP_Periph 4.6+ renamed GPS_RATE_MS -> GPS1_RATE_MS. Probe the current
-    // name first, then fall back to the legacy name without touching any other parameter.
+    params_.compass_cal_probe_index = static_cast<uint8_t>(compass_index + 1U);
+    params_.compass_cal_probe_next_ms = HAL_GetTick() + 120U;
+    if (params_.compass_cal_probe_index >= COMPASS_CAL_PARAM_COUNT) {
+      params_.compass_cal_probe_active = false;
+      params_.compass_cal_probe_done = true;
+    }
+  };
+
+  if (compass_probe) {
+    char value_text[32]{};
+    if (tag == 1U) {
+      int64_t value = 0;
+      if (!decodeScalar(t, 8U, 64U, true, &value)) { ++can_decode_errors_; finish_compass_probe("DECODE_ERROR"); return; }
+      formatI64(value_text, sizeof(value_text), value);
+    } else if (tag == 2U) {
+      float value = 0.0F;
+      if (!decodeScalar(t, 8U, 32U, true, &value) || !std::isfinite(value)) { ++can_decode_errors_; finish_compass_probe("DECODE_ERROR"); return; }
+      std::snprintf(value_text, sizeof(value_text), "%.9g", static_cast<double>(value));
+    } else if (tag == 3U) {
+      uint8_t value = 0U;
+      if (!decodeScalar(t, 8U, 1U, false, &value)) { ++can_decode_errors_; finish_compass_probe("DECODE_ERROR"); return; }
+      std::snprintf(value_text, sizeof(value_text), "%u", static_cast<unsigned>(value));
+    } else {
+      finish_compass_probe(tag == 0U ? "NOT_FOUND" : "UNSUPPORTED_TYPE");
+      return;
+    }
+    finish_compass_probe(value_text);
+    return;
+  }
+
+  if (tag != 1U) {
+    params_.pending = 0U;
     if (which == 7U && params_.gps_rate_target_ms >= 50 && params_.gps_rate_target_ms <= 200) {
-      const bool ok = requestParamSetInt(primary_node_id_, "GPS_RATE_MS", params_.gps_rate_target_ms, 8U);
-      writeUsbLine(ok ? "ACK:NEO:GPS:RATE:FALLBACK" : "ERR:NEO:GPS:RATE:FALLBACK_TX");
+      // GPS1_RATE_MS is not present on some AP_Periph builds. Probe the legacy
+      // name before writing anything. Never turn a harmless host retry into a
+      // receiver restart merely because one parameter name is unavailable.
+      params_.gps_rate_set_inflight = false;
+      const bool ok = requestParamRead(primary_node_id_, "GPS_RATE_MS", 8U);
+      writeUsbLine(ok ? "ACK:NEO:GPS:RATE:FALLBACK_PROBE" : "ERR:NEO:GPS:RATE:FALLBACK_PROBE_TX");
       return;
     }
     if (which == 8U) {
       params_.gps_rate_valid = false;
       params_.gps_rate_target_ms = 0;
-      writeUsbLine("ERR:NEO:GPS:RATE:PARAM_NOT_FOUND");
-      return;
+      params_.gps_rate_set_inflight = false;
+      writeUsbLine("ERR:NEO:GPS:RATE:PARAM_NOT_FOUND"); return;
     }
-    ++can_decode_errors_;
-    return;
+    ++can_decode_errors_; return;
   }
   int64_t value = 0;
   if (!decodeScalar(t, 8U, 64U, true, &value)) { ++can_decode_errors_; params_.pending = 0U; return; }
@@ -1791,26 +1882,52 @@ void Neo3ProSensors::decodeParamGetSetResponse(const CanardRxTransfer *t) {
     params_.gps_rate_ms = value;
     params_.gps_rate_valid = true;
     params_.gps_rate_legacy_name = (which == 8U);
-    params_.gps_rate_target_ms = 0;
     param_name = which == 8U ? "GPS_RATE_MS" : "GPS1_RATE_MS";
-    char ack[96];
-    const long hz = value > 0 ? static_cast<long>(1000 / value) : 0L;
-    std::snprintf(ack, sizeof(ack), "ACK:NEO:GPS:RATE:APPLIED:%ld:%ld:%s", hz, static_cast<long>(value), param_name);
-    writeUsbLine(ack);
-    // AP_Periph applies GPS_RATE_MS/GPS1_RATE_MS after a node restart on this
-    // CUAV NEO3 Pro build. Restart only the verified GNSS node; F411/ROS/ESC stay alive.
-    uint8_t payload[5]{};
-    uint64_t magic = RESTART_NODE_MAGIC;
-    canardEncodeScalar(payload, 0U, 40U, &magic);
-    const bool restart_ok = requestService(primary_node_id_, SIG_RESTART_NODE, SID_RESTART_NODE,
-                                           &restart_node_transfer_id_, payload, sizeof(payload));
-    writeUsbLine(restart_ok ? "ACK:NEO:GPS:RATE:RESTART_REQUEST"
-                            : "ERR:NEO:GPS:RATE:RESTART_TX");
+
+    const int64_t target_ms = params_.gps_rate_target_ms;
+    if (target_ms >= 50 && target_ms <= 200) {
+      if (!params_.gps_rate_set_inflight) {
+        // READ phase. If the persistent AP_Periph parameter already matches,
+        // acknowledge idempotently and DO NOT restart the receiver.
+        if (value == target_ms) {
+          params_.gps_rate_target_ms = 0;
+          char ack[112];
+          std::snprintf(ack, sizeof(ack),
+              "ACK:NEO:GPS:RATE:ALREADY:%ld:%s", static_cast<long>(value), param_name);
+          writeUsbLine(ack);
+        } else {
+          params_.gps_rate_valid = false;
+          params_.gps_rate_set_inflight = true;
+          const bool ok = requestParamSetInt(primary_node_id_, param_name, target_ms, which);
+          if (!ok) params_.gps_rate_set_inflight = false;
+          writeUsbLine(ok ? "ACK:NEO:GPS:RATE:SET_REQUEST" : "ERR:NEO:GPS:RATE:SET_BUSY");
+          return;
+        }
+      } else {
+        // SET response. Restart exactly once, only after the parameter value
+        // has actually converged to the requested period.
+        params_.gps_rate_set_inflight = false;
+        if (value == target_ms) {
+          params_.gps_rate_target_ms = 0;
+          char ack[112];
+          const long hz = value > 0 ? static_cast<long>(1000 / value) : 0L;
+          std::snprintf(ack, sizeof(ack),
+              "ACK:NEO:GPS:RATE:APPLIED:%ld:%ld:%s", hz, static_cast<long>(value), param_name);
+          writeUsbLine(ack);
+          uint8_t payload[5]{}; uint64_t magic = RESTART_NODE_MAGIC;
+          canardEncodeScalar(payload, 0U, 40U, &magic);
+          const bool restart_ok = requestService(primary_node_id_, SIG_RESTART_NODE, SID_RESTART_NODE,
+              &restart_node_transfer_id_, payload, sizeof(payload));
+          writeUsbLine(restart_ok ? "ACK:NEO:GPS:RATE:RESTART_REQUEST" : "ERR:NEO:GPS:RATE:RESTART_TX");
+        } else {
+          writeUsbLine("ERR:NEO:GPS:RATE:SET_VERIFY");
+        }
+      }
+    }
   }
   if (param_name != nullptr) {
     std::snprintf(last_param_name_, sizeof(last_param_name_), "%s", param_name);
-    last_param_value_ = value;
-    telemetry_dirty_ |= DIRTY_PARAM;
+    last_param_value_ = value; formatI64(last_param_value_text_, sizeof(last_param_value_text_), value); telemetry_dirty_ |= DIRTY_PARAM;
   }
 }
 
@@ -2138,6 +2255,19 @@ void Neo3ProSensors::writeV2Record(const char *prefix, const char *body) {
   if (n > 0 && static_cast<size_t>(n) < sizeof(line)) writeUsbLine(line);
 }
 
+bool Neo3ProSensors::writeV2RecordHighPriority(const char *prefix, const char *body) {
+  if (!prefix || !body) return false;
+  char line[640];
+  const uint16_t crc = crc16Ccitt(body);
+  const int n = std::snprintf(line, sizeof(line), "%s%s,2,%u", prefix, body,
+                              static_cast<unsigned>(crc));
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(line) || !gUsb.writeLineHighPriority(line)) {
+    ++sensor_usb_drops_;
+    return false;
+  }
+  return true;
+}
+
 uint32_t Neo3ProSensors::gnssTowMs() const {
   if (gnss_.gnss_timestamp_usec == 0U) return 0U;
   int64_t gps_usec = static_cast<int64_t>(gnss_.gnss_timestamp_usec);
@@ -2198,7 +2328,7 @@ void Neo3ProSensors::publishGnss() {
       finiteOr(gnss_.sacc_mps, 5.0F), course_acc_deg,
       finiteOr(gnss_.pdop, 99.0F), finiteOr(gnss_.rate_hz, 0.0F),
       static_cast<double>(gnss_.mode), static_cast<double>(gnss_.sub_mode));
-  writeV2Record("SENS:GNSS:", body);
+  (void)writeV2RecordHighPriority("SENS:GNSS:", body);
 }
 
 void Neo3ProSensors::publishGnssPro() {
@@ -2219,7 +2349,7 @@ void Neo3ProSensors::publishGnssPro() {
       finiteOr(gnss_.pdop, -1.0F), finiteOr(gnss_.hdop, -1.0F), finiteOr(gnss_.vdop, -1.0F),
       finiteOr(gnss_.tdop, -1.0F), finiteOr(gnss_.ndop, -1.0F), finiteOr(gnss_.edop, -1.0F),
       finiteOr(gnss_.rate_hz, 0.0F), gnss_.pos_cov_valid ? 1U : 0U, gnss_.vel_cov_valid ? 1U : 0U);
-  writeV2Record("SENS:GNSSPRO:", body);
+  (void)writeV2RecordHighPriority("SENS:GNSSPRO:", body);
 }
 
 void Neo3ProSensors::publishGnssCov() {
@@ -2236,7 +2366,7 @@ void Neo3ProSensors::publishGnssCov() {
     if (m <= 0 || static_cast<size_t>(m) >= sizeof(body) - pos) return;
     pos += static_cast<size_t>(m);
   }
-  writeV2Record("SENS:GNSSCOV:", body);
+  (void)writeV2RecordHighPriority("SENS:GNSSCOV:", body);
 }
 
 void Neo3ProSensors::publishEcef() {
@@ -2332,13 +2462,18 @@ void Neo3ProSensors::publishNodeIdentity() {
   writeV2Record("SENS:NODEINFO:", body);
 }
 
-void Neo3ProSensors::publishParamProbe(const char *name, int64_t value) {
-  char body[120], value_text[24];
-  formatI64(value_text, sizeof(value_text), value);
+void Neo3ProSensors::publishParamProbeText(const char *name, const char *value_text) {
+  char body[128];
   std::snprintf(body, sizeof(body), "%lu,%u,%s,%s",
       static_cast<unsigned long>(HAL_GetTick()), static_cast<unsigned>(primary_node_id_),
-      name ? name : "", value_text);
+      name ? name : "", value_text ? value_text : "");
   writeV2Record("SENS:PARAM:", body);
+}
+
+void Neo3ProSensors::publishParamProbe(const char *name, int64_t value) {
+  char value_text[24];
+  formatI64(value_text, sizeof(value_text), value);
+  publishParamProbeText(name, value_text);
 }
 
 void Neo3ProSensors::publishGnssStatus() {
@@ -2493,6 +2628,18 @@ bool Neo3ProSensors::handleHostCommand(const char *command) {
   if (std::strcmp(command, "NEO:CAN:RECOVER") == 0) {
     recoverCan(); publishHardware(true); return true;
   }
+  if (std::strcmp(command, "NEO:COMPASS:PARAMS") == 0) {
+    if (!identity_.verified_cuav_gps || primary_node_id_ == 0U || !node_.seen ||
+        static_cast<uint32_t>(HAL_GetTick() - node_.received_ms) > 3000U) {
+      writeUsbLine("ERR:NEO:COMPASS:PARAMS:NODE"); return true;
+    }
+    params_.compass_cal_probe_active = true;
+    params_.compass_cal_probe_done = false;
+    params_.compass_cal_probe_index = 0U;
+    params_.compass_cal_probe_next_ms = HAL_GetTick();
+    writeUsbLine("ACK:NEO:COMPASS:PARAMS:REQUEST");
+    return true;
+  }
   if (std::strncmp(command, "NEO:GPS:RATE:", 13U) == 0) {
     unsigned hz = 0U; char extra = '\0';
     if (std::sscanf(command + 13U, "%u%c", &hz, &extra) != 1 ||
@@ -2514,11 +2661,15 @@ bool Neo3ProSensors::handleHostCommand(const char *command) {
       return true;
     }
     const int64_t period_ms = static_cast<int64_t>(1000U / hz);
+    // Read-before-write: the host may repeat this command after transient rate
+    // jitter. Probe the persistent parameter first so an already-correct 10 Hz
+    // receiver is never rebooted by an idempotent retry.
     params_.gps_rate_valid = false;
     params_.gps_rate_legacy_name = false;
     params_.gps_rate_target_ms = period_ms;
-    const bool ok = requestParamSetInt(primary_node_id_, "GPS1_RATE_MS", period_ms, 7U);
-    writeUsbLine(ok ? "ACK:NEO:GPS:RATE:REQUEST" : "ERR:NEO:GPS:RATE:BUSY");
+    params_.gps_rate_set_inflight = false;
+    const bool ok = requestParamRead(primary_node_id_, "GPS1_RATE_MS", 7U);
+    writeUsbLine(ok ? "ACK:NEO:GPS:RATE:PROBE" : "ERR:NEO:GPS:RATE:BUSY");
     if (!ok) params_.gps_rate_target_ms = 0;
     return true;
   }
