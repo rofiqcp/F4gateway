@@ -120,8 +120,13 @@ struct VehicleTelemetry {
 
   bool gpsReady{false};
   GpsFixState gpsFix{GPS_NO_FIX};
+#if defined(BOARD_F103C8)
+  float latitude{0.0F};
+  float longitude{0.0F};
+#else
   double latitude{0.0};
   double longitude{0.0};
+#endif
   uint8_t satellites{0};
   float hdop{0.0F};
   float haccM{0.0F};

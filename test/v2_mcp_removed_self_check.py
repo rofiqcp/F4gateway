@@ -20,7 +20,7 @@ need(not (ROOT/'lib').exists(), 'legacy lib directory removed; sources live unde
 need(not (ROOT/'src/Neo3ProSensors.cpp').exists(), 'Neo3Pro MCP driver removed')
 need(not (ROOT/'src/DroneCanDnaDatabase.cpp').exists(), 'DroneCAN DNA database removed')
 pio=(ROOT/'platformio.ini').read_text()
-need('default_envs = blackpill_f411ce_romdfu' in pio and '[env:blackpill_f411ce_romdfu]' in pio and 'extends = env:blackpill_f411ce_v2' in pio, 'default production target keeps v2 firmware through ROM-DFU environment')
+need('default_envs = bluepill_f103c8' in pio and '[env:bluepill_f103c8]' in pio and '[env:blackpill_f411ce_romdfu]' in pio and 'extends = env:blackpill_f411ce_v2' in pio, 'v3 defaults to F103C8 and retains the v2 F411 ROM-DFU environment')
 need('scripts/cdc_boot_upload.py $SOURCE' in pio, 'normal upload remains USB CDC bootloader')
 need('-DVECT_TAB_OFFSET=0x00004000U' in pio and 'board_upload.maximum_size = 376832' in pio, 'application bootloader layout unchanged')
 f4=(ROOT/'src/HmiOperatorUi.h').read_text(); main=(ROOT/'src/main.cpp').read_text()

@@ -122,8 +122,8 @@ if 'if (!strcmp(line, "ROMDFU"))' not in boot:
 if 'if(request==BOOT_REQUEST_MAGIC) maintenance_loop(valid);' not in boot:
     fail('application boot request must enter resident USB maintenance, not ROM DFU')
 app_src = (ROOT / 'src/main.cpp').read_text(encoding='utf-8')
-for token in ('gAppWatchdogArmed = true', 'RTC->BKP1R = kAppCrashMagic',
-              'RTC->BKP2R = 0U', 'kCrashCounterClearMs = 30000U'):
+for token in ('gAppWatchdogArmed = true', 'Board_BackupWrite(1U, kAppCrashMagic)',
+              'Board_BackupWrite(2U, 0U)', 'kCrashCounterClearMs = 30000U'):
     if token not in app_src: fail(f'application watchdog recovery token missing: {token}')
 cdc = (ROOT / 'scripts/cdc_boot_upload.py').read_text(encoding='utf-8')
 for token in ('BEGIN:', 'DATA2:', "transact(s,'END'", 'verify_runtime', 'BOOT_GLOB'):

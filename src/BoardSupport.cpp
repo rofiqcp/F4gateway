@@ -5,7 +5,11 @@
 
 SPI_HandleTypeDef hspi1{};
 TIM_HandleTypeDef htim1{};
+#if defined(BOARD_F103C8)
+TIM_HandleTypeDef htim3{};
+#else
 TIM_HandleTypeDef htim11{};
+#endif
 #if BTS_WINCH_ENABLED
 TIM_HandleTypeDef htim2{};
 TIM_HandleTypeDef htim4{};
@@ -13,7 +17,7 @@ TIM_HandleTypeDef htim4{};
 
 
 extern "C" uint8_t _end;
-extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason);
+extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason);
 
 namespace {
 void (*g_watchdog_callback)() = nullptr;
@@ -48,6 +52,33 @@ static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with re
 
 void SystemClock_Config() {
   RCC_OscInitTypeDef osc{};
+#if defined(BOARD_F103C8)
+  // STM32F103C8 BluePill/BlackPill reference clock: 8 MHz HSE -> 72 MHz SYSCLK.
+  osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  osc.HSEState = RCC_HSE_ON;
+  osc.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  osc.PLL.PLLState = RCC_PLL_ON;
+  osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  osc.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&osc) != HAL_OK)
+    FatalError();
+
+  RCC_ClkInitTypeDef clk{};
+  clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  clk.APB1CLKDivider = RCC_HCLK_DIV2;
+  clk.APB2CLKDivider = RCC_HCLK_DIV1;
+  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK)
+    FatalError();
+
+  RCC_PeriphCLKInitTypeDef periph{};
+  periph.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  periph.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;
+  if (HAL_RCCEx_PeriphCLKConfig(&periph) != HAL_OK)
+    FatalError();
+#else
   // BlackPill uses a 25 MHz HSE. Keep USB exactly at 48 MHz.
   osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   osc.HSEState = RCC_HSE_ON;
@@ -55,13 +86,10 @@ void SystemClock_Config() {
   osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   osc.PLL.PLLM = 25U;
 #if defined(BOARD_F401CD)
-  // STM32F401CD maximum SYSCLK is 84 MHz: 25/25*336/4 = 84 MHz,
-  // PLLQ = 7 gives an exact 48 MHz USB clock.
   osc.PLL.PLLN = 336U;
   osc.PLL.PLLP = RCC_PLLP_DIV4;
   osc.PLL.PLLQ = 7U;
 #else
-  // STM32F411 production clock: 25/25*192/2 = 96 MHz, PLLQ = 48 MHz.
   osc.PLL.PLLN = 192U;
   osc.PLL.PLLP = RCC_PLLP_DIV2;
   osc.PLL.PLLQ = 4U;
@@ -82,6 +110,7 @@ void SystemClock_Config() {
 #else
   if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK)
     FatalError();
+#endif
 #endif
 }
 
@@ -137,12 +166,25 @@ bool Spi1_Configure() {
 #endif
   __HAL_RCC_SPI1_CLK_ENABLE();
   GPIO_InitTypeDef gpio{};
+#if defined(BOARD_F103C8)
+  // F1 SPI1: SCK/MOSI are AF push-pull; MISO is floating input.
+  gpio.Pin = GPIO_PIN_5 | GPIO_PIN_7;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  gpio.Pin = GPIO_PIN_6;
+  gpio.Mode = GPIO_MODE_INPUT;
+  gpio.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &gpio);
+#else
   gpio.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
   gpio.Mode = GPIO_MODE_AF_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   gpio.Alternate = GPIO_AF5_SPI1;
   HAL_GPIO_Init(GPIOA, &gpio);
+#endif
 
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
@@ -166,7 +208,10 @@ void Spi1_InitBootOrFatal() {
 
 
 void Timers_Init() {
-#if defined(BOARD_F401CD)
+#if defined(BOARD_F103C8)
+  constexpr uint32_t kTimer1MHzPrescaler = 71U;
+  constexpr uint32_t kWatchdogPrescaler = 7199U;
+#elif defined(BOARD_F401CD)
   constexpr uint32_t kTimer1MHzPrescaler = 83U;
   constexpr uint32_t kWatchdogPrescaler = 8399U;
 #else
@@ -174,7 +219,11 @@ void Timers_Init() {
   constexpr uint32_t kWatchdogPrescaler = 9599U;
 #endif
   __HAL_RCC_TIM1_CLK_ENABLE();
+#if defined(BOARD_F103C8)
+  __HAL_RCC_TIM3_CLK_ENABLE();
+#else
   __HAL_RCC_TIM11_CLK_ENABLE();
+#endif
 
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = kTimer1MHzPrescaler;
@@ -201,7 +250,9 @@ void Timers_Init() {
   gpio.Mode = GPIO_MODE_AF_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
+#if !defined(BOARD_F103C8)
   gpio.Alternate = GPIO_AF1_TIM1;
+#endif
   HAL_GPIO_Init(GPIOA, &gpio);
 
 #if BTS_WINCH_ENABLED
@@ -226,13 +277,25 @@ void Timers_Init() {
   }
   GPIO_InitTypeDef btsGpio{};
   btsGpio.Mode = GPIO_MODE_AF_PP; btsGpio.Pull = GPIO_NOPULL; btsGpio.Speed = GPIO_SPEED_FREQ_LOW;
-  btsGpio.Pin = GPIO_PIN_2; btsGpio.Alternate = GPIO_AF1_TIM2; HAL_GPIO_Init(GPIOA, &btsGpio);
-  btsGpio.Pin = GPIO_PIN_8; btsGpio.Alternate = GPIO_AF2_TIM4; HAL_GPIO_Init(GPIOB, &btsGpio);
+  btsGpio.Pin = GPIO_PIN_2;
+#if !defined(BOARD_F103C8)
+  btsGpio.Alternate = GPIO_AF1_TIM2;
+#endif
+  HAL_GPIO_Init(GPIOA, &btsGpio);
+  btsGpio.Pin = GPIO_PIN_8;
+#if !defined(BOARD_F103C8)
+  btsGpio.Alternate = GPIO_AF2_TIM4;
+#endif
+  HAL_GPIO_Init(GPIOB, &btsGpio);
   (void)HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
   (void)HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
 #endif
 
+#if defined(BOARD_F103C8)
+  htim3.Instance = TIM3;
+#else
   htim11.Instance = TIM11;
+#endif
   htim11.Init.Prescaler = kWatchdogPrescaler;
   htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim11.Init.Period = 999U;
@@ -240,26 +303,66 @@ void Timers_Init() {
   htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
     FatalError();
+#if defined(BOARD_F103C8)
+  HAL_NVIC_SetPriority(TIM3_IRQn, 1U, 0U);
+  HAL_NVIC_EnableIRQ(TIM3_IRQn);
+#else
   HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 1U, 0U);
   HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
+#endif
 }
 
 } // namespace
 
-extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason) {
-  // RTC backup registers survive the core reset and are intentionally shared
-  // with the resident bootloader for post-mortem diagnostics.
-  __disable_irq();
+void Board_BackupWrite(uint8_t slot, uint32_t value) {
+#if defined(BOARD_F103C8)
   __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_BKP_CLK_ENABLE();
   HAL_PWR_EnableBkUpAccess();
-  RTC->BKP1R = kAppCrashMagic;       // bootloader repeated-crash marker
-  RTC->BKP3R = reason;               // 1 HF, 2 MM, 3 BF, 4 UF, 5 generic
-  RTC->BKP4R = SCB->CFSR;
-  RTC->BKP5R = SCB->HFSR;
-  RTC->BKP6R = stack ? stack[6] : 0U; // stacked PC
-  RTC->BKP7R = stack ? stack[5] : 0U; // stacked LR
-  RTC->BKP8R = SCB->MMFAR;
-  RTC->BKP9R = SCB->BFAR;
+  // F103 medium-density parts expose 16-bit backup registers. Diagnostic
+  // storage is best-effort only; safety never depends on these values.
+  volatile uint32_t *reg = nullptr;
+  switch (slot) {
+    case 0: reg = &BKP->DR1; break; case 1: reg = &BKP->DR2; break;
+    case 2: reg = &BKP->DR3; break; case 3: reg = &BKP->DR4; break;
+    case 4: reg = &BKP->DR5; break; case 5: reg = &BKP->DR6; break;
+    case 6: reg = &BKP->DR7; break; case 7: reg = &BKP->DR8; break;
+    case 8: reg = &BKP->DR9; break; case 9: reg = &BKP->DR10; break;
+    default: break;
+  }
+  if (reg != nullptr) *reg = value & 0xFFFFU;
+#else
+  if (slot <= 9U) (&RTC->BKP0R)[slot] = value;
+#endif
+}
+
+uint32_t Board_BackupRead(uint8_t slot) {
+#if defined(BOARD_F103C8)
+  volatile uint32_t *reg = nullptr;
+  switch (slot) {
+    case 0: reg = &BKP->DR1; break; case 1: reg = &BKP->DR2; break;
+    case 2: reg = &BKP->DR3; break; case 3: reg = &BKP->DR4; break;
+    case 4: reg = &BKP->DR5; break; case 5: reg = &BKP->DR6; break;
+    case 6: reg = &BKP->DR7; break; case 7: reg = &BKP->DR8; break;
+    case 8: reg = &BKP->DR9; break; case 9: reg = &BKP->DR10; break;
+    default: break;
+  }
+  return reg != nullptr ? (*reg & 0xFFFFU) : 0U;
+#else
+  return slot <= 9U ? (&RTC->BKP0R)[slot] : 0U;
+#endif
+}
+
+extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason) {
+  __disable_irq();
+  Board_BackupWrite(1U, kAppCrashMagic);
+  Board_BackupWrite(3U, reason);
+  Board_BackupWrite(4U, SCB->CFSR);
+  Board_BackupWrite(5U, SCB->HFSR);
+  Board_BackupWrite(6U, stack ? stack[6] : 0U);
+  Board_BackupWrite(7U, stack ? stack[5] : 0U);
+  Board_BackupWrite(8U, SCB->MMFAR);
+  Board_BackupWrite(9U, SCB->BFAR);
   __DSB();
   NVIC_SystemReset();
   while (true) { __NOP(); }
@@ -268,7 +371,9 @@ extern "C" [[noreturn]] void Board_FaultReset(uint32_t *stack, uint32_t reason) 
 void Board_Init() {
   HAL_Init();
   __HAL_RCC_PWR_CLK_ENABLE();
+#if !defined(BOARD_F103C8)
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+#endif
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootOrFatal();
@@ -521,7 +626,11 @@ extern "C" void SysTick_Handler() {
   HAL_SYSTICK_IRQHandler();
 }
 
+#if defined(BOARD_F103C8)
+extern "C" void TIM3_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
+#else
 extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
+#endif
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "stm32f4xx_hal.h"
+#include "McuHal.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -122,7 +122,11 @@ private:
   static constexpr uint32_t kTftFastPrescaler = SPI_BAUDRATEPRESCALER_8;
   static constexpr uint32_t kTftUltraFastPrescaler = SPI_BAUDRATEPRESCALER_4;
   static constexpr uint32_t kTouchPrescaler = SPI_BAUDRATEPRESCALER_64;
+#if defined(BOARD_F103C8)
+  static constexpr uint8_t kTextTileRows = 4U;
+#else
   static constexpr uint8_t kTextTileRows = 8U;
+#endif
 
   bool waitSpiIdle(uint32_t timeoutUs = kSpiWaitTimeoutUs);
   void drainSpiRx();

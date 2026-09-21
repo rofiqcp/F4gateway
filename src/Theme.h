@@ -29,27 +29,35 @@ inline void useFontCompact() {
 }
 
 inline void useFontSmall() {
-  tft.setTextFont(1);
-  tft.setFreeFont(&FreeSans9pt7b);
-  tft.setTextSize(1);
+#if defined(BOARD_F103C8)
+  tft.setFreeFont(nullptr); tft.setTextFont(1); tft.setTextSize(1);
+#else
+  tft.setTextFont(1); tft.setFreeFont(&FreeSans9pt7b); tft.setTextSize(1);
+#endif
 }
 
 inline void useFontUi() {
-  tft.setTextFont(1);
-  tft.setFreeFont(&FreeSansBold9pt7b);
-  tft.setTextSize(1);
+#if defined(BOARD_F103C8)
+  tft.setFreeFont(nullptr); tft.setTextFont(2); tft.setTextSize(1);
+#else
+  tft.setTextFont(1); tft.setFreeFont(&FreeSansBold9pt7b); tft.setTextSize(1);
+#endif
 }
 
 inline void useFontValue() {
-  tft.setTextFont(1);
-  tft.setFreeFont(&FreeSansBold12pt7b);
-  tft.setTextSize(1);
+#if defined(BOARD_F103C8)
+  tft.setFreeFont(nullptr); tft.setTextFont(2); tft.setTextSize(1);
+#else
+  tft.setTextFont(1); tft.setFreeFont(&FreeSansBold12pt7b); tft.setTextSize(1);
+#endif
 }
 
 inline void useFontHero() {
-  tft.setTextFont(1);
-  tft.setFreeFont(&FreeSansBold24pt7b);
-  tft.setTextSize(1);
+#if defined(BOARD_F103C8)
+  tft.setFreeFont(nullptr); tft.setTextFont(2); tft.setTextSize(2);
+#else
+  tft.setTextFont(1); tft.setFreeFont(&FreeSansBold24pt7b); tft.setTextSize(1);
+#endif
 }
 
 inline void setTextStyle(uint16_t fg, uint16_t bg, uint8_t datum) {

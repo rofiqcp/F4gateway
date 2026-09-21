@@ -77,9 +77,15 @@ class UsbCdcPort {
 #endif
  private:
   static constexpr uint32_t kTxStallRepairMs = 250U;
+#if defined(BOARD_F103C8)
+  static constexpr uint16_t kRxSize = 1024U;
+  static constexpr uint16_t kTxSize = 1024U;
+  static constexpr uint16_t kHighTxSize = 1024U;
+#else
   static constexpr uint16_t kRxSize = 4096U;
   static constexpr uint16_t kTxSize = 4096U;
   static constexpr uint16_t kHighTxSize = 4096U;
+#endif
   uint8_t rx_[kRxSize]{};
   uint8_t tx_[kTxSize]{};
   uint8_t tx_high_[kHighTxSize]{};

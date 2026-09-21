@@ -1,13 +1,18 @@
 #pragma once
 
-#include "stm32f4xx_hal.h"
+#include "McuHal.h"
 #include "FirmwareConfig.h"
 #include <cstddef>
 #include <cstdint>
 
 extern SPI_HandleTypeDef hspi1;
 extern TIM_HandleTypeDef htim1;
+#if defined(BOARD_F103C8)
+extern TIM_HandleTypeDef htim3;
+#define htim11 htim3
+#else
 extern TIM_HandleTypeDef htim11;
+#endif
 #if BTS_WINCH_ENABLED
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim4;
@@ -49,3 +54,5 @@ void Board_WatchdogStart();
 void Board_WatchdogStop();
 void Board_BuzzerStart(uint16_t frequency_hz, uint16_t duration_ms);
 void Board_BuzzerStop();
+void Board_BackupWrite(uint8_t slot, uint32_t value);
+uint32_t Board_BackupRead(uint8_t slot);

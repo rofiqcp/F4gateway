@@ -1,5 +1,5 @@
 #include "PersistentConfigStore.h"
-#include "stm32f4xx_hal.h"
+#include "McuHal.h"
 
 #include <cstring>
 
@@ -134,18 +134,38 @@ bool PersistentConfigStore::write(uint16_t key, const void *data, uint8_t length
   const uint32_t address = kStorageBase + next_slot_ * sizeof(Record);
   if (HAL_FLASH_Unlock() != HAL_OK) return false;
   bool ok = true;
+#if defined(BOARD_F103C8)
+  // STM32F1 medium-density flash programs 16-bit halfwords. Keep the commit
+  // word last so a power loss can never turn a partial record into a valid one.
+  for (uint32_t offset = 0U; offset < 44U && ok; offset += 2U) {
+    uint16_t halfword = 0xFFFFU;
+    std::memcpy(&halfword, reinterpret_cast<const uint8_t *>(&record) + offset,
+                sizeof(halfword));
+    ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, address + offset,
+                           halfword) == HAL_OK;
+  }
+#else
   for (uint32_t offset = 0U; offset < 44U && ok; offset += 4U) {
     uint32_t word = 0xFFFFFFFFUL;
     std::memcpy(&word, reinterpret_cast<const uint8_t *>(&record) + offset,
                 sizeof(word));
     ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address + offset, word) == HAL_OK;
   }
+#endif
 
   if (ok)
     ok = std::memcmp(reinterpret_cast<const void *>(address), &record, 44U) == 0;
   if (ok) {
+#if defined(BOARD_F103C8)
+    const uint16_t commitLo = static_cast<uint16_t>(record.commit_word & 0xFFFFU);
+    const uint16_t commitHi = static_cast<uint16_t>(record.commit_word >> 16U);
+    ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, address + 44U, commitLo) == HAL_OK;
+    if (ok)
+      ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, address + 46U, commitHi) == HAL_OK;
+#else
     uint32_t commit = record.commit_word;
     ok = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, address + 44U, commit) == HAL_OK;
+#endif
   }
   (void)HAL_FLASH_Lock();
   __DSB();

@@ -2,16 +2,20 @@
 #include "BoardSupport.h"
 
 #include <algorithm>
+#if !defined(BOARD_F103C8)
 #include <cmath>
+#endif
 #include <cstdlib>
 #include <cstring>
 
 #include "fonts/Classic5x7.inc"
+#if !defined(BOARD_F103C8)
 #include "fonts/Font16.inc"
 #include "fonts/FreeSans9pt7b.h"
 #include "fonts/FreeSansBold12pt7b.h"
 #include "fonts/FreeSansBold24pt7b.h"
 #include "fonts/FreeSansBold9pt7b.h"
+#endif
 
 namespace {
 constexpr uint16_t kTftCs = GPIO_PIN_0;
@@ -39,6 +43,30 @@ uint16_t Median3(uint16_t a, uint16_t b, uint16_t c) {
     std::swap(a, b);
   return b;
 }
+#if defined(BOARD_F103C8)
+int32_t PixelSqrt(int32_t value) {
+  if (value <= 0) return 0;
+  uint32_t n = static_cast<uint32_t>(value);
+  uint32_t root = 0U;
+  uint32_t bit = 1UL << 30U;
+  while (bit > n) bit >>= 2U;
+  while (bit != 0U) {
+    if (n >= root + bit) {
+      n -= root + bit;
+      root = (root >> 1U) + bit;
+    } else {
+      root >>= 1U;
+    }
+    bit >>= 2U;
+  }
+  return static_cast<int32_t>(root);
+}
+#else
+int32_t PixelSqrt(int32_t value) {
+  return value <= 0 ? 0 :
+      static_cast<int32_t>(std::sqrt(static_cast<double>(value)));
+}
+#endif
 } // namespace
 
 bool HmiDisplay::waitSpiIdle(uint32_t timeoutUs) {
@@ -672,7 +700,7 @@ void HmiDisplay::drawCircle(int32_t x0, int32_t y0, int32_t r, uint16_t color) {
     return;
   for (int32_t y = -r; y <= r; ++y) {
     const int32_t q = r * r - y * y;
-    const int32_t x = static_cast<int32_t>(std::sqrt(static_cast<double>(q)));
+    const int32_t x = PixelSqrt(q);
     fillRect(x0 - x, y0 + y, 1, 1, color);
     if (x != 0)
       fillRect(x0 + x, y0 + y, 1, 1, color);
@@ -683,8 +711,7 @@ void HmiDisplay::fillCircle(int32_t x0, int32_t y0, int32_t r, uint16_t color) {
     return;
   for (int32_t y = -r; y <= r; ++y) {
     const int32_t q = r * r - y * y;
-    const int32_t span =
-        static_cast<int32_t>(std::sqrt(static_cast<double>(q)));
+    const int32_t span = PixelSqrt(q);
     drawFastHLine(x0 - span, y0 + y, 2 * span + 1, color);
   }
 }
@@ -699,7 +726,7 @@ void HmiDisplay::drawRoundRect(int32_t x, int32_t y, int32_t w, int32_t h,
   drawFastVLine(x + w - 1, y + r, h - 2 * r, color);
   for (int32_t yy = 0; yy <= r; ++yy) {
     const int32_t q = r * r - yy * yy;
-    const int32_t xx = static_cast<int32_t>(std::sqrt(static_cast<double>(q)));
+    const int32_t xx = PixelSqrt(q);
     fillRect(x + r - xx, y + r - yy, 1, 1, color);
     fillRect(x + w - 1 - r + xx, y + r - yy, 1, 1, color);
     fillRect(x + r - xx, y + h - 1 - r + yy, 1, 1, color);
@@ -715,7 +742,7 @@ void HmiDisplay::fillRoundRect(int32_t x, int32_t y, int32_t w, int32_t h,
   for (int32_t yy = 0; yy < r; ++yy) {
     const int32_t dy = r - yy;
     const int32_t q = r * r - dy * dy;
-    const int32_t dx = static_cast<int32_t>(std::sqrt(static_cast<double>(q)));
+    const int32_t dx = PixelSqrt(q);
     drawFastHLine(x + r - dx, y + yy, w - 2 * r + 2 * dx, color);
     drawFastHLine(x + r - dx, y + h - 1 - yy, w - 2 * r + 2 * dx, color);
   }
@@ -742,7 +769,11 @@ void HmiDisplay::fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
   }
   const int32_t dx01 = x1 - x0, dy01 = y1 - y0, dx02 = x2 - x0, dy02 = y2 - y0,
                 dx12 = x2 - x1, dy12 = y2 - y1;
+#if defined(BOARD_F103C8)
+  int32_t sa = 0, sb = 0;
+#else
   int64_t sa = 0, sb = 0;
+#endif
   int32_t y = y0;
   const int32_t last = y1 == y2 ? y1 : y1 - 1;
   for (; y <= last; ++y) {
@@ -752,8 +783,13 @@ void HmiDisplay::fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     sb += dx02;
     drawFastHLine(std::min(a, b), y, std::abs(a - b) + 1, color);
   }
+#if defined(BOARD_F103C8)
+  sa = dx12 * (y - y1);
+  sb = dx02 * (y - y0);
+#else
   sa = static_cast<int64_t>(dx12) * (y - y1);
   sb = static_cast<int64_t>(dx02) * (y - y0);
+#endif
   for (; y <= y2; ++y) {
     const int32_t a = x1 + (dy12 == 0 ? 0 : static_cast<int32_t>(sa / dy12)),
                   b = x0 + static_cast<int32_t>(sb / dy02);
@@ -801,6 +837,7 @@ void HmiDisplay::textBounds(const char *text, int32_t &min_x, int32_t &min_y,
     return;
   if (font_ == nullptr) {
     const int32_t scale = static_cast<int32_t>(text_size_);
+#if !defined(BOARD_F103C8)
     if (builtin_font_ == 2U) {
       for (const char *q = text; *q != '\0'; ++q) {
         const uint8_t c = static_cast<uint8_t>(*q);
@@ -812,6 +849,7 @@ void HmiDisplay::textBounds(const char *text, int32_t &min_x, int32_t &min_y,
       max_y = 16 * scale - 1;
       return;
     }
+#endif
     advance = static_cast<int32_t>(std::strlen(text)) * 6 * scale;
     max_x = advance - 1;
     max_y = 8 * scale - 1;
@@ -907,6 +945,7 @@ int16_t HmiDisplay::drawString(const char *text, int32_t x, int32_t y) {
       int32_t cur = left;
       for (const char *q = text; *q != '\0'; ++q) {
         const uint8_t c = static_cast<uint8_t>(*q);
+#if !defined(BOARD_F103C8)
         if (builtin_font_ == 2U) {
           const uint8_t idx =
               (c >= 32U && c <= 127U) ? static_cast<uint8_t>(c - 32U) : 0U;
@@ -925,7 +964,9 @@ int16_t HmiDisplay::drawString(const char *text, int32_t x, int32_t y) {
               }
             }
           cur += static_cast<int32_t>(gw) * scale;
-        } else {
+        } else
+#endif
+        {
           for (uint8_t col = 0U; col < 5U; ++col) {
             uint8_t bits = kClassicFont[static_cast<uint16_t>(c) * 5U + col];
             for (uint8_t row = 0U; row < 8U; ++row) {

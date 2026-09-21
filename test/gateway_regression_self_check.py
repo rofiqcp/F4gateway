@@ -16,7 +16,7 @@ need('serviceUsbTransportState' in main and 'transportGeneration()' in main,'USB
 need('trim_after_active_message' in usb and 'tx_high_' in usb[usb.index('void UsbCdcPort::beginHostSession'):usb.index('uint32_t UsbCdcPort::txBusyAgeMs')],'session purge preserves message boundary')
 need('highSessionPurgeCount' in usbh,'high-priority session purge observable')
 need('legacyTelemetryPayloadValid' in main and 'legacyTelemetryMalformed' in main,'legacy telemetry validation retained')
-need('parseFiniteDoubleStrict' in main and 'parseBoolStrict' in main,'parser rejects malformed scalar/bool values')
+need('parseFiniteLegacyRealStrict' in main and 'parseBoolStrict' in main,'parser rejects malformed scalar/bool values')
 need('previous_session != h.session' in tp and 'result.sessionChanged = ok && is_v3' in tp,'telemetry session transition remains explicit')
 need('sx = (width_ - 1) - sx;' in tft and 'sy = (height_ - 1) - sy;' in tft,'touch inversion has no edge off-by-one')
 need('pb12McpCs' not in diag and 'pb10McpInt' not in diag,'obsolete MCP diagnostics removed')

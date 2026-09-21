@@ -85,6 +85,23 @@ private:
 
   static bool hit(int px,int py,int x,int y,int w,int h){return px>=x&&px<x+w&&py>=y&&py<y+h;}
   static const char *yn(bool v){return v?"READY":"WAIT";}
+  static void formatFixed(char *out, size_t cap, float value, uint8_t decimals,
+                          const char *suffix=nullptr){
+    if(out==nullptr||cap==0U)return;
+    char *p=out; size_t left=cap;
+    auto put=[&](char ch){if(left>1U){*p++=ch;--left;}};
+    if(value<0.0F){put('-');value=-value;}
+    if(value>999999.0F)value=999999.0F;
+    const uint32_t scaled=decimals?static_cast<uint32_t>(value*10.0F+0.5F):
+                                      static_cast<uint32_t>(value+0.5F);
+    const uint32_t whole=decimals?scaled/10U:scaled;
+    char rev[10]; uint8_t n=0U; uint32_t v=whole;
+    do{rev[n++]=static_cast<char>('0'+(v%10U));v/=10U;}while(v!=0U&&n<sizeof(rev));
+    while(n>0U)put(rev[--n]);
+    if(decimals){put('.');put(static_cast<char>('0'+(scaled%10U)));}
+    if(suffix!=nullptr)while(*suffix!='\0')put(*suffix++);
+    *p='\0';
+  }
   void text(const char*s,int x,int y,uint16_t c,uint16_t bg,uint8_t datum=TL_DATUM,uint8_t size=1){
     tft.setFreeFont(nullptr); tft.setTextFont(1); tft.setTextSize(size); tft.setTextDatum(datum); tft.setTextColor(c,bg); tft.drawString(s?s:"-",x,y);
   }
@@ -108,7 +125,7 @@ private:
     text(foot,x+CARD_W/2,CARD_Y+CARD_H-10,C_MUTED,C_CARD,BC_DATUM,1);
   }
   void drawHome(const VehicleTelemetry &d){
-    char speed[20]; std::snprintf(speed,sizeof(speed),"%.1f",d.speedKmh);
+    char speed[20]; formatFixed(speed,sizeof(speed),d.speedKmh,1U);
     panel(6,34,98,138,C_CARD,C_ACC); dot(18,48,d.nav2Ready?C_GREEN2:C_DIM); text("NAV",55,50,C_MUTED,C_CARD,TC_DATUM); text(d.navigationStatus==NAV_NAVIGATING?"ACTIVE":"IDLE",55,104,C_TEXT2,C_CARD,MC_DATUM,2); text(d.activeTarget,55,158,C_MUTED,C_CARD,BC_DATUM);
     panel(109,34,98,138,C_CARD,C_ACC); dot(121,48,d.escFresh?C_GREEN2:C_DIM); text("SPEED",158,50,C_MUTED,C_CARD,TC_DATUM); text(speed,158,99,C_TEXT2,C_CARD,MC_DATUM,2); text("km/h",158,124,C_MUTED,C_CARD,MC_DATUM); text(d.state==STATE_RUNNING?"MOVING":"STOP",158,158,C_MUTED,C_CARD,BC_DATUM);
     panel(212,34,98,138,C_CARD,d.perceptionReady?C_GREEN2:C_BORDER2); dot(224,48,d.perceptionReady?C_GREEN2:C_DIM); text("PERCEPTION",261,50,C_MUTED,C_CARD,TC_DATUM); text(d.perceptionReady?"ONLINE":"OFF",261,104,C_TEXT2,C_CARD,MC_DATUM,2); text(d.detectedObject,261,158,C_MUTED,C_CARD,BC_DATUM);
@@ -121,9 +138,9 @@ private:
     char a[22],b[22],c[22]; const uint8_t s=escSlide_;
     const bool motorFresh=d.escx.motors.valid && d.escx.motors.fresh;
     if(s==0){
-      std::snprintf(a,sizeof(a),"%.0f",d.escx.leftErpm);
-      std::snprintf(b,sizeof(b),"%.0f",d.escx.rightErpm);
-      std::snprintf(c,sizeof(c),"%.1f",d.steeringActualDeg);
+      formatFixed(a,sizeof(a),d.escx.leftErpm,0U);
+      formatFixed(b,sizeof(b),d.escx.rightErpm,0U);
+      formatFixed(c,sizeof(c),d.steeringActualDeg,1U);
       card(X1,"LEFT MOTOR",motorFresh?a:"N/A","ERPM",motorFresh?C_GREEN2:C_DIM);
       card(X2,"RIGHT MOTOR",motorFresh?b:"N/A","ERPM",motorFresh?C_GREEN2:C_DIM);
       card(X3,"STEERING",c,"deg",d.encoderReady?C_ACC:C_WARN);
@@ -138,14 +155,14 @@ private:
     }
     footer(s);
   }
-  void drawPer(const VehicleTelemetry &d){char fps[20];std::snprintf(fps,sizeof(fps),"%.0f fps",d.cameraFps);const uint8_t s=perSlide_;if(s==0){card(X1,"PER OVERVIEW",d.perceptionReady?"ONLINE":"OFF","PERCEPTION",d.perceptionReady?C_GREEN2:C_RED2);card(X2,"CAMERA",d.cameraReady?"ON":"OFF","IMAGE SOURCE",d.cameraReady?C_GREEN2:C_DIM);card(X3,"DETECTION",d.perceptionInference?"ON":"OFF","YOLO / OBJECT",d.perceptionInference?C_ACC:C_DIM);}else if(s==1){card(X1,"CAMERA LINK",d.cameraReady?"OK":"LOST","USB CAMERA",d.cameraReady?C_GREEN2:C_RED2);card(X2,"FRAME RATE",fps,"STREAM",C_ACC);card(X3,"CAM STATUS",d.cameraReady?"ACTIVE":"IDLE","CAPTURE",d.cameraReady?C_GREEN2:C_DIM);}else{card(X1,"DETECTION",d.perceptionInference?"ACTIVE":"OFF","OBJECT MODEL",d.perceptionInference?C_ACC:C_DIM);card(X2,"OBSTACLE",d.obstacleDetected?"DETECTED":"CLEAR","SAFETY",d.obstacleDetected?C_RED2:C_GREEN2);card(X3,"PER HEALTH",d.perceptionReady?"HEALTHY":"CHECK","SYSTEM",d.perceptionReady?C_GREEN2:C_RED2);}footer(s);}
+  void drawPer(const VehicleTelemetry &d){char fps[20];formatFixed(fps,sizeof(fps),d.cameraFps,0U," fps");const uint8_t s=perSlide_;if(s==0){card(X1,"PER OVERVIEW",d.perceptionReady?"ONLINE":"OFF","PERCEPTION",d.perceptionReady?C_GREEN2:C_RED2);card(X2,"CAMERA",d.cameraReady?"ON":"OFF","IMAGE SOURCE",d.cameraReady?C_GREEN2:C_DIM);card(X3,"DETECTION",d.perceptionInference?"ON":"OFF","YOLO / OBJECT",d.perceptionInference?C_ACC:C_DIM);}else if(s==1){card(X1,"CAMERA LINK",d.cameraReady?"OK":"LOST","USB CAMERA",d.cameraReady?C_GREEN2:C_RED2);card(X2,"FRAME RATE",fps,"STREAM",C_ACC);card(X3,"CAM STATUS",d.cameraReady?"ACTIVE":"IDLE","CAPTURE",d.cameraReady?C_GREEN2:C_DIM);}else{card(X1,"DETECTION",d.perceptionInference?"ACTIVE":"OFF","OBJECT MODEL",d.perceptionInference?C_ACC:C_DIM);card(X2,"OBSTACLE",d.obstacleDetected?"DETECTED":"CLEAR","SAFETY",d.obstacleDetected?C_RED2:C_GREEN2);card(X3,"PER HEALTH",d.perceptionReady?"HEALTHY":"CHECK","SYSTEM",d.perceptionReady?C_GREEN2:C_RED2);}footer(s);}
   void drawNav(const VehicleTelemetry &d){
     char dist[20],head[20],spd[20];
     const bool goalDistanceFresh=d.goalRemainingDistanceValid && d.navigationFresh;
-    if(goalDistanceFresh) std::snprintf(dist,sizeof(dist),"%.1f m",d.goalRemainingDistanceM);
-    else std::snprintf(dist,sizeof(dist),"%s","N/A");
-    std::snprintf(head,sizeof(head),"%.1f",d.headingDeg);
-    std::snprintf(spd,sizeof(spd),"%.1f",d.driveActualMps);
+    if(goalDistanceFresh) formatFixed(dist,sizeof(dist),d.goalRemainingDistanceM,1U," m");
+    else std::strcpy(dist,"N/A");
+    formatFixed(head,sizeof(head),d.headingDeg,1U);
+    formatFixed(spd,sizeof(spd),d.driveActualMps,1U);
     const uint8_t s=navSlide_;
     if(s==0){card(X1,"NAV OVERVIEW",d.navigationStatus==NAV_NAVIGATING?"ACTIVE":"IDLE",navigationStatusText(d.navigationStatus),d.nav2Ready?C_GREEN2:C_DIM);card(X2,"GOAL",d.activeTarget,"TARGET",C_ACC);card(X3,"DISTANCE",dist,"TO GOAL",goalDistanceFresh?C_ACC:C_DIM);}
     else if(s==1){card(X1,"HEADING",head,"deg",C_ACC);card(X2,"SPEED",spd,"m/s",d.state==STATE_RUNNING?C_GREEN2:C_DIM);card(X3,"NAV LINK",d.nav2Ready?"ONLINE":"OFF","ROS / NAV2",d.nav2Ready?C_GREEN2:C_RED2);}

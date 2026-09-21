@@ -9,6 +9,7 @@
 #include "BuildInfo.h"
 #include "HmiDisplay.h"
 #include "PersistentConfigStore.h"
+#include "NumericParse.h"
 #include "usb/UsbCdcPort.h"
 #include <algorithm>
 #include <cmath>
@@ -92,7 +93,11 @@ static volatile uint8_t gTftPixelFormat = 0U;
 static char serialRx[640];
 static size_t serialRxLen = 0;
 static bool serialRxDiscarding = false;
+#if defined(BOARD_F103C8)
+static constexpr uint8_t kDeferredCommandSlots = 12U;
+#else
 static constexpr uint8_t kDeferredCommandSlots = 64U;
+#endif
 static constexpr size_t kDeferredCommandLength = 256U;
 static char gDeferredCommands[kDeferredCommandSlots][kDeferredCommandLength]{};
 static uint8_t gDeferredCommandHead = 0U;
@@ -133,16 +138,17 @@ static size_t serial1RxLen = 0;
 static bool serial1RxDiscarding = false;
 #endif
 
+#if !defined(BOARD_F103C8)
 static uint32_t gDfuArmDeadlineMs = 0U;
 static constexpr uint32_t kBootRequestMagic = 0x42465544UL; // DFUB
+#endif
 static constexpr uint32_t kAppCrashMagic = 0x48535243UL;    // CRSH
 static constexpr uint32_t kCrashCounterClearMs = 30000U;
 static bool gCrashCounterCleared = false;
 static uint32_t gWatchdogHealthySinceMs = 0U;
 
-// Stoppable application watchdog. TIM11 is deliberately used instead of IWDG so
-// ROM-DFU erase/program transactions cannot be interrupted by a firmware
-// watchdog.
+// Stoppable application watchdog. F411 uses TIM11 and F103 uses TIM3 instead
+// of IWDG so maintenance/recovery paths can explicitly control supervision.
 static void appWatchdogIsr() {
   if (!gAppWatchdogArmed)
     return;
@@ -160,10 +166,10 @@ static void appWatchdogIsr() {
   if (gAppWatchdogStallTicks >= APP_WATCHDOG_TIMEOUT_TICKS) {
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
-    RTC->BKP1R = kAppCrashMagic;
-    RTC->BKP3R = 0x100U; // application main-loop watchdog
-    RTC->BKP4R = SCB->CFSR;
-    RTC->BKP5R = SCB->HFSR;
+    Board_BackupWrite(1U, kAppCrashMagic);
+    Board_BackupWrite(3U, 0x100U); // application main-loop watchdog
+    Board_BackupWrite(4U, SCB->CFSR);
+    Board_BackupWrite(5U, SCB->HFSR);
     __DSB();
     NVIC_SystemReset();
   }
@@ -179,10 +185,12 @@ static void startAppWatchdog() {
   gCrashCounterCleared = false;
 }
 
+#if !defined(BOARD_F103C8)
 static void stopAppWatchdog() {
   gAppWatchdogArmed = false;
   Board_WatchdogStop();
 }
+#endif
 
 static bool tryUsbLine(const char *line) {
   if (line == nullptr)
@@ -310,13 +318,14 @@ static void publishLinkState() {
   printBoth(gTelemetry.rosConnected ? "LINK:ROS:ONLINE" : "LINK:ROS:OFFLINE");
 }
 
+#if !defined(BOARD_F103C8)
 static void enterSystemDfu() {
   stopAppWatchdog();
   __HAL_RCC_PWR_CLK_ENABLE();
   HAL_PWR_EnableBkUpAccess();
   for (volatile uint32_t i = 0; i < 1000U; ++i)
     __NOP();
-  RTC->BKP0R = kBootRequestMagic;
+  Board_BackupWrite(0U, kBootRequestMagic);
   __DSB();
   __ISB();
   gUsb.flush(150U);
@@ -326,6 +335,7 @@ static void enterSystemDfu() {
   while (true) {
   }
 }
+#endif
 
 static void stopDriveTest() {
   // STOP is fail-safe and idempotent. Latch it before clearing local motion
@@ -455,8 +465,10 @@ static void serviceEmergencyStopHold() {
   serviceSafetyControlTx();
 }
 
+#if !defined(BOARD_F103C8)
 static bool motionSafeForHeavyMaintenance();
 static bool runTftSelfTest();
+#endif
 static float actualEditValue(UiEditKey key);
 static bool gUiDrawActive = false;
 static uint32_t gUiDrawLastMs = 0U;
@@ -650,38 +662,37 @@ static bool parseBoolStrict(const char *s, bool &out) {
   return false;
 }
 
-static bool parseFiniteDoubleStrict(const char *s, double &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0;
-  char *end = nullptr;
-  const double value = std::strtod(s, &end);
-  if (errno != 0 || end == s || end == nullptr || *end != '\0' || !std::isfinite(value))
-    return false;
-  out = value;
-  return true;
+#if defined(BOARD_F103C8)
+using LegacyReal = float;
+static bool parseFiniteLegacyRealStrict(const char *s, LegacyReal &out) {
+  return CompactParse::realf(s, out);
 }
+#else
+using LegacyReal = double;
+static bool parseFiniteLegacyRealStrict(const char *s, LegacyReal &out) {
+  return CompactParse::real(s, out);
+}
+#endif
 
 static bool parseLongStrict(const char *s, long &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0;
-  char *end = nullptr;
-  const long value = std::strtol(s, &end, 10);
-  if (errno != 0 || end == s || end == nullptr || *end != '\0') return false;
-  out = value;
+  int32_t value = 0;
+  if (!CompactParse::i32(s, value)) return false;
+  out = static_cast<long>(value);
   return true;
 }
 
 static bool parseU32Strict(const char *s, uint32_t &out) {
-  if (s == nullptr || *s == '\0') return false;
-  for (const char *p = s; *p != '\0'; ++p)
-    if (*p < '0' || *p > '9') return false;
-  errno = 0;
-  char *end = nullptr;
-  const unsigned long value = std::strtoul(s, &end, 10);
-  if (errno != 0 || end == s || end == nullptr || *end != '\0' ||
-      value > std::numeric_limits<uint32_t>::max()) return false;
-  out = static_cast<uint32_t>(value);
-  return true;
+  return CompactParse::u32(s, out);
+}
+
+static LegacyReal parseDoubleOrZero(const char *s) {
+  LegacyReal value = static_cast<LegacyReal>(0);
+  return parseFiniteLegacyRealStrict(s, value) ? value : static_cast<LegacyReal>(0);
+}
+
+static int parseIntOrZero(const char *s) {
+  int32_t value = 0;
+  return CompactParse::i32(s, value) ? static_cast<int>(value) : 0;
 }
 
 static bool legacyTelemetryPayloadValid(const char *command) {
@@ -691,7 +702,7 @@ static bool legacyTelemetryPayloadValid(const char *command) {
     return std::strncmp(command, prefix, n) == 0 ? command + n : nullptr;
   };
   const char *p = nullptr;
-  double d = 0.0;
+  LegacyReal d = static_cast<LegacyReal>(0);
   long i = 0;
   bool b = false;
 
@@ -703,16 +714,19 @@ static bool legacyTelemetryPayloadValid(const char *command) {
       "GYROZ:", "FPS:", "DIST:", "CONF:"};
   for (const char *prefix : floatPrefixes) {
     if ((p = after(prefix)) != nullptr) {
-      if (!parseFiniteDoubleStrict(p, d)) return false;
-      if (!std::strcmp(prefix, "LAT:") && (d < -90.0 || d > 90.0)) return false;
-      if (!std::strcmp(prefix, "LON:") && (d < -180.0 || d > 180.0)) return false;
+      if (!parseFiniteLegacyRealStrict(p, d)) return false;
+      if (!std::strcmp(prefix, "LAT:") &&
+          (d < static_cast<LegacyReal>(-90.0F) || d > static_cast<LegacyReal>(90.0F))) return false;
+      if (!std::strcmp(prefix, "LON:") &&
+          (d < static_cast<LegacyReal>(-180.0F) || d > static_cast<LegacyReal>(180.0F))) return false;
       if (!std::strcmp(prefix, "CFGSTEERTEST:") &&
           (d < STEER_TEST_ANGLE_MIN_DEG || d > STEER_TEST_ANGLE_MAX_DEG)) return false;
       if (!std::strcmp(prefix, "CFGERPMMPS:") && (d < ERPM_PER_MPS_MIN || d > ERPM_PER_MPS_MAX)) return false;
-      if (!std::strcmp(prefix, "CONF:") && (d < 0.0 || d > 100.0)) return false;
+      if (!std::strcmp(prefix, "CONF:") &&
+          (d < static_cast<LegacyReal>(0.0F) || d > static_cast<LegacyReal>(100.0F))) return false;
       if ((!std::strcmp(prefix, "HDOP:") || !std::strcmp(prefix, "HACC:") ||
            !std::strcmp(prefix, "GAGE:") || !std::strcmp(prefix, "FPS:") ||
-           !std::strcmp(prefix, "DIST:")) && d < 0.0) return false;
+           !std::strcmp(prefix, "DIST:")) && d < static_cast<LegacyReal>(0.0F)) return false;
       return true;
     }
   }
@@ -1116,6 +1130,7 @@ static void setExternalMenu(const char *name) {
 
 static void handleSerialCommand(char *command);
 
+#if !defined(BOARD_F103C8)
 static bool motionSafeForHeavyMaintenance() {
   const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
@@ -1123,8 +1138,7 @@ static bool motionSafeForHeavyMaintenance() {
       gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY;
   return stateSafe && std::fabs(gTelemetry.speedKmh) <= 0.2F &&
          std::fabs(gTelemetry.driveActualMps) <= 0.02F && !navActive &&
-         !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop &&
-         true;
+         !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop;
 }
 
 static bool runTftSelfTest() {
@@ -1151,6 +1165,7 @@ static bool runTftSelfTest() {
   drawUiNow(true);
   return true;
 }
+#endif
 
 static bool hostCommandRealtimeCritical(const char *command) {
   if (command == nullptr) return false;
@@ -1318,6 +1333,13 @@ static void handleSerialCommand(char *command) {
   }
 
   if (!strcmp(command, "EEPROM:STATUS")) {
+#if defined(BOARD_F103C8)
+    const char *state = !gPersistentConfig.storageOk()
+        ? "ERR:EEPROM:FAULT"
+        : (gPersistentConfig.storageFull() ? "EEPROM:STAT:FULL"
+                                           : "EEPROM:STAT:OK");
+    (void)gUsb.writeLineCritical(state, 120U);
+#else
     char line[144];
     std::snprintf(line, sizeof(line),
                   "EEPROM:STAT:ok=%u:full=%u:used=%lu:total=%lu:invalid=%lu:writes=%lu",
@@ -1328,8 +1350,10 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned long>(gPersistentConfig.invalidRecords()),
                   static_cast<unsigned long>(gPersistentConfig.writes()));
     (void)gUsb.writeLineCritical(line, 120U);
+#endif
     return;
   }
+#if !defined(BOARD_F103C8)
   if (!std::strncmp(command, "EEPROM:GET:", 11)) {
     uint32_t key = 0U, value = 0U;
     if (!parseU32Strict(command + 11, key) || key == 0U || key > 0xFFFFU ||
@@ -1370,6 +1394,7 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
+#endif
   if (!strcmp(command, "GET:STATE")) {
     publishPage();
     publishLinkState();
@@ -1381,6 +1406,14 @@ static void handleSerialCommand(char *command) {
     gUsb.requestRecovery();
     return;
   }
+#if defined(BOARD_F103C8)
+  if (!strcmp(command, "USB:STATUS")) {
+    (void)gUsb.writeLineCritical(
+        gUsb.hostSessionEstablished() ? "USB:STAT:HOST=1" : "USB:STAT:HOST=0",
+        120U);
+    return;
+  }
+#else
   if (!strcmp(command, "USB:STATUS")) {
     char line[620];
     std::snprintf(line, sizeof(line),
@@ -1436,22 +1469,30 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
+#endif
   if (!strcmp(command, "FAULT:STATUS")) {
+#if defined(BOARD_F103C8)
+    (void)gUsb.writeLineCritical(
+        Board_BackupRead(3U) == 0U ? "FAULT:STAT:CLEAR" : "FAULT:STAT:LATCHED",
+        120U);
+    return;
+#else
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
     char line[260];
     std::snprintf(line, sizeof(line),
                   "FAULT:STAT:reason=%08lX:cfsr=%08lX:hfsr=%08lX:pc=%08lX:lr=%08lX:mmfar=%08lX:bfar=%08lX:reset=%08lX",
-                  static_cast<unsigned long>(RTC->BKP3R),
-                  static_cast<unsigned long>(RTC->BKP4R),
-                  static_cast<unsigned long>(RTC->BKP5R),
-                  static_cast<unsigned long>(RTC->BKP6R),
-                  static_cast<unsigned long>(RTC->BKP7R),
-                  static_cast<unsigned long>(RTC->BKP8R),
-                  static_cast<unsigned long>(RTC->BKP9R),
+                  static_cast<unsigned long>(Board_BackupRead(3U)),
+                  static_cast<unsigned long>(Board_BackupRead(4U)),
+                  static_cast<unsigned long>(Board_BackupRead(5U)),
+                  static_cast<unsigned long>(Board_BackupRead(6U)),
+                  static_cast<unsigned long>(Board_BackupRead(7U)),
+                  static_cast<unsigned long>(Board_BackupRead(8U)),
+                  static_cast<unsigned long>(Board_BackupRead(9U)),
                   static_cast<unsigned long>(gResetCauseFlags));
     (void)gUsb.writeLineCritical(line, 120U);
     return;
+#endif
   }
   if (!strcmp(command, "PING")) {
     (void)gUsb.writeLineCritical("ACK:PONG", 120U);
@@ -1460,6 +1501,9 @@ static void handleSerialCommand(char *command) {
     return;
   }
   if (!strcmp(command, "FW:INFO")) {
+#if defined(BOARD_F103C8)
+    (void)gUsb.writeLineCritical("FW:INFO:V3:F103C8", 120U);
+#else
     char line[190];
     std::snprintf(
         line, sizeof(line),
@@ -1470,6 +1514,7 @@ static void handleSerialCommand(char *command) {
         static_cast<unsigned long>(BuildInfo::kAppBase),
         static_cast<unsigned long>(BuildInfo::kAppLimit));
     (void)gUsb.writeLineCritical(line, 120U);
+#endif
     return;
   }
   if (HmiTouchService::handleCommand(command)) {
@@ -1497,6 +1542,7 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
+#if !defined(BOARD_F103C8)
   if (!strcmp(command, "TFT:STATUS")) {
     char line[96];
     const bool idOk = (gTftControllerId & 0xFFFFU) == 0x9341U;
@@ -1636,6 +1682,13 @@ static void handleSerialCommand(char *command) {
     (void)gUsb.writeLineCritical(ok ? "ACK:TFT:TEST" : "ERR:TFT:ABORTED", 120U);
     return;
   }
+#endif
+#if defined(BOARD_F103C8)
+  if (!std::strncmp(command, "BOOT:DFU", 8)) {
+    (void)gUsb.writeLineCritical("ERR:DFU:UNSUPPORTED:F103C8", 120U);
+    return;
+  }
+#else
   if (!strcmp(command, "BOOT:DFU:ARM")) {
     gDfuArmDeadlineMs = HAL_GetTick() + 5000U;
     printBoth("ACK:DFU:ARMED");
@@ -1670,6 +1723,7 @@ static void handleSerialCommand(char *command) {
     printBoth("ERR:DFU:TWO_STEP_REQUIRED");
     return;
   }
+#endif
   if (!strncmp(command, "GOTO:", 5)) {
     setExternalMenu(command + 5);
     return;
@@ -1725,26 +1779,26 @@ static void handleSerialCommand(char *command) {
   } else if (!strncmp(command, "STATE:", 6)) {
     parseVehicleState(command + 6);
   } else if (!strncmp(command, "SPD:", 4)) {
-    gTelemetry.speedKmh = static_cast<float>(atof(command + 4));
+    gTelemetry.speedKmh = static_cast<float>(parseDoubleOrZero(command + 4));
   } else if (!strncmp(command, "DRIVE_TGT:", 10)) {
-    gTelemetry.driveTargetMps = static_cast<float>(atof(command + 10));
+    gTelemetry.driveTargetMps = static_cast<float>(parseDoubleOrZero(command + 10));
   } else if (!strncmp(command, "DRIVE_ACT:", 10)) {
-    gTelemetry.driveActualMps = static_cast<float>(atof(command + 10));
+    gTelemetry.driveActualMps = static_cast<float>(parseDoubleOrZero(command + 10));
   } else if (!strncmp(command, "ERPM:", 5)) {
-    gTelemetry.motorErpm = static_cast<float>(atof(command + 5));
+    gTelemetry.motorErpm = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "VBUS:", 5)) {
-    gTelemetry.vbusV = static_cast<float>(atof(command + 5));
+    gTelemetry.vbusV = static_cast<float>(parseDoubleOrZero(command + 5));
     gTelemetry.vbusValid = std::isfinite(gTelemetry.vbusV) && gTelemetry.vbusV > 0.0F;
   } else if (!strncmp(command, "STEER_TARGET:", 13)) {
-    gTelemetry.steeringTargetDeg = static_cast<float>(atof(command + 13));
+    gTelemetry.steeringTargetDeg = static_cast<float>(parseDoubleOrZero(command + 13));
     gTelemetry.steeringErrorDeg =
         gTelemetry.steeringTargetDeg - gTelemetry.steeringActualDeg;
   } else if (!strncmp(command, "STEER_ACTUAL:", 13)) {
-    gTelemetry.steeringActualDeg = static_cast<float>(atof(command + 13));
+    gTelemetry.steeringActualDeg = static_cast<float>(parseDoubleOrZero(command + 13));
     gTelemetry.steeringErrorDeg =
         gTelemetry.steeringTargetDeg - gTelemetry.steeringActualDeg;
   } else if (!strncmp(command, "STEER_ERR:", 10)) {
-    gTelemetry.steeringErrorDeg = static_cast<float>(atof(command + 10));
+    gTelemetry.steeringErrorDeg = static_cast<float>(parseDoubleOrZero(command + 10));
   } else if (!strncmp(command, "STEERTEST:", 10)) {
     snprintf(gTelemetry.steeringTestState, sizeof(gTelemetry.steeringTestState),
              "%.11s", command + 10);
@@ -1772,17 +1826,17 @@ static void handleSerialCommand(char *command) {
     setHostEmergencyStop(value);
   } else if (!strncmp(command, "MANUAL_SPEED:", 13)) {
     gTelemetry.manualSpeedPct = static_cast<uint8_t>(
-        std::clamp(atoi(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
+        std::clamp(parseIntOrZero(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
   } else if (!strncmp(command, "CFGSTEERTEST:", 13)) {
-    gTelemetry.steeringTestAngleDeg = static_cast<float>(atof(command + 13));
+    gTelemetry.steeringTestAngleDeg = static_cast<float>(parseDoubleOrZero(command + 13));
   } else if (!strncmp(command, "CFGERPMMPS:", 13)) {
-    gTelemetry.driveErpmPerMps = static_cast<float>(atof(command + 13));
+    gTelemetry.driveErpmPerMps = static_cast<float>(parseDoubleOrZero(command + 13));
   } else if (!strncmp(command, "CFGPERINF:", 10)) {
     gTelemetry.perceptionInference = parseBool(command + 10);
   } else if (!strncmp(command, "GPS:", 4)) {
     gTelemetry.gpsReady = parseBool(command + 4);
   } else if (!strncmp(command, "FIX:", 4)) {
-    const int fix = atoi(command + 4);
+    const int fix = parseIntOrZero(command + 4);
     if (fix <= 1)
       gTelemetry.gpsFix = GPS_NO_FIX;
     else if (fix == 2)
@@ -1792,24 +1846,24 @@ static void handleSerialCommand(char *command) {
     else
       gTelemetry.gpsFix = GPS_DEGRADED;
   } else if (!strncmp(command, "LAT:", 4)) {
-    gTelemetry.latitude = atof(command + 4);
+    gTelemetry.latitude = parseDoubleOrZero(command + 4);
   } else if (!strncmp(command, "LON:", 4)) {
-    gTelemetry.longitude = atof(command + 4);
+    gTelemetry.longitude = parseDoubleOrZero(command + 4);
   } else if (!strncmp(command, "SAT:", 4)) {
     gTelemetry.satellites =
-        static_cast<uint8_t>(std::clamp(atoi(command + 4), 0, 99));
+        static_cast<uint8_t>(std::clamp(parseIntOrZero(command + 4), 0, 99));
   } else if (!strncmp(command, "HDOP:", 5)) {
-    gTelemetry.hdop = static_cast<float>(atof(command + 5));
+    gTelemetry.hdop = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "HACC:", 5)) {
-    gTelemetry.haccM = static_cast<float>(atof(command + 5));
+    gTelemetry.haccM = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "GAGE:", 5)) {
-    gTelemetry.gnssAgeSec = static_cast<float>(atof(command + 5));
+    gTelemetry.gnssAgeSec = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "HEAD:", 5)) {
-    gTelemetry.headingDeg = static_cast<float>(atof(command + 5));
+    gTelemetry.headingDeg = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "IMU:", 4)) {
     gTelemetry.imuReady = parseBool(command + 4);
   } else if (!strncmp(command, "GYROZ:", 6)) {
-    gTelemetry.gyroZRps = static_cast<float>(atof(command + 6));
+    gTelemetry.gyroZRps = static_cast<float>(parseDoubleOrZero(command + 6));
   } else if (!strncmp(command, "MAG:", 4)) {
     gTelemetry.magReady = parseBool(command + 4);
   } else if (!strncmp(command, "CAM:", 4)) {
@@ -1817,14 +1871,14 @@ static void handleSerialCommand(char *command) {
   } else if (!strncmp(command, "PER:", 4)) {
     gTelemetry.perceptionReady = parseBool(command + 4);
   } else if (!strncmp(command, "FPS:", 4)) {
-    gTelemetry.cameraFps = static_cast<float>(atof(command + 4));
+    gTelemetry.cameraFps = static_cast<float>(parseDoubleOrZero(command + 4));
   } else if (!strncmp(command, "OBJ:", 4)) {
     snprintf(gTelemetry.detectedObject, sizeof(gTelemetry.detectedObject),
              "%.23s", command + 4);
   } else if (!strncmp(command, "DIST:", 5)) {
-    gTelemetry.objectDistanceM = static_cast<float>(atof(command + 5));
+    gTelemetry.objectDistanceM = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "CONF:", 5)) {
-    gTelemetry.confidencePct = static_cast<float>(atof(command + 5));
+    gTelemetry.confidencePct = static_cast<float>(parseDoubleOrZero(command + 5));
   } else if (!strncmp(command, "DRV:", 4)) {
     gTelemetry.drivableAreaClear = parseBool(command + 4);
   } else if (!strncmp(command, "OBS:", 4)) {
@@ -1837,7 +1891,7 @@ static void handleSerialCommand(char *command) {
   } else if (!strncmp(command, "NAV2:", 5)) {
     gTelemetry.nav2Ready = parseBool(command + 5);
   } else if (!strncmp(command, "GOAL_DIST:", 10)) {
-    const float value = static_cast<float>(atof(command + 10));
+    const float value = static_cast<float>(parseDoubleOrZero(command + 10));
     gTelemetry.goalRemainingDistanceValid =
         std::isfinite(value) && value >= 0.0F;
     gTelemetry.goalRemainingDistanceM =
@@ -1859,7 +1913,7 @@ static void handleSerialCommand(char *command) {
              "%.19s", command + 10);
   } else if (!strncmp(command, "WPSEL:", 6)) {
     gTelemetry.selectedWaypoint = static_cast<uint8_t>(
-        std::clamp(atoi(command + 6), 0, HMI_WAYPOINT_COUNT - 1));
+        std::clamp(parseIntOrZero(command + 6), 0, HMI_WAYPOINT_COUNT - 1));
   } else if (!strncmp(command, "TARGET:", 7)) {
     snprintf(gTelemetry.activeTarget, sizeof(gTelemetry.activeTarget), "%.19s",
              command + 7);
@@ -2232,8 +2286,8 @@ int main() {
             kCrashCounterClearMs) {
       __HAL_RCC_PWR_CLK_ENABLE();
       HAL_PWR_EnableBkUpAccess();
-      RTC->BKP1R = 0U;
-      RTC->BKP2R = 0U;
+      Board_BackupWrite(1U, 0U);
+      Board_BackupWrite(2U, 0U);
       __DSB();
       gCrashCounterCleared = true;
     }

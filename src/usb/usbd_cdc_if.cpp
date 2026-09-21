@@ -8,14 +8,18 @@ static int8_t CDC_Init_FS(void);
 static int8_t CDC_DeInit_FS(void);
 static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length);
 static int8_t CDC_Receive_FS(uint8_t *pbuf, uint32_t *Len);
+#if !defined(BOARD_F103C8)
 static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
+#endif
 
 USBD_CDC_ItfTypeDef USBD_Interface_fops_FS = {
   CDC_Init_FS,
   CDC_DeInit_FS,
   CDC_Control_FS,
-  CDC_Receive_FS,
-  CDC_TransmitCplt_FS
+  CDC_Receive_FS
+#if !defined(BOARD_F103C8)
+  , CDC_TransmitCplt_FS
+#endif
 };
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
@@ -62,6 +66,7 @@ static int8_t CDC_Receive_FS(uint8_t *pbuf, uint32_t *Len) {
   return (int8_t)USBD_OK;
 }
 
+#if !defined(BOARD_F103C8)
 static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum) {
   (void)pbuf;
   (void)Len;
@@ -69,3 +74,10 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum) {
   gUsb.onTransmitComplete();
   return (int8_t)USBD_OK;
 }
+#else
+// Older STM32CubeF1 CDC middleware has no TransmitCplt member in the class
+// interface. usbd_conf.c calls this bridge after EP1 IN completion.
+extern "C" void F4Gateway_CdcTxCompleteFromIsr(void) {
+  gUsb.onTransmitComplete();
+}
+#endif

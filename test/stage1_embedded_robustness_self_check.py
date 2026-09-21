@@ -13,7 +13,7 @@ check('poll();' not in irq and 'USBD_CDC_TransmitPacket' not in irq,'USB TX-comp
 check('tx_service_pending_ = true' in usb and 'tx_service_pending_ = false' in usb,'USB deferred TX kick exists')
 check('rx_high_water_' in usb_h and 'tx_low_dropped_' in usb_h,'USB queue observability exists')
 check('Board_SetRealtimeServiceCallback' in main and 'gUsb.service();' in main,'USB service continues during TFT yields')
-check('Board_FaultReset' in board and 'RTC->BKP6R = stack ? stack[6]' in board,'fault PC/LR capture exists')
+check('Board_FaultReset' in board and 'Board_BackupWrite(6U, stack ? stack[6]' in board and 'Board_BackupWrite(7U, stack ? stack[5]' in board,'fault PC/LR capture exists')
 check('__attribute__((naked)) void HardFault_Handler' in board,'fault wrapper captures exception stack')
 check('kCrashCounterClearMs = 30000U' in main,'30 s healthy window retained')
 check('FAULT:STATUS' in main,'runtime fault snapshot observable')

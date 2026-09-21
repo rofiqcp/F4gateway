@@ -1,4 +1,5 @@
 #include "TelemetryProtocol.h"
+#include "NumericParse.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -10,26 +11,17 @@
 #include <cstring>
 #include <limits>
 
+#if !defined(BOARD_F103C8)
 namespace {
 constexpr size_t kMaxExtendedLine = 360U;
 constexpr size_t kMaxCsvFields = 20U;
 
 bool parseU32(const char *s, uint32_t &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0;
-  char *end = nullptr;
-  const unsigned long v = std::strtoul(s, &end, 10);
-  if (errno != 0 || end == s || *end != '\0' || v > 0xFFFFFFFFUL) return false;
-  out = static_cast<uint32_t>(v);
-  return true;
+  return CompactParse::u32(s, out);
 }
 
 bool parseHex32(const char *s, uint32_t &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0; char *end = nullptr;
-  const unsigned long v = std::strtoul(s, &end, 16);
-  if (errno != 0 || end == s || *end != '\0' || v > 0xFFFFFFFFUL) return false;
-  out = static_cast<uint32_t>(v); return true;
+  return CompactParse::hex32(s, out);
 }
 
 uint32_t crc32Bytes(const char *data, size_t len) {
@@ -43,25 +35,11 @@ uint32_t crc32Bytes(const char *data, size_t len) {
 }
 
 bool parseI32(const char *s, int32_t &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0;
-  char *end = nullptr;
-  const long v = std::strtol(s, &end, 10);
-  if (errno != 0 || end == s || *end != '\0' ||
-      v < std::numeric_limits<int32_t>::min() ||
-      v > std::numeric_limits<int32_t>::max()) return false;
-  out = static_cast<int32_t>(v);
-  return true;
+  return CompactParse::i32(s, out);
 }
 
 bool parseFloat(const char *s, float &out) {
-  if (s == nullptr || *s == '\0') return false;
-  errno = 0;
-  char *end = nullptr;
-  const float v = std::strtof(s, &end);
-  if (errno != 0 || end == s || *end != '\0' || !std::isfinite(v)) return false;
-  out = v;
-  return true;
+  return CompactParse::realf(s, out);
 }
 
 bool parseBool01(const char *s, bool &out) {
@@ -460,3 +438,4 @@ ExtendedTelemetryParseResult parseExtendedTelemetryLine(
                           previous_session != h.session;
   return result;
 }
+#endif // !BOARD_F103C8

@@ -32,6 +32,6 @@ int main(){
 '''
 with tempfile.TemporaryDirectory() as td:
     src=Path(td)/'check.cpp'; exe=Path(td)/'check'; src.write_text(CPP)
-    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocol.cpp'),'-o',str(exe)],check=True)
+    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocol.cpp'),str(ROOT/'src/NumericParse.cpp'),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS F4X3 CRC/length/version/session/legacy fault contract')

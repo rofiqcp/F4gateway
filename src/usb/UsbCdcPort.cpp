@@ -1,7 +1,7 @@
 #include "UsbCdcPort.h"
 #include "BoardSupport.h"
 
-#include "stm32f4xx_hal.h"
+#include "McuHal.h"
 #include "usbd_cdc.h"
 #include "usbd_core.h"
 #include "usbd_desc.h"
@@ -15,6 +15,24 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 UsbCdcPort gUsb;
 
 namespace {
+#if defined(BOARD_F103C8)
+void ForceUsbDisconnectPulse() {
+  // Blue Pill boards normally expose USB D+ through an external pull-up.
+  // Driving PA12 low briefly guarantees the host observes a real disconnect
+  // after MCU reset or a software USB recovery before the USB peripheral owns
+  // D+ again.
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitTypeDef gpio{};
+  gpio.Pin = GPIO_PIN_12;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(20U);
+  HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
+}
+#endif
+
 uint16_t RingUsed(uint16_t head, uint16_t tail, uint16_t size) {
   return head >= tail ? static_cast<uint16_t>(head - tail)
                       : static_cast<uint16_t>(size - tail + head);

@@ -1,104 +1,102 @@
-# F4gateway v2
+# F4gateway v3
 
-Firmware STM32F411CEU6 untuk gateway USB CDC, HMI TFT/touch, dan kontrol fork BTS7960 pada AGV forklift. Branch produksi saat ini adalah `v2`; repository ini dipakai sebagai Git submodule oleh workspace `/home/otomasi2/forclift`.
+Firmware gateway AGV forklift untuk **STM32F103C8T6**. Branch `v3` mempertahankan fungsi inti firmware v2—USB CDC, HMI TFT/touch, E-stop, watchdog, BTS7960, limit switch, dan telemetry host—tetapi dipadatkan agar aman pada SRAM 20 KiB dan Flash 64 KiB milik F103C8T6.
 
-## Hardware utama
+Environment F411/F401 lama tetap tersedia sebagai regression/recovery target. Default build pada branch ini adalah `bluepill_f103c8`.
 
-- MCU: STM32F411CEU6 / WeAct BlackPill.
-- Framework: STM32Cube HAL melalui PlatformIO, clock 96 MHz.
-- HMI: ILI9341 320x240 + XPT2046 touch pada shared SPI bus.
-- USB runtime: USB CDC FS, 1,000,000 baud ke bridge ROS 2.
-- Fork BTS7960: RPWM PB8 (UP), LPWM PA2 (DOWN), PWM 1 kHz / 10-bit.
+## Hardware v3
+
+- MCU: STM32F103C8T6, HSE 8 MHz, SYSCLK 72 MHz.
+- USB device: 48 MHz dari PLL / 1.5, USB CDC FS pada PA11/PA12.
+- HMI: ILI9341 320x240 + XPT2046 pada SPI1.
+- TFT: CS PB0, DC PB1, RESET PB2; touch CS PA4.
+- Buzzer: TIM1 CH1 pada PA8.
+- Fork BTS7960: LPWM PA2 / TIM2 CH3, RPWM PB8 / TIM4 CH3.
 - Limit switch aktif-LOW + pull-up: PB6 = TOP, PB7 = BOTTOM.
+- Application watchdog: TIM3, terpisah dari SysTick.
 
-MCP2515, libcanard/DroneCAN, dan NEO-3 tidak lagi menjadi bagian firmware produksi `v2`.
+## Layout Flash F103C8
 
-## Fitur fork dan keselamatan
+Flash fisik dibatasi sesuai spesifikasi STM32F103C8T6, bukan kapasitas clone yang kadang terdeteksi lebih besar.
 
-- PWM default 500 dari rentang 0..1023.
-- `UP/DOWN HOME`, timed 1 s, timed 2 s, dan STOP.
-- Debounce/confirmation LS 30 ms dan reversal dead-time 50 ms.
-- HOME watchdog 30 s.
-- Kedua LS aktif bersamaan dilatch sebagai fault; satu LS aktif adalah kondisi endpoint yang valid.
-- Perintah ROS memakai host/session safety gate; kontrol fork lokal HMI tetap memakai common safety gate.
-- HMI menampilkan state fork, TOP/BOTTOM LS, `LS READY`, dan fault secara eksplisit.
+- `0x08000000..0x0800F7FF`: application, maksimum 62 KiB.
+- `0x0800F800..0x0800FFFF`: persistent config, 2 KiB / dua page.
+- SRAM: 20 KiB.
+Linker v3 berada di `linker/STM32F103C8TX_APP.ld`. Firmware tidak boleh melewati batas application karena dua page terakhir dipakai journal konfigurasi.
 
-## USB CDC dan recovery bootloader
+## Fitur keselamatan
 
-Application berjalan dari `0x08004000`. Resident recovery bootloader berada pada Sector 0 dan update normal dilakukan melalui USB CDC tanpa ST-Link.
+- E-stop HMI diproses sebelum kontrol halaman lain dan memaksa command motion ke nol.
+- Safety STOP direfresh secara periodik selama E-stop ter-latch.
+- Watchdog memonitor progress main loop dengan timer independen.
+- SPI wait dan transfer memiliki timeout serta recovery path.
+- Limit switch memiliki confirmation/debounce 30 ms.
+- Reverse direction BTS7960 memakai dead-time 50 ms.
+- HOME memiliki watchdog 30 s.
+- TOP dan BOTTOM aktif bersamaan dilatch sebagai fault.
+- Flash persistent tidak ditulis saat aktuator sedang bergerak.
 
-Layout flash:
+## Build v3
 
-- `0x08000000..0x08003FFF`: resident USB CDC recovery bootloader, 16 KiB.
-- `0x08004000..0x0805FFFF`: application, maksimum 368 KiB.
-- `0x08060000..0x08063FFF`: manifest journal.
-- `0x08064000..0x0806BFFF`: persistent config journal.
-- `0x0806C000..0x0807DFFF`: persistent reserved area.
-- `0x0807E000..0x0807FFFF`: legacy migration reserve; tidak ada runtime DroneCAN/MCP2515 pada v2.
-
-Boot protocol: `proto=3`, layout `AGVBL3-04000-60000`.
-
-## Prasyarat Jetson / ROS 2 Humble
-
-Gunakan Python system ROS secara eksplisit:
+Build default:
 
 ```bash
-/usr/bin/python3 --version
-sudo apt install -y python3-serial
-/usr/bin/python3 -c "import serial; print(serial.__version__)"
+cd /home/otomasi2/forclift/F4gateway
+pio run
 ```
 
-Install udev rule sekali per Jetson:
+Atau eksplisit:
 
 ```bash
-sudo ./scripts/install_stm32_udev_rules.sh
+pio run -e bluepill_f103c8
 ```
 
-Rule runtime/boot CDC di-scope ke BlackPill serial `33A433673134`; ST-Link memakai VID:PID STMicroelectronics yang sesuai.
+Build tervalidasi pada F103C8 menggunakan 61.664 byte (sekitar 60,2 KiB) dari region aplikasi 62 KiB dan 14.676 byte SRAM dari 20 KiB. Headroom Flash aplikasi sekitar 1.824 byte.
 
-## Build
+## Upload STM32F103C8T6
+
+v3 menggunakan ST-Link. Tidak ada resident CDC bootloader F411 pada target F103C8.
+
+Sebelum flash, pastikan target yang terhubung benar-benar STM32F103C8T6. Setelah identitas target terverifikasi:
 
 ```bash
-pio run -e blackpill_f411ce_v2
+pio run -e bluepill_f103c8 -t upload
 ```
 
-Build produksi harus selesai `SUCCESS` sebelum flash atau update pointer submodule.
+Jangan menjalankan upload ke ST-Link yang belum dipastikan terhubung ke MCU F103C8T6.
 
-## Upload normal via USB CDC ACM
+## USB runtime
 
-```bash
-pio run -e blackpill_f411ce_v2 -t upload
-```
-
-Uploader melakukan handshake runtime `ACK:PONG`, masuk ke resident `BOOT_CDC`, memverifikasi protocol/layout, erase application region, transfer chunk+CRC, menerima `ACK:END:OK`, lalu memastikan runtime CDC kembali dan `ACK:PONG` sehat.
-
-## Provisioning awal / recovery via ST-Link
-
-```bash
-./scripts/provision_recovery_stlink.sh
-```
-
-Script memverifikasi MCU STM32F411, membangun bootloader+application, menjaga/migrasi persistent area, menulis image secara transactional melalui SWD, dan memverifikasi hasil. Python di script dikunci ke `/usr/bin/python3` agar sama dengan environment ROS/system.
-
-ROM DFU tersedia sebagai jalur recovery alternatif melalui environment `blackpill_f411ce_romdfu`.
-
-## Diagnostik runtime
-
-Command read-only yang aman antara lain:
+Setelah firmware berjalan, F103 memakai USB CDC FS. Command penting yang tetap tersedia antara lain:
 
 ```text
 PING
 FW:INFO
+GET:STATE
+USB:STATUS
+USB:RECOVER
+FAULT:STATUS
 LIMITS
 WINCH STATUS
-TFT:STATUS
-TOUCH:STATUS
-USB:STATUS
+HMI RESET
 ```
 
-Kondisi normal setelah boot mencakup `ACK:PONG`, `LS_READY=1`, TFT `OK`, dan USB CDC runtime kembali ter-enumerasi.
+Parser F103 tetap menerima telemetry F4X3 yang diperlukan untuk kamera/perception, IMU, dan Nav2 serta jalur legacy yang dipakai HMI.
+## Regression target yang tetap tersedia
+
+Port v3 tidak menghapus target lama:
+
+```bash
+pio run -e blackpill_f411ce_romdfu
+pio run -e blackpill_f411cc
+pio run -e blackpill_f401cd
+```
+
+Ketiga environment tersebut harus tetap build SUCCESS sebelum perubahan v3 dianggap aman.
 
 ## Pengujian
+
+Jalankan seluruh self-check:
 
 ```bash
 for t in test/*_self_check.py; do
@@ -106,27 +104,16 @@ for t in test/*_self_check.py; do
 done
 ```
 
-Test penting mencakup parity fitur project F4 lama, BTS7960/LS safety, HMI display/touch, flash layout, persistent config, USB transport/session, recovery bootloader, dan verifikasi MCP2515 removal.
+Self-check v3 khusus F103 memvalidasi clock, USB FS, TIM3 watchdog, pin BTS7960/limit switch, layout 62 KiB + 2 KiB, parser telemetry, dan ketersediaan target F411.
 
-## Struktur repository
+## Git
 
-- `src/`: firmware application dan semua header production.
-- `src/usb/`: USB CDC application stack.
-- `bootloader/`: resident USB CDC recovery bootloader.
-- `linker/`: linker script application relocated ke `0x08004000`.
-- `scripts/`: build provenance, manifest, provisioning, CDC/DFU uploader, udev installer.
-- `test/`: static/regression self-check.
-- `tools/`: utilitas diagnosis/telemetry operator; bukan production firmware.
+Branch produksi port F103 adalah `v3`. Jangan commit `.pio`, build output, cache Python, editor state, atau backup sementara.
 
-`include/` dan `lib/` legacy tidak dipakai lagi; source production dikonsolidasikan di `src/`.
+Urutan aman:
 
-## Git dan submodule
-
-Gunakan branch `v2` untuk firmware ini. Urutan sinkronisasi:
-
-1. Build dan jalankan self-check.
-2. Commit/push `F4gateway` branch `v2`.
-3. Pada repository induk `forclift`, update pointer submodule `F4gateway` dan pastikan `.gitmodules` memakai `branch = v2`.
-4. Commit/push repository induk.
-
-Jangan commit `.pio`, build output, Python cache, editor state, atau backup sementara.
+1. Jalankan seluruh self-check.
+2. Build `bluepill_f103c8`.
+3. Build regression F411CE/F411CC/F401CD.
+4. Commit perubahan pada branch `v3`.
+5. Push `v3` dan baru update pointer submodule repository induk bila diperlukan.

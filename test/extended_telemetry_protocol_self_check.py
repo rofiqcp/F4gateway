@@ -46,7 +46,7 @@ int main() {
 with tempfile.TemporaryDirectory() as td:
     src=Path(td)/'check.cpp'; exe=Path(td)/'check'
     src.write_text(CPP)
-    cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocol.cpp'),'-o',str(exe)]
+    cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocol.cpp'),str(ROOT/'src/NumericParse.cpp'),'-o',str(exe)]
     subprocess.run(cmd,check=True)
     subprocess.run([str(exe)],check=True)
 print('PASS STAGE2 protocol parser/freshness functional self-check')

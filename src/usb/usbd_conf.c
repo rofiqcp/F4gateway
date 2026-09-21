@@ -1,10 +1,22 @@
-#include "stm32f4xx_hal.h"
+#include "McuHal.h"
 #include "usbd_core.h"
 
+#if defined(BOARD_F103C8)
+PCD_HandleTypeDef hpcd_USB_FS;
+#define HUSB_PCD hpcd_USB_FS
+#else
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
+#define HUSB_PCD hpcd_USB_OTG_FS
+#endif
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
 void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd) {
+#if defined(BOARD_F103C8)
+  if (hpcd->Instance != USB) return;
+  __HAL_RCC_USB_CLK_ENABLE();
+  HAL_NVIC_SetPriority(USB_LP_CAN1_RX0_IRQn, 2U, 0U);
+  HAL_NVIC_EnableIRQ(USB_LP_CAN1_RX0_IRQn);
+#else
   if (hpcd->Instance != USB_OTG_FS) return;
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_USB_OTG_FS_CLK_ENABLE();
@@ -19,13 +31,20 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd) {
 
   HAL_NVIC_SetPriority(OTG_FS_IRQn, 2U, 0U);
   HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
+#endif
 }
 
 void HAL_PCD_MspDeInit(PCD_HandleTypeDef *hpcd) {
+#if defined(BOARD_F103C8)
+  if (hpcd->Instance != USB) return;
+  __HAL_RCC_USB_CLK_DISABLE();
+  HAL_NVIC_DisableIRQ(USB_LP_CAN1_RX0_IRQn);
+#else
   if (hpcd->Instance != USB_OTG_FS) return;
   __HAL_RCC_USB_OTG_FS_CLK_DISABLE();
   HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11 | GPIO_PIN_12);
   HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
+#endif
 }
 
 void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
@@ -34,8 +53,14 @@ void HAL_PCD_SetupStageCallback(PCD_HandleTypeDef *hpcd) {
 void HAL_PCD_DataOutStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
   USBD_LL_DataOutStage((USBD_HandleTypeDef *)hpcd->pData, epnum, hpcd->OUT_ep[epnum].xfer_buff);
 }
+#if defined(BOARD_F103C8)
+extern void F4Gateway_CdcTxCompleteFromIsr(void);
+#endif
 void HAL_PCD_DataInStageCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
   USBD_LL_DataInStage((USBD_HandleTypeDef *)hpcd->pData, epnum, hpcd->IN_ep[epnum].xfer_buff);
+#if defined(BOARD_F103C8)
+  if (epnum == 1U) F4Gateway_CdcTxCompleteFromIsr();
+#endif
 }
 void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd) { USBD_LL_SOF((USBD_HandleTypeDef *)hpcd->pData); }
 void HAL_PCD_ResetCallback(PCD_HandleTypeDef *hpcd) {
@@ -53,9 +78,30 @@ void HAL_PCD_ISOINIncompleteCallback(PCD_HandleTypeDef *hpcd, uint8_t epnum) {
 void HAL_PCD_ConnectCallback(PCD_HandleTypeDef *hpcd) { USBD_LL_DevConnected((USBD_HandleTypeDef *)hpcd->pData); }
 void HAL_PCD_DisconnectCallback(PCD_HandleTypeDef *hpcd) { USBD_LL_DevDisconnected((USBD_HandleTypeDef *)hpcd->pData); }
 
+#if defined(BOARD_F103C8)
+void USB_LP_CAN1_RX0_IRQHandler(void) { HAL_PCD_IRQHandler(&hpcd_USB_FS); }
+#else
 void OTG_FS_IRQHandler(void) { HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS); }
+#endif
 
 USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev) {
+#if defined(BOARD_F103C8)
+  hpcd_USB_FS.Instance = USB;
+  hpcd_USB_FS.Init.dev_endpoints = 8U;
+  hpcd_USB_FS.Init.speed = PCD_SPEED_FULL;
+  hpcd_USB_FS.Init.ep0_mps = 64U;
+  hpcd_USB_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
+  hpcd_USB_FS.Init.low_power_enable = DISABLE;
+  hpcd_USB_FS.pData = pdev;
+  pdev->pData = &hpcd_USB_FS;
+  if (HAL_PCD_Init(&hpcd_USB_FS) != HAL_OK) return USBD_FAIL;
+  // PMA layout: EP0 OUT/IN, CDC data IN/OUT, CDC command IN.
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_FS, 0x00U, PCD_SNG_BUF, 0x18U) != HAL_OK) return USBD_FAIL;
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_FS, 0x80U, PCD_SNG_BUF, 0x58U) != HAL_OK) return USBD_FAIL;
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_FS, 0x81U, PCD_SNG_BUF, 0xC0U) != HAL_OK) return USBD_FAIL;
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_FS, 0x01U, PCD_SNG_BUF, 0x110U) != HAL_OK) return USBD_FAIL;
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_FS, 0x82U, PCD_SNG_BUF, 0x100U) != HAL_OK) return USBD_FAIL;
+#else
   hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
   hpcd_USB_OTG_FS.Init.dev_endpoints = 4U;
   hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
@@ -73,6 +119,7 @@ USBD_StatusTypeDef USBD_LL_Init(USBD_HandleTypeDef *pdev) {
   if (HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0U, 64U) != HAL_OK) return USBD_FAIL;
   if (HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1U, 96U) != HAL_OK) return USBD_FAIL;
   if (HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2U, 32U) != HAL_OK) return USBD_FAIL;
+#endif
   return USBD_OK;
 }
 USBD_StatusTypeDef USBD_LL_DeInit(USBD_HandleTypeDef *pdev) {
@@ -107,12 +154,21 @@ uint8_t USBD_LL_IsStallEP(USBD_HandleTypeDef *pdev, uint8_t ep_addr) {
 USBD_StatusTypeDef USBD_LL_SetUSBAddress(USBD_HandleTypeDef *pdev, uint8_t dev_addr) {
   return HAL_PCD_SetAddress((PCD_HandleTypeDef *)pdev->pData, dev_addr) == HAL_OK ? USBD_OK : USBD_FAIL;
 }
+#if defined(BOARD_F103C8)
+USBD_StatusTypeDef USBD_LL_Transmit(USBD_HandleTypeDef *pdev, uint8_t ep_addr, uint8_t *pbuf, uint16_t size) {
+  return HAL_PCD_EP_Transmit((PCD_HandleTypeDef *)pdev->pData, ep_addr, pbuf, size) == HAL_OK ? USBD_OK : USBD_FAIL;
+}
+USBD_StatusTypeDef USBD_LL_PrepareReceive(USBD_HandleTypeDef *pdev, uint8_t ep_addr, uint8_t *pbuf, uint16_t size) {
+  return HAL_PCD_EP_Receive((PCD_HandleTypeDef *)pdev->pData, ep_addr, pbuf, size) == HAL_OK ? USBD_OK : USBD_FAIL;
+}
+#else
 USBD_StatusTypeDef USBD_LL_Transmit(USBD_HandleTypeDef *pdev, uint8_t ep_addr, uint8_t *pbuf, uint32_t size) {
   return HAL_PCD_EP_Transmit((PCD_HandleTypeDef *)pdev->pData, ep_addr, pbuf, size) == HAL_OK ? USBD_OK : USBD_FAIL;
 }
 USBD_StatusTypeDef USBD_LL_PrepareReceive(USBD_HandleTypeDef *pdev, uint8_t ep_addr, uint8_t *pbuf, uint32_t size) {
   return HAL_PCD_EP_Receive((PCD_HandleTypeDef *)pdev->pData, ep_addr, pbuf, size) == HAL_OK ? USBD_OK : USBD_FAIL;
 }
+#endif
 uint32_t USBD_LL_GetRxDataSize(USBD_HandleTypeDef *pdev, uint8_t ep_addr) {
   return HAL_PCD_EP_GetRxCount((PCD_HandleTypeDef *)pdev->pData, ep_addr);
 }
