@@ -83,6 +83,9 @@ bool UsbCdcPort::startUsbStack() {
 }
 
 bool UsbCdcPort::begin() {
+#if defined(BOARD_F103C8)
+  ForceUsbDisconnectPulse();
+#endif
   resetSessionState(true, false);
   rx_dropped_ = tx_dropped_ = 0U;
   tx_low_dropped_ = tx_high_dropped_ = 0U;

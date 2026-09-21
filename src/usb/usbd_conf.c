@@ -10,6 +10,13 @@ PCD_HandleTypeDef hpcd_USB_OTG_FS;
 #endif
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
+#if defined(BOARD_F103C8)
+void HAL_PCDEx_SetConnectionState(PCD_HandleTypeDef *hpcd, uint8_t state) {
+  if (hpcd == NULL || hpcd->Instance != USB) return;
+  hpcd->Instance->DADDR = state != 0U ? USB_DADDR_EF : 0U;
+}
+#endif
+
 void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd) {
 #if defined(BOARD_F103C8)
   if (hpcd->Instance != USB) return;

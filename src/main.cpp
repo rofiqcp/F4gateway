@@ -138,10 +138,12 @@ static size_t serial1RxLen = 0;
 static bool serial1RxDiscarding = false;
 #endif
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static uint32_t gDfuArmDeadlineMs = 0U;
-static constexpr uint32_t kBootRequestMagic = 0x42465544UL; // DFUB
 #endif
+static constexpr uint32_t kBootRequestMagic = 0x42465544UL; // DFUB
+static constexpr uint16_t kF103BootReqLo = 0x5544U;
+static constexpr uint16_t kF103BootReqHi = 0x4246U;
 static constexpr uint32_t kAppCrashMagic = 0x48535243UL;    // CRSH
 static constexpr uint32_t kCrashCounterClearMs = 30000U;
 static bool gCrashCounterCleared = false;
@@ -185,7 +187,7 @@ static void startAppWatchdog() {
   gCrashCounterCleared = false;
 }
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static void stopAppWatchdog() {
   gAppWatchdogArmed = false;
   Board_WatchdogStop();
@@ -318,14 +320,19 @@ static void publishLinkState() {
   printBoth(gTelemetry.rosConnected ? "LINK:ROS:ONLINE" : "LINK:ROS:OFFLINE");
 }
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static void enterSystemDfu() {
   stopAppWatchdog();
   __HAL_RCC_PWR_CLK_ENABLE();
   HAL_PWR_EnableBkUpAccess();
   for (volatile uint32_t i = 0; i < 1000U; ++i)
     __NOP();
+#if defined(BOARD_F103_256K)
+  Board_BackupWrite(0U, kF103BootReqLo);
+  Board_BackupWrite(9U, kF103BootReqHi);
+#else
   Board_BackupWrite(0U, kBootRequestMagic);
+#endif
   __DSB();
   __ISB();
   gUsb.flush(150U);
@@ -465,8 +472,10 @@ static void serviceEmergencyStopHold() {
   serviceSafetyControlTx();
 }
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static bool motionSafeForHeavyMaintenance();
+#endif
+#if !defined(BOARD_F103C8)
 static bool runTftSelfTest();
 #endif
 static float actualEditValue(UiEditKey key);
@@ -1130,7 +1139,7 @@ static void setExternalMenu(const char *name) {
 
 static void handleSerialCommand(char *command);
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static bool motionSafeForHeavyMaintenance() {
   const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
@@ -1140,7 +1149,9 @@ static bool motionSafeForHeavyMaintenance() {
          std::fabs(gTelemetry.driveActualMps) <= 0.02F && !navActive &&
          !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop;
 }
+#endif
 
+#if !defined(BOARD_F103C8)
 static bool runTftSelfTest() {
   if (gUiDrawActive || !splashComplete || !tft.displayReady() ||
       tft.displayFaulted() || !motionSafeForHeavyMaintenance()) {
@@ -1683,7 +1694,7 @@ static void handleSerialCommand(char *command) {
     return;
   }
 #endif
-#if defined(BOARD_F103C8)
+#if defined(BOARD_F103C8) && !defined(BOARD_F103_256K)
   if (!std::strncmp(command, "BOOT:DFU", 8)) {
     (void)gUsb.writeLineCritical("ERR:DFU:UNSUPPORTED:F103C8", 120U);
     return;

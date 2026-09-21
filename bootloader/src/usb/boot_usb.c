@@ -1,5 +1,9 @@
 #include "boot_usb.h"
+#if defined(BOARD_F103_BOOT)
+#include "stm32f1xx_hal.h"
+#else
 #include "stm32f4xx_hal.h"
+#endif
 #include "usbd_cdc.h"
 #include "usbd_core.h"
 #include "usbd_desc.h"
@@ -9,6 +13,21 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 
 #define BOOT_RX_SIZE 2048U
+
+#if defined(BOARD_F103_BOOT)
+static void force_usb_disconnect_pulse(void) {
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitTypeDef gpio = {0};
+  gpio.Pin = GPIO_PIN_12;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(25U);
+  HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
+}
+#endif
+
 static volatile uint16_t rx_head = 0U;
 static volatile uint16_t rx_tail = 0U;
 static volatile uint32_t rx_dropped = 0U;
@@ -16,6 +35,9 @@ static uint8_t rx_buffer[BOOT_RX_SIZE];
 static uint8_t tx_packet[64];
 
 bool boot_usb_begin(void) {
+#if defined(BOARD_F103_BOOT)
+  force_usb_disconnect_pulse();
+#endif
   rx_head = rx_tail = 0U;
   rx_dropped = 0U;
   if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK) return false;

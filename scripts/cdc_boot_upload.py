@@ -10,6 +10,7 @@ PROFILES={
     "f411ce": (0x08060000, "AGVBL3-04000-60000", "F411CE01", 0x20020000),
     "f411cc": (0x08020000, "AGVBL3-04000-20000", "F411CC01", 0x20020000),
     "f401cd": (0x08040000, "AGVBL3-04000-40000", "F401CD01", 0x20018000),
+    "f103": (0x0803E000, "AGVBL3-04000-3E000", "F1030101", 0x20005000),
 }
 
 def normalize_image(path):
@@ -154,12 +155,15 @@ def upload_boot(port,data):
             print('[BOOT-CDC] END caused USB reset; verifying runtime')
 
 def main():
-    global APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END
+    global APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END, RUNTIME_GLOB, BOOT_GLOB
     ap=argparse.ArgumentParser(description='AGV F411 resident USB bootloader uploader')
     ap.add_argument('image'); ap.add_argument('--boot-wait',type=float,default=25.0)
     ap.add_argument('--target',choices=sorted(PROFILES),default='f411ce')
     args=ap.parse_args()
     APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END = PROFILES[args.target]
+    if args.target == 'f103':
+        RUNTIME_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_CDC_in_FS_Mode*-if00'
+        BOOT_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_BOOT_CDC*-if00'
     data=normalize_image(args.image)
     print(f'[BOOT-CDC] image={len(data)} crc=0x{zlib.crc32(data)&0xffffffff:08X}')
     boot=find_one(BOOT_GLOB)
@@ -167,14 +171,14 @@ def main():
         runtime=find_one(RUNTIME_GLOB)
         if runtime:
             trigger_resident(runtime); boot=wait_one(BOOT_GLOB,args.boot_wait)
-        elif rom_dfu_active():
+        elif args.target != 'f103' and rom_dfu_active():
             fallback_rom(Path(args.image)); return 0
         else:
             print('[BOOT-CDC] no runtime/boot CDC; waiting for resident boot CDC or ROM DFU via USB')
             end=time.monotonic()+args.boot_wait
             while time.monotonic()<end and not boot:
                 boot=find_one(BOOT_GLOB)
-                if not boot and rom_dfu_active(): fallback_rom(Path(args.image)); return 0
+                if not boot and args.target != 'f103' and rom_dfu_active(): fallback_rom(Path(args.image)); return 0
                 time.sleep(.1)
     if not boot: raise RuntimeError('resident boot CDC did not appear; USB/NRST/power path unavailable')
     print('[BOOT-CDC] resident port',boot); release_port(boot); upload_boot(boot,data)
