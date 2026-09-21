@@ -240,7 +240,7 @@ void Timers_Init() {
   htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
     FatalError();
-  HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 3U, 0U);
+  HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 1U, 0U);
   HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
 }
 

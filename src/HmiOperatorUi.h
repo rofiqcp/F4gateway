@@ -13,9 +13,14 @@ class HmiOperatorUi {
 public:
   enum class Page : uint8_t { HOME=0, MAIN_MENU, ESC, PERCEPTION, NAVIGATION, FORK };
 
-  void reset() { page_=Page::HOME; escSlide_=perSlide_=navSlide_=forkSlide_=0U; touchDown_=false; }
+  void reset() { page_=Page::HOME; escSlide_=perSlide_=navSlide_=forkSlide_=0U; touchDown_=false; pressed_=K_NONE; emergencyStopRequested_=false; }
   void cancelTouch() { touchDown_=false; pressed_=K_NONE; }
   bool touchDown() const { return touchDown_; }
+  bool consumeEmergencyStopRequest() {
+    const bool requested = emergencyStopRequested_;
+    emergencyStopRequested_ = false;
+    return requested;
+  }
   void showPage(Page page) { page_=page; cancelTouch(); }
   const char *wireName() const {
     switch (page_) { case Page::HOME:return "HOME"; case Page::MAIN_MENU:return "MAIN_MENU";
@@ -39,6 +44,10 @@ public:
     uint16_t x=0U,y=0U; const bool down=tft.getTouch(&x,&y,200U);
     if (down && !touchDown_) {
       touchDown_=true; pressed_=hitKey((int)x,(int)y);
+      if (pressed_==K_ESTOP) {
+        emergencyStopRequested_=true;
+        return true;
+      }
       if (pressed_==K_STOP) { Bts7960Winch::stop(); return true; }
       if (page_==Page::FORK && forkSlide_>0U && pressed_==K_UP) {
         if (forkSlide_==1U) Bts7960Winch::upTimed1Local(); else Bts7960Winch::upTimed2Local();
@@ -70,9 +79,9 @@ private:
   static constexpr int W2=320,H2=240,BAR_H=28;
   static constexpr int CARD_Y=38,CARD_H=136,CARD_W=98,CARD_GAP=5,X1=6,X2=109,X3=212;
   static constexpr int NAV_Y=183,NAV_H=49;
-  enum Key:int { K_NONE=0,K_HOME,K_BACK,K_MENU,K_ESC,K_PER,K_NAV,K_FORK,K_LEFT,K_RIGHT,K_UP,K_STOP,K_DOWN };
+  enum Key:int { K_NONE=0,K_HOME,K_BACK,K_MENU,K_ESC,K_PER,K_NAV,K_FORK,K_LEFT,K_RIGHT,K_UP,K_STOP,K_DOWN,K_ESTOP };
   Page page_{Page::HOME}; uint8_t escSlide_{0},perSlide_{0},navSlide_{0},forkSlide_{0};
-  bool touchDown_{false}; int pressed_{K_NONE};
+  bool touchDown_{false}; int pressed_{K_NONE}; bool emergencyStopRequested_{false};
 
   static bool hit(int px,int py,int x,int y,int w,int h){return px>=x&&px<x+w&&py>=y&&py<y+h;}
   static const char *yn(bool v){return v?"READY":"WAIT";}
@@ -86,7 +95,11 @@ private:
     tft.fillRect(0,0,W2,BAR_H,C_BG2);
     const char *title=wireName(); text(title,W2/2,8,C_TEXT2,C_BG2,TC_DATUM,1);
     if(page_!=Page::HOME){topButton(4,page_==Page::MAIN_MENU?"HOME":"BACK");}
-    dot(273,14,d.rosConnected?C_GREEN2:C_DIM); dot(287,14,d.escFresh?C_GREEN2:C_DIM); dot(301,14,d.eStop?C_RED2:C_GREEN2);
+    dot(226,14,d.rosConnected?C_GREEN2:C_DIM);
+    dot(238,14,d.escFresh?C_GREEN2:C_DIM);
+    const uint16_t estopFill=d.eStop?C_RED2:C_PANEL;
+    panel(250,2,66,24,estopFill,C_RED2);
+    text(d.eStop?"STOPPED":"E-STOP",283,9,C_WHITE2,estopFill,TC_DATUM,1);
   }
   void card(int x,const char*title,const char*value,const char*foot,uint16_t accent){
     panel(x,CARD_Y,CARD_W,CARD_H,C_CARD,accent);dot(x+12,CARD_Y+14,accent);
@@ -144,6 +157,7 @@ private:
 
   uint8_t &slide(){if(page_==Page::ESC)return escSlide_;if(page_==Page::PERCEPTION)return perSlide_;if(page_==Page::NAVIGATION)return navSlide_;return forkSlide_;}
   int hitKey(int x,int y){
+    if(hit(x,y,248,0,72,30)) return K_ESTOP;
     if(page_!=Page::HOME && hit(x,y,0,0,96,30)) return page_==Page::MAIN_MENU?K_HOME:K_BACK;
     if(page_==Page::HOME) return hit(x,y,74,181,172,51)?K_MENU:K_NONE;
     if(page_==Page::MAIN_MENU){if(hit(x,y,6,38,150,76))return K_ESC;if(hit(x,y,164,38,150,76))return K_PER;if(hit(x,y,6,122,150,76))return K_NAV;if(hit(x,y,164,122,150,76))return K_FORK;return K_NONE;}
@@ -155,6 +169,7 @@ private:
     return K_NONE;
   }
   bool executeKey(int k){
+    if(k==K_ESTOP)return true;
     if(k==K_NONE||k==K_STOP)return k==K_STOP;
     if(k==K_HOME){page_=Page::HOME;return true;} if(k==K_BACK){page_=Page::MAIN_MENU;return true;} if(k==K_MENU){page_=Page::MAIN_MENU;return true;}
     if(k==K_ESC){page_=Page::ESC;return true;}if(k==K_PER){page_=Page::PERCEPTION;return true;}if(k==K_NAV){page_=Page::NAVIGATION;return true;}if(k==K_FORK){page_=Page::FORK;return true;}

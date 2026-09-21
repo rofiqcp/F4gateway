@@ -45,10 +45,13 @@ static void emitServiceLine(const char *line) {
   if (line != nullptr) (void)gUsb.writeLineCritical(line, 120U);
 }
 
-static volatile uint32_t gMainLoopHeartbeatMs = 0U;
+static volatile uint32_t gMainLoopHeartbeatEpoch = 0U;
+static volatile uint32_t gAppWatchdogLastEpoch = 0U;
+static volatile uint8_t gAppWatchdogStallTicks = 0U;
 static volatile bool gAppWatchdogArmed = false;
 static uint32_t gResetCauseFlags = 0U;
-static constexpr uint32_t APP_WATCHDOG_TIMEOUT_MS = 3500U;
+// TIM11 fires at 10 Hz on both supported MCU clock profiles.
+static constexpr uint8_t APP_WATCHDOG_TIMEOUT_TICKS = 35U;
 
 static bool splashComplete = false;
 static uint8_t splashProgress = 0;
@@ -143,8 +146,18 @@ static uint32_t gWatchdogHealthySinceMs = 0U;
 static void appWatchdogIsr() {
   if (!gAppWatchdogArmed)
     return;
-  if (static_cast<uint32_t>(HAL_GetTick() - gMainLoopHeartbeatMs) >
-      APP_WATCHDOG_TIMEOUT_MS) {
+
+  // Use TIM11's own periodic interrupt as the timebase. This keeps the watchdog
+  // effective even if the HAL/SysTick timebase itself stops advancing.
+  const uint32_t epoch = gMainLoopHeartbeatEpoch;
+  if (epoch != gAppWatchdogLastEpoch) {
+    gAppWatchdogLastEpoch = epoch;
+    gAppWatchdogStallTicks = 0U;
+    return;
+  }
+  if (gAppWatchdogStallTicks < 0xFFU)
+    ++gAppWatchdogStallTicks;
+  if (gAppWatchdogStallTicks >= APP_WATCHDOG_TIMEOUT_TICKS) {
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
     RTC->BKP1R = kAppCrashMagic;
@@ -157,7 +170,8 @@ static void appWatchdogIsr() {
 }
 
 static void startAppWatchdog() {
-  gMainLoopHeartbeatMs = HAL_GetTick();
+  gAppWatchdogLastEpoch = gMainLoopHeartbeatEpoch;
+  gAppWatchdogStallTicks = 0U;
   Board_SetWatchdogCallback(appWatchdogIsr);
   Board_WatchdogStart();
   gAppWatchdogArmed = true;
@@ -190,6 +204,8 @@ static bool printBoth(const char *line) { return tryUsbLine(line); }
 // Safety/control messages must never depend on the best-effort telemetry ring.
 // A failed enqueue is latched and retried cooperatively from main/realtime
 // service until the high-priority CDC ring accepts the STOP.
+static bool gEStopAssertPending = false;
+static bool gEStopClearPending = false;
 static bool gDriveStopPending = false;
 static bool gSteerStopPending = false;
 static bool gNavStopPending = false;
@@ -197,6 +213,10 @@ static uint32_t gSafetyControlTxRetries = 0U;
 static uint32_t gSafetyControlTxDrops = 0U;
 static uint32_t gSafetyControlTxQueued = 0U;
 static uint32_t gLastUsbSafetyGeneration = 0U;
+static uint32_t gLastEStopStopRefreshMs = 0U;
+static constexpr uint32_t ESTOP_STOP_REFRESH_MS = 100U;
+static bool gLocalEStopLatched = false;
+static bool gHostEStopActive = false;
 static uint32_t gLastUsbRxResyncCount = 0U;
 static int8_t gDriveTestDirection = 0;
 static uint32_t gDriveLeaseLastTxMs = 0U;
@@ -266,6 +286,12 @@ static void serviceUsbTransportState() {
 }
 
 static void serviceSafetyControlTx() {
+  // E-stop state has first priority. Assert/clear are mutually exclusive and
+  // are retried until the high-priority USB queue accepts them.
+  if (gEStopAssertPending && sendSafetyControlLine("CMD:ESTOP:1"))
+    gEStopAssertPending = false;
+  if (gEStopClearPending && sendSafetyControlLine("CMD:ESTOP:0"))
+    gEStopClearPending = false;
   if (gDriveStopPending && sendSafetyControlLine("CMD:DRIVE:STOP"))
     gDriveStopPending = false;
   if (gSteerStopPending && sendSafetyControlLine("CMD:STEER:STOP"))
@@ -326,6 +352,107 @@ static void stopSteeringTest() {
 static void stopAllManualTest() {
   stopDriveTest();
   stopSteeringTest();
+}
+
+static void zeroCommandedMotionState() {
+  gTelemetry.driveTargetMps = 0.0F;
+  gTelemetry.navx.commandLinearMps = 0.0F;
+  gTelemetry.navx.commandAngularRps = 0.0F;
+  gTelemetry.navx.cmdAgeMs = 0U;
+}
+
+static void updateEffectiveEStopState() {
+  gTelemetry.eStop = gLocalEStopLatched || gHostEStopActive;
+}
+
+static void enforceEmergencyStopOutputs() {
+  updateEffectiveEStopState();
+  if (!gTelemetry.eStop)
+    return;
+  zeroCommandedMotionState();
+#if BTS_WINCH_ENABLED
+  Bts7960Winch::emergencyStop();
+#endif
+  stopAllManualTest();
+  latchAllSafetyStops();
+  gLastEStopStopRefreshMs = 0U;
+  serviceSafetyControlTx();
+  markUiDirty();
+}
+
+static void triggerLocalEmergencyStop() {
+  // The HMI latch is independent from host ESTOP telemetry. A periodic ESTOP:0
+  // from ROS is therefore unable to undo an operator stop from the touchscreen.
+  gLocalEStopLatched = true;
+  gEStopClearPending = false;
+  gEStopAssertPending = true;
+  enforceEmergencyStopOutputs();
+}
+
+static void setHostEmergencyStop(bool active) {
+  gHostEStopActive = active;
+  updateEffectiveEStopState();
+  if (gTelemetry.eStop) {
+    enforceEmergencyStopOutputs();
+  } else {
+    // Releasing the host source only removes the stop latch. It never restores
+    // an old non-zero motion command.
+    zeroCommandedMotionState();
+    gLastEStopStopRefreshMs = 0U;
+    markUiDirty();
+  }
+}
+
+static bool localEStopResetSafe() {
+  const bool navActive = gTelemetry.navigationStatus == NAV_QUEUED ||
+                         gTelemetry.navigationStatus == NAV_NAVIGATING;
+  const bool stateSafe = gTelemetry.state == STATE_STOPPED ||
+                         gTelemetry.state == STATE_STANDBY;
+  return stateSafe && !navActive && !driveTestRunning && !steeringTestRunning &&
+         !HmiTouchService::active() &&
+         std::fabs(gTelemetry.speedKmh) <= 0.2F &&
+         std::fabs(gTelemetry.driveActualMps) <= 0.02F;
+}
+
+static bool resetLocalEmergencyStop() {
+  if (!gLocalEStopLatched)
+    return true;
+  if (!localEStopResetSafe())
+    return false;
+  gLocalEStopLatched = false;
+  updateEffectiveEStopState();
+  zeroCommandedMotionState();
+  gLastEStopStopRefreshMs = 0U;
+  // The F4 request has its own ROS source, so clearing the local HMI latch
+  // always clears only that source. Any independent host /safety/estop source
+  // remains active in the ESC mux and continues to force zero.
+  gEStopAssertPending = false;
+  gEStopClearPending = true;
+  serviceSafetyControlTx();
+  markUiDirty();
+  return true;
+}
+
+static void serviceEmergencyStopHold() {
+  updateEffectiveEStopState();
+  if (!gTelemetry.eStop)
+    return;
+#if BTS_WINCH_ENABLED
+  Bts7960Winch::emergencyStop();
+#endif
+  zeroCommandedMotionState();
+  const uint32_t now = HAL_GetTick();
+  if (gLastEStopStopRefreshMs == 0U ||
+      static_cast<uint32_t>(now - gLastEStopStopRefreshMs) >=
+          ESTOP_STOP_REFRESH_MS) {
+    gLastEStopStopRefreshMs = now;
+    if (gLocalEStopLatched) {
+      gEStopClearPending = false;
+      gEStopAssertPending = true;
+    }
+    latchAllSafetyStops();
+  }
+  serviceSafetyControlTx();
 }
 
 static bool motionSafeForHeavyMaintenance();
@@ -480,7 +607,12 @@ static void handleTouch() {
     if (HmiTouchService::consumeRedrawRequest()) { markUiDirty(); drawUiNow(true); }
     return;
   }
-  if (gOperatorUi.pollTouch(gTelemetry)) {
+  bool touchAction = gOperatorUi.pollTouch(gTelemetry);
+  if (gOperatorUi.consumeEmergencyStopRequest()) {
+    triggerLocalEmergencyStop();
+    touchAction = true;
+  }
+  if (touchAction) {
     ++gDiagnostics.touchActions;
     markUiDirty();
     drawUiNow(true);
@@ -1344,6 +1476,11 @@ static void handleSerialCommand(char *command) {
 #if BTS_WINCH_ENABLED
     Bts7960Winch::emergencyStop();
 #endif
+    // RAW/CALIBRATION owns the complete touch surface, so make it a maintenance
+    // interlock: if that service screen is active, latch the same global E-stop
+    // before allowing calibration/raw-touch work to continue.
+    if (HmiTouchService::active())
+      triggerLocalEmergencyStop();
     gOperatorUi.cancelTouch();
     return;
   }
@@ -1621,15 +1758,18 @@ static void handleSerialCommand(char *command) {
     bool value = false; (void)parseBoolStrict(command + 11, value); gTelemetry.vescDriveConnected = value;
   } else if (!strncmp(command, "VESC_STEER:", 11)) {
     bool value = false; (void)parseBoolStrict(command + 11, value); gTelemetry.vescSteerConnected = value;
+  } else if (!strcmp(command, "ESTOP:RESET")) {
+    if (resetLocalEmergencyStop())
+      (void)gUsb.writeLineHighPriority("ACK:ESTOP:RESET");
+    else
+      (void)gUsb.writeLineHighPriority("ERR:ESTOP:RESET:UNSAFE");
   } else if (!strncmp(command, "ESTOP:", 6)) {
-    bool value = false; (void)parseBoolStrict(command + 6, value); gTelemetry.eStop = value;
-    if (gTelemetry.eStop) {
-#if BTS_WINCH_ENABLED
-      Bts7960Winch::emergencyStop();
-#endif
-      if (driveTestRunning || steeringTestRunning)
-        stopAllManualTest();
+    bool value = false;
+    if (!parseBoolStrict(command + 6, value)) {
+      (void)gUsb.writeLineHighPriority("ERR:ESTOP:ARGS");
+      return;
     }
+    setHostEmergencyStop(value);
   } else if (!strncmp(command, "MANUAL_SPEED:", 13)) {
     gTelemetry.manualSpeedPct = static_cast<uint8_t>(
         std::clamp(atoi(command + 13), MANUAL_SPEED_MIN, MANUAL_SPEED_MAX));
@@ -1778,7 +1918,6 @@ static void serviceDeferredCommands(uint8_t budget = 8U) {
     gDeferredCommandTail = static_cast<uint8_t>((gDeferredCommandTail + 1U) %
                                                 kDeferredCommandSlots);
     handleSerialCommand(command);
-    gMainLoopHeartbeatMs = HAL_GetTick();
   }
 }
 
@@ -1816,7 +1955,6 @@ pollSerialGui(std::size_t byteBudget = 256U) {
       if (serialRxLen > 0U) {
         handleSerialCommand(serialRx);
         --commandBudget;
-        gMainLoopHeartbeatMs = HAL_GetTick();
       }
       serialRxLen = 0U;
     } else if (serialRxLen + 1U < sizeof(serialRx)) {
@@ -2033,6 +2171,9 @@ int main() {
   gResetCauseFlags = RCC->CSR;
   __HAL_RCC_CLEAR_RESET_FLAGS();
   Board_Init();
+  // TIM11 supervises every subsystem after the base clock/peripheral bring-up:
+  // persistent config, winch/touch init, USB, SPI/display init, then main loop.
+  startAppWatchdog();
   gPersistentConfigReady = gPersistentConfig.begin();
 #if BTS_WINCH_ENABLED
   Bts7960Winch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
@@ -2054,6 +2195,7 @@ int main() {
     // thread context so long TFT transfers cannot starve CDC progress.
     gUsb.service();
     serviceUsbTransportState();
+    serviceEmergencyStopHold();
     serviceSafetyControlTx();
     serviceManualDriveLease();
   #if BTS_WINCH_ENABLED
@@ -2070,10 +2212,8 @@ int main() {
   restartSplash();
   if (!usbInitOk)
     gTelemetry.systemStatus = SYS_FAULT;
-  startAppWatchdog();
 
   while (true) {
-    gMainLoopHeartbeatMs = HAL_GetTick();
     /* Service deferred UART recovery/queue work every loop. Motor-link TX also
      * chains in its ISR, so this is a fallback rather than the realtime clock.
      */
@@ -2084,6 +2224,7 @@ int main() {
 #endif
     gUsb.service();
     serviceUsbTransportState();
+    serviceEmergencyStopHold();
     serviceSafetyControlTx();
     serviceManualDriveLease();
     if (!gCrashCounterCleared &&
@@ -2149,6 +2290,6 @@ int main() {
       ledMs = HAL_GetTick();
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
     }
-    gMainLoopHeartbeatMs = HAL_GetTick();
+      ++gMainLoopHeartbeatEpoch;
   }
 }

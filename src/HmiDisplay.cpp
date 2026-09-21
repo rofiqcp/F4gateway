@@ -98,6 +98,14 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
     // restores the correct mode/clock for each device.
     if (!Board_SpiAcquire(board_owner, prescaler)) {
       ++spi_bus_conflict_count_;
+      // A stale board-level owner must not permanently wedge TFT/touch access.
+      // SPI1 is HMI-only and this path is thread-context only, so a one-shot
+      // peripheral reset is safe after ownership acquisition times out.
+      if (Board_SpiOwner() != BoardSpiOwner::NONE && attempt == 0U) {
+        if (!recoverSpi())
+          return false;
+        continue;
+      }
       return false;
     }
     drainSpiRx();

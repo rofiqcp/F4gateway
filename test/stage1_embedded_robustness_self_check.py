@@ -21,6 +21,6 @@ check('MANIFEST_FORMAT 2UL' in boot and 'GATEWAY_BOARD_ID' in boot,'manifest rem
 check('boot_watchdog_init' in boot and 'boot_watchdog_stop' in boot,'bootloader watchdog lifecycle exists')
 check('DATA2:' in boot and 'ERR:DATA2:CRC' in boot,'bootloader chunk CRC protocol exists')
 check('BOOT_PROTOCOL_VERSION 3UL' in boot and 'proto=3' in uploader and 'DATA2:' in uploader,'CDC uploader protocol remains synchronized')
-check('FORMAT = 2' in manifest and 'BOARD_ID = 0xF411CE01' in manifest,'manifest generator matches bootloader')
+check('FORMAT = 2' in manifest and 'PROFILES = {' in manifest and '0xF411CE01' in manifest and '0xF401CD01' in manifest and '0xF411CC01' in manifest,'manifest generator supports all board-bound targets')
 check('scripts/cdc_boot_upload.py $SOURCE' in pio and '-DVECT_TAB_OFFSET=0x00004000U' in pio,'v2 keeps resident CDC bootloader upload path')
 print('STAGE1_EMBEDDED_ROBUSTNESS_SELF_CHECK_PASS')

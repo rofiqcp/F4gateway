@@ -45,7 +45,7 @@ need('touch_reject_fast_count_' in cpp and 'Median3' in cpp, 'XPT2046 filtering 
 reinit = re.search(r'bool Board_ReinitSpi1\(\)\s*\{(.*?)\n\}', board, re.S)
 need(reinit is not None and 'FatalError' not in reinit.group(1), 'runtime SPI recovery cannot enter boot fatal path')
 need(re.search(r'SetPriority\(OTG_FS_IRQn,\s*2', usb) is not None, 'USB IRQ priority remains 2')
-need(re.search(r'SetPriority\(TIM1_TRG_COM_TIM11_IRQn,\s*3', board) is not None, 'watchdog IRQ priority remains 3')
+need(re.search(r'SetPriority\(TIM1_TRG_COM_TIM11_IRQn,\s*1', board) is not None, 'watchdog IRQ priority remains 1 and preempts USB')
 need('Board_ServiceGapP95Ms' in main and 'Board_ServiceGapP99Ms' in main, 'service latency telemetry remains exported')
 need('Board_StackHeadroomBytes' in main and 'minStackHeadroomBytes' in diag, 'stack headroom remains monitored')
 need('FW:INFO' in main and 'BuildInfo::' in main and 'FW_GIT_SHA' in build, 'runtime build identity remains exposed')

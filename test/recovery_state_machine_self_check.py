@@ -101,14 +101,14 @@ with tempfile.TemporaryDirectory() as td:
 boot = (ROOT / 'bootloader/src/main.c').read_text(encoding='utf-8')
 for token in ('APP_CRASH_MAGIC', 'APP_CRASH_LIMIT 3UL', 'BOOT_IDLE_TIMEOUT_MS 20000UL',
               'maintenance_loop', 'begin_update', 'program_chunk', 'commit_manifest',
-              'manifest_next_address', 'MANIFEST_BASE', 'FLASH_SECTOR_1', 'FLASH_SECTOR_6',
+              'manifest_next_address', 'MANIFEST_BASE', 'FLASH_SECTOR_1', 'APP_LAST_SECTOR',
               'crc32_bytes((const uint8_t *)APP_BASE, expected_size)', 'application_valid()'):
     if token not in boot: fail(f'resident bootloader token missing: {token}')
 begin = boot.split('static bool begin_update',1)[1].split('static bool program_chunk',1)[0]
 if 'FLASH_SECTOR_7' in begin:
     fail('resident updater must never erase persistent Sector 7')
-if 's <= FLASH_SECTOR_6' not in begin or 'FLASH_SECTOR_1' not in begin:
-    fail('resident updater application erase range must be sectors 1..6')
+if 's <= APP_LAST_SECTOR' not in begin or 'FLASH_SECTOR_1' not in begin:
+    fail('resident updater application erase range must use target-specific APP_LAST_SECTOR')
 if begin.find('manifest_next_address() == 0U') > begin.find('for (uint32_t s = FLASH_SECTOR_1'):
     fail('manifest capacity guard must run before application erase')
 commit = boot.split('static bool commit_manifest',1)[1].split('static int hex_nibble',1)[0]

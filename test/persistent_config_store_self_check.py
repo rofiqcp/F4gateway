@@ -7,8 +7,8 @@ cpp = (ROOT / "src/PersistentConfigStore.cpp").read_text()
 main = (ROOT / "src/main.cpp").read_text()
 
 checks = {
-    "EEPROM base": "kStorageBase = 0x08064000UL" in h,
-    "EEPROM limit": "kStorageLimit = 0x0806C000UL" in h,
+    "EEPROM base": "PERSIST_STORAGE_BASE 0x08064000UL" in h and "kStorageBase = PERSIST_STORAGE_BASE" in h,
+    "EEPROM limit": "PERSIST_STORAGE_LIMIT 0x0806C000UL" in h and "kStorageLimit = PERSIST_STORAGE_LIMIT" in h,
     "record fixed 48 bytes": "sizeof(Record) == 48U" in h,
     "payload 28 bytes": "kMaxValueBytes = 28U" in h,
     "CRC32 present": "PersistentConfigStore::crc32" in cpp,

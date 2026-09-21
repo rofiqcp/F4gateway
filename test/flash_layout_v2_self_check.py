@@ -27,13 +27,13 @@ checks = {
     "linker app region": "ORIGIN = 0x08004000" in linker and "LENGTH = 0x5C000" in linker,
 }
 checks.update({
-    "EEPROM partition": "kStorageBase = 0x08064000UL" in cfg and "kStorageLimit = 0x0806C000UL" in cfg,
+    "EEPROM partition": "PERSIST_STORAGE_BASE 0x08064000UL" in cfg and "PERSIST_STORAGE_LIMIT 0x0806C000UL" in cfg,
     "legacy persistent tail reserved": "DNA_OFFSET" in (ROOT / "scripts/compose_persistent_image.py").read_text(),
     "sector7 never erased": "FLASH_SECTOR_7" not in boot.split("static bool begin_update", 1)[1].split("static bool program_chunk", 1)[0],
-    "app sectors1-6 erased": "FLASH_SECTOR_1" in boot and "s <= FLASH_SECTOR_6" in boot,
+    "app sectors selected by target": "FLASH_SECTOR_1" in boot and "s <= APP_LAST_SECTOR" in boot and "#define APP_LAST_SECTOR FLASH_SECTOR_6" in boot,
     "manifest capacity guard": "manifest_next_address() == 0U" in boot,
     "manifest append/readback": "manifest_next_address" in boot and "memcmp((const void *)target, &m, sizeof(m)) == 0" in boot,
-    "protocol v2 only": "DATA2:" in boot and '"DATA:"' not in boot and "incompatible resident bootloader layout" in cdc and "AGVBL3-04000-60000" in cdc,
+    "protocol v3 DATA2 only": "BOOT_PROTOCOL_VERSION 3UL" in boot and "DATA2:" in boot and '"DATA:"' not in boot and "proto=3" in cdc and "AGVBL3-04000-60000" in cdc,
     "no heavy libc parser/formatter": "snprintf" not in boot and "strtoul" not in boot,
     "static USB allocation": "USBD_malloc USBD_static_malloc" in usbd and "#include <stdlib.h>" not in usbd,
     "CDC layout synchronized": "APP_BASE=0x08004000; APP_LIMIT=0x08060000" in cdc,
