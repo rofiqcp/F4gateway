@@ -12,12 +12,14 @@ fi
 
 # The runtime/boot CDC permissions are deliberately scoped to this exact
 # BlackPill. Never grant USBDEVFS reset access to arbitrary 0483:5740 devices.
-BLACKPILL_SERIAL="33A433673134"
-for pid in 5740 5741; do
-  if ! grep -Eq "SUBSYSTEM==\"usb\".*idProduct}==\"${pid}\".*ATTR\{serial\}==\"${BLACKPILL_SERIAL}\"" "$RULE_SRC"; then
-    echo "Refusing to install non identity-scoped BlackPill rule for PID ${pid}" >&2
-    exit 1
-  fi
+BLACKPILL_SERIALS=("33A433673134" "319435643038")
+for serial in "${BLACKPILL_SERIALS[@]}"; do
+  for pid in 5740 5741; do
+    if ! grep -Eq "SUBSYSTEM==\"usb\".*idProduct}==\"${pid}\".*ATTR\{serial\}==\"${serial}\"" "$RULE_SRC"; then
+      echo "Refusing to install non identity-scoped BlackPill rule for serial ${serial} PID ${pid}" >&2
+      exit 1
+    fi
+  done
 done
 
 sudo install -m 0644 "$RULE_SRC" "$RULE_DST"
@@ -28,4 +30,4 @@ if ! cmp -s "$RULE_SRC" "$RULE_DST"; then
   exit 1
 fi
 
-echo "STM32 udev rules installed for exact BlackPill serial ${BLACKPILL_SERIAL}. Reconnect F411 if permissions do not refresh immediately."
+echo "STM32 udev rules installed for approved BlackPill serials. Reconnect the board USB if permissions do not refresh immediately."

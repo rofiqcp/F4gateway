@@ -24,6 +24,9 @@ inline constexpr const char* kGitFullSha = FW_GIT_FULL_SHA;
 inline constexpr bool kGitDirty = FW_GIT_DIRTY != 0;
 inline constexpr uint32_t kBuildEpoch = static_cast<uint32_t>(FW_BUILD_EPOCH);
 inline constexpr uint16_t kSchemaVersion = static_cast<uint16_t>(FW_SCHEMA_VERSION);
+#ifndef BUILD_APP_LIMIT
+#define BUILD_APP_LIMIT 0x08060000UL
+#endif
 inline constexpr uint32_t kAppBase = 0x08004000UL;
-inline constexpr uint32_t kAppLimit = 0x08060000UL;
+inline constexpr uint32_t kAppLimit = BUILD_APP_LIMIT;
 }  // namespace BuildInfo

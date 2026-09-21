@@ -48,18 +48,24 @@ static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with re
 
 void SystemClock_Config() {
   RCC_OscInitTypeDef osc{};
-  // BlackPill F411CE V2.0 has a stable 25 MHz HSE. Use it as the PLL
-  // reference so PLLQ is an accurate 48 MHz USB clock. The previous HSI-based
-  // 48 MHz clock could be outside USB FS tolerance and cause intermittent or
-  // missing CDC enumeration. This matches the previously proven Arduino build.
+  // BlackPill uses a 25 MHz HSE. Keep USB exactly at 48 MHz.
   osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   osc.HSEState = RCC_HSE_ON;
   osc.PLL.PLLState = RCC_PLL_ON;
   osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   osc.PLL.PLLM = 25U;
+#if defined(BOARD_F401CD)
+  // STM32F401CD maximum SYSCLK is 84 MHz: 25/25*336/4 = 84 MHz,
+  // PLLQ = 7 gives an exact 48 MHz USB clock.
+  osc.PLL.PLLN = 336U;
+  osc.PLL.PLLP = RCC_PLLP_DIV4;
+  osc.PLL.PLLQ = 7U;
+#else
+  // STM32F411 production clock: 25/25*192/2 = 96 MHz, PLLQ = 48 MHz.
   osc.PLL.PLLN = 192U;
   osc.PLL.PLLP = RCC_PLLP_DIV2;
   osc.PLL.PLLQ = 4U;
+#endif
   if (HAL_RCC_OscConfig(&osc) != HAL_OK)
     FatalError();
 
@@ -70,8 +76,13 @@ void SystemClock_Config() {
   clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
   clk.APB1CLKDivider = RCC_HCLK_DIV2;
   clk.APB2CLKDivider = RCC_HCLK_DIV1;
+#if defined(BOARD_F401CD)
+  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK)
+    FatalError();
+#else
   if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK)
     FatalError();
+#endif
 }
 
 void Gpio_Init() {
@@ -155,11 +166,18 @@ void Spi1_InitBootOrFatal() {
 
 
 void Timers_Init() {
+#if defined(BOARD_F401CD)
+  constexpr uint32_t kTimer1MHzPrescaler = 83U;
+  constexpr uint32_t kWatchdogPrescaler = 8399U;
+#else
+  constexpr uint32_t kTimer1MHzPrescaler = 95U;
+  constexpr uint32_t kWatchdogPrescaler = 9599U;
+#endif
   __HAL_RCC_TIM1_CLK_ENABLE();
   __HAL_RCC_TIM11_CLK_ENABLE();
 
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 95U;
+  htim1.Init.Prescaler = kTimer1MHzPrescaler;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 999U;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -198,7 +216,7 @@ void Timers_Init() {
   btsOc.OCFastMode = TIM_OCFAST_DISABLE;
   for (TIM_HandleTypeDef *timer : {&htim2, &htim4}) {
     timer->Instance = timer == &htim2 ? TIM2 : TIM4;
-    timer->Init.Prescaler = 95U;
+    timer->Init.Prescaler = kTimer1MHzPrescaler;
     timer->Init.CounterMode = TIM_COUNTERMODE_UP;
     timer->Init.Period = 999U;
     timer->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -215,7 +233,7 @@ void Timers_Init() {
 #endif
 
   htim11.Instance = TIM11;
-  htim11.Init.Prescaler = 9599U;
+  htim11.Init.Prescaler = kWatchdogPrescaler;
   htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim11.Init.Period = 999U;
   htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

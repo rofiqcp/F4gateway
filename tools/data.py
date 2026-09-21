@@ -3,7 +3,7 @@
 
 Transport:
   F411 CDC : /dev/ttyACM0 @ 1,000,000 baud (SENS:* lines)
-  Yahboom  : /dev/ttyUSB0 @ 921,600 baud (WIT 0x55 frames)
+  Yahboom  : /tmp/agv_devices/imu @ 921,600 baud (WIT 0x55 frames)
 
 The summary.csv schema is shared with ``ros2 run navigation data`` so direct
 hardware and ROS-pipeline captures can be compared column-for-column.
@@ -19,7 +19,22 @@ import yaml
 
 AGV_ROOT = Path(os.environ.get("AGV_ROOT", str(Path(__file__).resolve().parents[2]))).expanduser().resolve()
 F411_BY_ID = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode_33A433673134-if00"
-YAHBOOM_BY_ID = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+YAHBOOM_ROLE_ALIAS = "/tmp/agv_devices/imu"
+
+
+def default_yahboom_port() -> str:
+    """Resolve Yahboom without using the ambiguous duplicate CP2102 by-id."""
+    role = Path(YAHBOOM_ROLE_ALIAS)
+    if role.exists():
+        return str(role)
+    by_path_dir = Path("/dev/serial/by-path")
+    if by_path_dir.is_dir():
+        matches = sorted(by_path_dir.glob("*2.4.1:1.0-port0"))
+        if matches:
+            return str(matches[0])
+    return YAHBOOM_ROLE_ALIAS
+
+
 F411_REOPEN_BACKOFF_S = 0.50
 F411_DATA_STALE_S = 1.50
 F411_TRANSPORT_STALL_S = 3.00
@@ -548,7 +563,7 @@ class DirectRecorder:
 def main() -> int:
     ap=argparse.ArgumentParser(description="Direct F411 CDC + Yahboom serial unified AGV data logger")
     ap.add_argument("--neo-port",default=F411_BY_ID); ap.add_argument("--neo-baud",type=int,default=1000000)
-    ap.add_argument("--imu-port",default=YAHBOOM_BY_ID); ap.add_argument("--imu-baud",type=int,default=921600)
+    ap.add_argument("--imu-port",default=default_yahboom_port()); ap.add_argument("--imu-baud",type=int,default=921600)
     ap.add_argument("--rate",type=float,default=10.0); ap.add_argument("--duration",type=float,default=0.0)
     ap.add_argument("--accel-fsr-g",type=float,default=16.0); ap.add_argument("--gyro-fsr-dps",type=float,default=2000.0)
     ap.add_argument("--output-dir",default=""); ap.add_argument("--takeover",action="store_true",help="terminate current owners of both serial ports before opening")

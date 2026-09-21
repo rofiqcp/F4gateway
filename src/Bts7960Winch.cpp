@@ -313,15 +313,15 @@ void emergencyStop() { stop(); }
 void upHome() { requestMotion(+1, Bts7960WinchState::UP_HOME, 0U); }
 void downHome() { requestMotion(-1, Bts7960WinchState::DOWN_HOME, 0U); }
 void upTimed1() { requestMotion(+1, Bts7960WinchState::UP_TIMED_1, 1000U); }
-void upTimed2() { requestMotion(+1, Bts7960WinchState::UP_TIMED_2, 2000U); }
+void upTimed2() { requestMotion(+1, Bts7960WinchState::UP_TIMED_2, 5000U); }
 void downTimed1() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_1, 1000U); }
-void downTimed2() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_2, 2000U); }
+void downTimed2() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_2, 5000U); }
 void upHomeLocal() { requestMotion(+1, Bts7960WinchState::UP_HOME, 0U, false); }
 void downHomeLocal() { requestMotion(-1, Bts7960WinchState::DOWN_HOME, 0U, false); }
 void upTimed1Local() { requestMotion(+1, Bts7960WinchState::UP_TIMED_1, 1000U, false); }
-void upTimed2Local() { requestMotion(+1, Bts7960WinchState::UP_TIMED_2, 2000U, false); }
+void upTimed2Local() { requestMotion(+1, Bts7960WinchState::UP_TIMED_2, 5000U, false); }
 void downTimed1Local() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_1, 1000U, false); }
-void downTimed2Local() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_2, 2000U, false); }
+void downTimed2Local() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_2, 5000U, false); }
 
 bool processCommand(const char *command) {
   if (command == nullptr) return false;
@@ -333,7 +333,9 @@ bool processCommand(const char *command) {
       !std::strcmp(command, "WINCH 1")) {
     upTimed1(); return true;
   }
-  if (!std::strcmp(command, "UP 2") || !std::strcmp(command, "WINCH UP 2") ||
+  if (!std::strcmp(command, "UP 5") || !std::strcmp(command, "WINCH UP 5") ||
+      !std::strcmp(command, "WINCH 5") ||
+      !std::strcmp(command, "UP 2") || !std::strcmp(command, "WINCH UP 2") ||
       !std::strcmp(command, "WINCH 2")) {
     upTimed2(); return true;
   }
@@ -345,7 +347,8 @@ bool processCommand(const char *command) {
   if (!std::strcmp(command, "DOWN 1") || !std::strcmp(command, "WINCH DOWN 1")) {
     downTimed1(); return true;
   }
-  if (!std::strcmp(command, "DOWN 2") || !std::strcmp(command, "WINCH DOWN 2")) {
+  if (!std::strcmp(command, "DOWN 5") || !std::strcmp(command, "WINCH DOWN 5") ||
+      !std::strcmp(command, "DOWN 2") || !std::strcmp(command, "WINCH DOWN 2")) {
     downTimed2(); return true;
   }
   if (!std::strcmp(command, "STOP") || !std::strcmp(command, "WINCH STOP")) {
@@ -417,9 +420,9 @@ const char *stateName() {
     case Bts7960WinchState::UP_HOME: return "UP_HOME";
     case Bts7960WinchState::DOWN_HOME: return "DOWN_HOME";
     case Bts7960WinchState::UP_TIMED_1: return "UP_TIMED_1";
-    case Bts7960WinchState::UP_TIMED_2: return "UP_TIMED_2";
+    case Bts7960WinchState::UP_TIMED_2: return "UP_TIMED_5";
     case Bts7960WinchState::DOWN_TIMED_1: return "DOWN_TIMED_1";
-    case Bts7960WinchState::DOWN_TIMED_2: return "DOWN_TIMED_2";
+    case Bts7960WinchState::DOWN_TIMED_2: return "DOWN_TIMED_5";
     case Bts7960WinchState::TOP_LIMIT: return "TOP_LIMIT";
     case Bts7960WinchState::BOTTOM_LIMIT: return "BOTTOM_LIMIT";
     case Bts7960WinchState::FAULT: return "FAULT";

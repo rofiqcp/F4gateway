@@ -6,10 +6,22 @@
 
 #define MANIFEST_MAGIC 0x31564741UL
 #define MANIFEST_FORMAT 2UL
+#ifndef GATEWAY_BOARD_ID
 #define GATEWAY_BOARD_ID 0xF411CE01UL
+#endif
+#ifndef BOOT_LAYOUT_STRING
+#define BOOT_LAYOUT_STRING "AGVBL3-04000-60000"
+#endif
+#ifndef APP_LAST_SECTOR
+#define APP_LAST_SECTOR FLASH_SECTOR_6
+#endif
 #define BOOT_PROTOCOL_VERSION 3UL
 #define SRAM_BASE_ADDR 0x20000000UL
+#if defined(BOARD_F401CD)
+#define SRAM_END_ADDR  0x20018000UL
+#else
 #define SRAM_END_ADDR  0x20020000UL
+#endif
 #define APP_CRASH_MAGIC 0x48535243UL
 #define APP_CRASH_LIMIT 3UL
 #define BOOT_IDLE_TIMEOUT_MS 20000UL
@@ -58,7 +70,12 @@ static void system_clock_config(void) {
   osc.HSEState = RCC_HSE_ON;
   osc.PLL.PLLState = RCC_PLL_ON;
   osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  osc.PLL.PLLM = 25U; osc.PLL.PLLN = 192U; osc.PLL.PLLP = RCC_PLLP_DIV2; osc.PLL.PLLQ = 4U;
+  osc.PLL.PLLM = 25U;
+#if defined(BOARD_F401CD)
+  osc.PLL.PLLN = 336U; osc.PLL.PLLP = RCC_PLLP_DIV4; osc.PLL.PLLQ = 7U;
+#else
+  osc.PLL.PLLN = 192U; osc.PLL.PLLP = RCC_PLLP_DIV2; osc.PLL.PLLQ = 4U;
+#endif
   if (HAL_RCC_OscConfig(&osc) != HAL_OK) fatal_reset();
   RCC_ClkInitTypeDef clk = {0};
   clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
@@ -66,7 +83,11 @@ static void system_clock_config(void) {
   clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
   clk.APB1CLKDivider = RCC_HCLK_DIV2;
   clk.APB2CLKDivider = RCC_HCLK_DIV1;
+#if defined(BOARD_F401CD)
+  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK) fatal_reset();
+#else
   if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK) fatal_reset();
+#endif
 }
 
 static uint32_t crc32_bytes(const uint8_t *data, uint32_t len) {
@@ -187,11 +208,12 @@ static bool begin_update(uint32_t size, uint32_t crc) {
   /* Never destroy the running image when there is no durable commit slot. */
   if (manifest_next_address() == 0U) return false;
   if (HAL_FLASH_Unlock() != HAL_OK) return false;
-  /* Sector 0 is the resident bootloader. Sector 7 is append-only persistent
-   * storage. Erasing any application sector invalidates the old manifest CRC,
-   * so no destructive manifest invalidation is required. */
+  /* Sector 0 is the resident bootloader. The selected target keeps its final
+   * flash sector for manifest/persistent data. Erasing any application sector
+   * invalidates the old manifest CRC, so no destructive manifest invalidation
+   * is required. */
   bool ok = true;
-  for (uint32_t s = FLASH_SECTOR_1; ok && s <= FLASH_SECTOR_6; ++s) ok = erase_sector(s);
+  for (uint32_t s = FLASH_SECTOR_1; ok && s <= APP_LAST_SECTOR; ++s) ok = erase_sector(s);
   (void)HAL_FLASH_Lock();
   if (!ok) return false;
   expected_size = size; expected_crc = crc; write_offset = 0U; update_started = true; timeout_to_app = false;
@@ -302,7 +324,7 @@ static void reply_info(void) {
 #define DEC(x) do { p = append_dec(p, end, (uint32_t)(x)); } while (0)
 #define HEX(x) do { p = append_hex8(p, end, (uint32_t)(x)); } while (0)
   TXT("BOOT:INFO:proto="); DEC(BOOT_PROTOCOL_VERSION); TXT(":board="); HEX(GATEWAY_BOARD_ID);
-  TXT(":layout=AGVBL3-04000-60000:valid="); DEC(application_valid() ? 1U : 0U); *p = '\0';
+  TXT(":layout="); TXT(BOOT_LAYOUT_STRING); TXT(":valid="); DEC(application_valid() ? 1U : 0U); *p = '\0';
 #undef TXT
 #undef DEC
 #undef HEX

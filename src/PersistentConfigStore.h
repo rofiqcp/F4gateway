@@ -5,8 +5,14 @@
 
 class PersistentConfigStore {
 public:
-  static constexpr uint32_t kStorageBase = 0x08064000UL;
-  static constexpr uint32_t kStorageLimit = 0x0806C000UL;
+#ifndef PERSIST_STORAGE_BASE
+#define PERSIST_STORAGE_BASE 0x08064000UL
+#endif
+#ifndef PERSIST_STORAGE_LIMIT
+#define PERSIST_STORAGE_LIMIT 0x0806C000UL
+#endif
+  static constexpr uint32_t kStorageBase = PERSIST_STORAGE_BASE;
+  static constexpr uint32_t kStorageLimit = PERSIST_STORAGE_LIMIT;
   static constexpr uint8_t kMaxValueBytes = 28U;
 
   bool begin();

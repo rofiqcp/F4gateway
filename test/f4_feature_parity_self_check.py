@@ -9,7 +9,7 @@ for token in ['GPIO_PIN_6 | GPIO_PIN_7','GPIO_PULLUP','GPIO_PIN_2','GPIO_PIN_8',
     need(token in board,'BTS/LS hardware '+token)
 for token in ['kLimitConfirmMs = 30U','kReverseDeadtimeMs = 50U','kHomeWatchdogMs = 30000U','gTopConfirmed && gBottomConfirmed','TOP_LIMIT','BOTTOM_LIMIT']:
     need(token in winch,'winch safety '+token)
-for cmd in ['UP HOME','UP 1','UP 2','DOWN HOME','DOWN 1','DOWN 2','WINCH 0','WINCH 1','WINCH 2','WINCH STOP']:
+for cmd in ['UP HOME','UP 1','UP 5','UP 2','DOWN HOME','DOWN 1','DOWN 5','DOWN 2','WINCH 0','WINCH 1','WINCH 5','WINCH 2','WINCH STOP']:
     need(cmd in winch,'legacy winch command '+cmd)
 for cmd in ['LIMITS','LS STATUS','CONFIG RESET','WINCH PWM ','RAWTOUCH','CALIBRATE','CALSTOP','HMI RESET','TFT RESET','HMI REDRAW']:
     need(cmd in main or cmd in touch,'f4 service command '+cmd)

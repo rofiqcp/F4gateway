@@ -6,3 +6,7 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5740", ATTR{serial}=
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{serial}=="33A433673134", MODE="0660", GROUP="dialout", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5741", ATTR{serial}=="33A433673134", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5741", ATTRS{serial}=="33A433673134", MODE="0660", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5740", ATTR{serial}=="319435643038", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{serial}=="319435643038", MODE="0660", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5741", ATTR{serial}=="319435643038", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5741", ATTRS{serial}=="319435643038", MODE="0660", GROUP="dialout", TAG+="uaccess"

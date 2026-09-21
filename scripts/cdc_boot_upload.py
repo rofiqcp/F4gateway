@@ -2,16 +2,22 @@
 import argparse, glob, os, signal, struct, subprocess, sys, time, zlib
 from pathlib import Path
 
-RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_CDC_in_FS_Mode*-if00"
-BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE_BOOT_CDC*-if00"
-APP_BASE=0x08004000; APP_LIMIT=0x08060000; CHUNK=240
+RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_CDC_in_FS_Mode*-if00"
+BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_BOOT_CDC*-if00"
+APP_BASE=0x08004000; APP_LIMIT=0x08060000; SRAM_END=0x20020000; CHUNK=240
+EXPECTED_LAYOUT="AGVBL3-04000-60000"; EXPECTED_BOARD="F411CE01"
+PROFILES={
+    "f411ce": (0x08060000, "AGVBL3-04000-60000", "F411CE01", 0x20020000),
+    "f411cc": (0x08020000, "AGVBL3-04000-20000", "F411CC01", 0x20020000),
+    "f401cd": (0x08040000, "AGVBL3-04000-40000", "F401CD01", 0x20018000),
+}
 
 def normalize_image(path):
     data=Path(path).read_bytes()
     if len(data)>=16 and data[-8:-5]==b"UFD" and data[-5]==16: data=data[:-16]
     if len(data)<8 or len(data)>APP_LIMIT-APP_BASE: raise RuntimeError(f"invalid application size {len(data)}")
     sp,reset=struct.unpack_from('<II',data,0)
-    if not (0x20000000<=sp<=0x20020000) or (sp&3): raise RuntimeError(f"invalid MSP 0x{sp:08X}")
+    if not (0x20000000<=sp<=SRAM_END) or (sp&3): raise RuntimeError(f"invalid MSP 0x{sp:08X}")
     if not (reset&1): raise RuntimeError(f"reset vector not Thumb 0x{reset:08X}")
     pc=reset&~1
     if not (APP_BASE<=pc<APP_BASE+len(data)): raise RuntimeError(f"reset vector outside image 0x{pc:08X}")
@@ -122,8 +128,9 @@ def upload_boot(port,data):
         print('[BOOT-CDC]',transact(s,'PING',['BOOT:PONG'],2))
         info=transact(s,'INFO',['BOOT:INFO:'],2)
         print('[BOOT-CDC]',info)
-        if 'proto=3' not in info or 'layout=AGVBL3-04000-60000' not in info:
-            raise RuntimeError(f'incompatible resident bootloader layout; provision once via ST-Link: {info}')
+        if ('proto=3' not in info or f'layout={EXPECTED_LAYOUT}' not in info or
+                f'board={EXPECTED_BOARD}' not in info):
+            raise RuntimeError(f'incompatible resident bootloader target/layout; provision once via ST-Link: {info}')
         r=transact(s,f'BEGIN:{len(data)}:{crc:08X}',['ACK:BEGIN:'],12)
         print('[BOOT-CDC]',r)
         off=0; last_pct=-1
@@ -147,9 +154,13 @@ def upload_boot(port,data):
             print('[BOOT-CDC] END caused USB reset; verifying runtime')
 
 def main():
+    global APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END
     ap=argparse.ArgumentParser(description='AGV F411 resident USB bootloader uploader')
     ap.add_argument('image'); ap.add_argument('--boot-wait',type=float,default=25.0)
-    args=ap.parse_args(); data=normalize_image(args.image)
+    ap.add_argument('--target',choices=sorted(PROFILES),default='f411ce')
+    args=ap.parse_args()
+    APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END = PROFILES[args.target]
+    data=normalize_image(args.image)
     print(f'[BOOT-CDC] image={len(data)} crc=0x{zlib.crc32(data)&0xffffffff:08X}')
     boot=find_one(BOOT_GLOB)
     if not boot:

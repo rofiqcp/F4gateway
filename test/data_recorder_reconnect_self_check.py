@@ -8,7 +8,7 @@ def need(ok,msg):
     print('PASS:',msg)
 
 need('/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F411CE' in s,'F411 uses stable by-id')
-need('/dev/serial/by-id/usb-Silicon_Labs_CP2102' in s,'Yahboom uses stable by-id')
+need('/tmp/agv_devices/imu' in s and '2.4.1:1.0-port0' in s,'Yahboom avoids duplicate CP2102 by-id and uses stable role/topology')
 need('def _open_neo(' in s and 'def _close_neo(' in s,'F411 has reopen state machine')
 need('def _open_imu(' in s and 'def _close_imu(' in s,'Yahboom has reopen state machine')
 open_neo=s[s.index('def _open_neo('):s.index('def _close_neo(')]

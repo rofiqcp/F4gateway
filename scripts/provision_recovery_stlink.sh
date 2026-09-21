@@ -18,8 +18,11 @@ PERSIST_NEW="$TMP/persistent_new.bin"
 [[ -x "$OPENOCD" ]] || { echo "[STLINK] openocd not found: $OPENOCD" >&2; exit 2; }
 
 probe="$($OPENOCD -f interface/stlink.cfg -f target/stm32f4x.cfg \
-  -c 'adapter speed 500; init; halt; echo AGV_DBGMCU_ID=[format 0x%08X [mrw 0xE0042000]]; resume; shutdown' 2>&1 || true)"
+  -c 'adapter speed 500; init; halt; echo AGV_DBGMCU_ID=[format 0x%08X [mrw 0xE0042000]]; echo AGV_FLASH_KB=[mrh 0x1FFF7A22]; resume; shutdown' 2>&1 || true)"
 id="$(printf '%s\n' "$probe" | sed -n 's/.*AGV_DBGMCU_ID=\(0x[0-9A-Fa-f]*\).*/\1/p' | tail -1)"
+flash_raw="$(printf '%s\n' "$probe" | sed -n 's/.*AGV_FLASH_KB=\(0x[0-9A-Fa-f]*\|[0-9][0-9]*\).*/\1/p' | tail -1)"
+flash_kb=""
+[[ -n "$flash_raw" ]] && flash_kb=$((flash_raw))
 if [[ -z "$id" ]]; then
   echo "[STLINK] cannot identify target MCU" >&2
   printf '%s\n' "$probe" >&2
@@ -31,7 +34,9 @@ if [[ -z "$id" ]]; then
 fi
 dev=$(( id & 0xFFF ))
 [[ "$dev" -eq $((0x431)) ]] || { printf '[STLINK] REFUSED target %s DEV_ID=0x%03X is not STM32F411\n' "$id" "$dev" >&2; exit 4; }
-echo "[STLINK] target verified STM32F411 DBGMCU=$id"
+[[ -n "$flash_kb" ]] || { echo '[STLINK] REFUSED: cannot read STM32 flash-size register' >&2; exit 4; }
+[[ "$flash_kb" -eq 512 ]] || { printf '[STLINK] REFUSED STM32F411 target has %s KiB flash; F411CEU6 512 KiB required\n' "$flash_kb" >&2; exit 4; }
+echo "[STLINK] target verified STM32F411CE-class DBGMCU=$id FLASH=${flash_kb}KiB"
 
 cd "$ROOT/bootloader"; pio run -e f411_recovery_boot
 cd "$ROOT"; pio run -e blackpill_f411ce_stlink
