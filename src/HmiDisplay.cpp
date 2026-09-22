@@ -20,7 +20,11 @@
 namespace {
 constexpr uint16_t kTftCs = GPIO_PIN_0;
 constexpr uint16_t kTftDc = GPIO_PIN_1;
+#if defined(BOARD_F103C8)
+constexpr uint16_t kTftRst = GPIO_PIN_10;
+#else
 constexpr uint16_t kTftRst = GPIO_PIN_2;
+#endif
 constexpr uint16_t kTouchCs = GPIO_PIN_4;
 inline void TftCs(bool high) {
   HAL_GPIO_WritePin(GPIOB, kTftCs, high ? GPIO_PIN_SET : GPIO_PIN_RESET);

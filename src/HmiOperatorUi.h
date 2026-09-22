@@ -85,6 +85,27 @@ private:
 
   static bool hit(int px,int py,int x,int y,int w,int h){return px>=x&&px<x+w&&py>=y&&py<y+h;}
   static const char *yn(bool v){return v?"READY":"WAIT";}
+  static const char *missionText(const char *s){
+    if(!s)return "OFFLINE";
+    if(!std::strcmp(s,"NAV_TO_B"))return "TO B";
+    if(!std::strcmp(s,"NAV_TO_C"))return "TO C";
+    if(!std::strcmp(s,"NAV_TO_A"))return "HOME";
+    if(!std::strcmp(s,"CAMERA_CHECK"))return "CAMERA";
+    if(!std::strcmp(s,"FORWARD_INSERT"))return "INSERT";
+    if(!std::strcmp(s,"LIFT_UP"))return "LIFT UP";
+    if(!std::strcmp(s,"LIFT_DOWN"))return "LIFT DN";
+    if(!std::strcmp(s,"REVERSE_CLEAR"))return "REVERSE";
+    if(!std::strcmp(s,"MISSION_COMPLETE"))return "DONE";
+    if(!std::strcmp(s,"ABORTED"))return "ABORT";
+    if(!std::strcmp(s,"FAULT"))return "FAULT";
+    if(!std::strcmp(s,"IDLE"))return "IDLE";
+    return "OFFLINE";
+  }
+  static bool missionActive(const char *s){
+    return s && std::strcmp(s,"IDLE")!=0 && std::strcmp(s,"MISSION_COMPLETE")!=0 &&
+           std::strcmp(s,"ABORTED")!=0 && std::strcmp(s,"FAULT")!=0 &&
+           std::strcmp(s,"OFFLINE")!=0;
+  }
   static void formatFixed(char *out, size_t cap, float value, uint8_t decimals,
                           const char *suffix=nullptr){
     if(out==nullptr||cap==0U)return;
@@ -166,7 +187,7 @@ private:
     const uint8_t s=navSlide_;
     if(s==0){card(X1,"NAV OVERVIEW",d.navigationStatus==NAV_NAVIGATING?"ACTIVE":"IDLE",navigationStatusText(d.navigationStatus),d.nav2Ready?C_GREEN2:C_DIM);card(X2,"GOAL",d.activeTarget,"TARGET",C_ACC);card(X3,"DISTANCE",dist,"TO GOAL",goalDistanceFresh?C_ACC:C_DIM);}
     else if(s==1){card(X1,"HEADING",head,"deg",C_ACC);card(X2,"SPEED",spd,"m/s",d.state==STATE_RUNNING?C_GREEN2:C_DIM);card(X3,"NAV LINK",d.nav2Ready?"ONLINE":"OFF","ROS / NAV2",d.nav2Ready?C_GREEN2:C_RED2);}
-    else{card(X1,"MISSION",d.navigationStatus==NAV_NAVIGATING?"RUNNING":"STOP","NAV2",d.navigationStatus==NAV_NAVIGATING?C_GREEN2:C_DIM);card(X2,"GOAL",d.activeTarget,"MISSION",C_ACC);card(X3,"STATUS",navigationStatusText(d.navigationStatus),d.motionReady?"SYSTEM READY":"CHECK LINK",d.motionReady?C_GREEN2:C_RED2);}
+    else{const bool missionOn=missionActive(d.missionState);const bool missionFault=!std::strcmp(d.missionState,"FAULT")||!std::strcmp(d.missionState,"ABORTED");card(X1,"MISSION",missionText(d.missionState),"FSM",missionFault?C_RED2:(missionOn?C_GREEN2:C_DIM));card(X2,"GOAL",d.activeTarget,"MISSION",C_ACC);card(X3,"STATUS",navigationStatusText(d.navigationStatus),d.motionReady?"SYSTEM READY":"CHECK LINK",d.motionReady?C_GREEN2:C_RED2);}
     footer(s);
   }
   void forkCard(int x,const char*title,const char*sub,const char*foot,uint16_t c){panel(x,CARD_Y,CARD_W,CARD_H,C_CARD,c);dot(x+12,CARD_Y+14,c);text(title,x+CARD_W/2,CARD_Y+58,c,C_CARD,MC_DATUM);text(sub,x+CARD_W/2,CARD_Y+82,C_TEXT2,C_CARD,MC_DATUM,2);text(foot,x+CARD_W/2,CARD_Y+CARD_H-10,C_MUTED,C_CARD,BC_DATUM);}

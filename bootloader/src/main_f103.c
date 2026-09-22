@@ -60,6 +60,16 @@ static void early_usb_detach_hold(void) {
   __DSB();
 }
 
+static void early_usb_detach_release(void) {
+  RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
+  __DSB();
+  uint32_t crh = GPIOA->CRH;
+  crh &= ~(0xFUL << 16U);
+  crh |=  (0x4UL << 16U);     /* Reset-equivalent floating input: release D+. */
+  GPIOA->CRH = crh;
+  __DSB();
+}
+
 static void fatal_reset(void) { NVIC_SystemReset(); while (1) {} }
 
 static void system_clock_config(void) {
@@ -109,10 +119,14 @@ static bool read_boot_request(void) {
   backup_access_enable();
   const uint16_t lo = (uint16_t)BKP->DR1;
   const uint16_t hi = (uint16_t)BKP->DR10;
+  return lo == BOOT_REQ_LO && hi == BOOT_REQ_HI;
+}
+
+static void clear_boot_request(void) {
+  backup_access_enable();
   BKP->DR1 = 0U;
   BKP->DR10 = 0U;
   __DSB();
-  return lo == BOOT_REQ_LO && hi == BOOT_REQ_HI;
 }
 
 static bool vector_valid(uint32_t base, uint32_t limit) {
@@ -181,6 +195,7 @@ __attribute__((noreturn)) static void reset_to_app_after_usb(void) {
     early_usb_detach_hold();
   }
   watchdog_armed = false;
+  clear_boot_request();
   /* Give the host a real detach window before the core/peripherals reset. */
   HAL_Delay(350U);
   NVIC_SystemReset();
@@ -199,6 +214,13 @@ __attribute__((noreturn)) static void jump_app(void) {
   const uint32_t sp = *(volatile const uint32_t *)APP_BASE;
   const uint32_t reset = *(volatile const uint32_t *)(APP_BASE + 4U);
   watchdog_armed = false;
+  clear_boot_request();
+  /*
+   * early_usb_detach_hold() intentionally owns PA12 from reset. A direct jump
+   * does not reset GPIO registers, so release D+ before entering the app or the
+   * external pull-up can never enumerate the runtime CDC device.
+   */
+  early_usb_detach_release();
   if (HAL_RCC_DeInit() != HAL_OK) fatal_reset();
   quiesce();
   SCB->VTOR = APP_BASE;

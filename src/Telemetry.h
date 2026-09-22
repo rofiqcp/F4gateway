@@ -163,6 +163,7 @@ struct VehicleTelemetry {
   uint8_t selectedWaypoint{0};
   char activeTarget[HMI_WAYPOINT_NAME_LEN]{"NONE"};
   NavigationStatus navigationStatus{NAV_IDLE};
+  char missionState[24]{"IDLE"};
 
   // Status transaksi konfigurasi HMI -> ROS. Nilai aktual hanya diubah setelah ACK/readback.
   bool configPending{false};

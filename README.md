@@ -9,7 +9,7 @@ Environment F411/F401 lama tetap tersedia sebagai regression/recovery target. De
 - MCU: STM32F103C8T6, HSE 8 MHz, SYSCLK 72 MHz.
 - USB device: 48 MHz dari PLL / 1.5, USB CDC FS pada PA11/PA12.
 - HMI: ILI9341 320x240 + XPT2046 pada SPI1.
-- TFT: CS PB0, DC PB1, RESET PB2; touch CS PA4.
+- TFT: CS PB0, DC PB1, RESET PB10; touch CS PA4. (F411/F401 regression targets tetap memakai PB2 untuk RESET.)
 - Buzzer: TIM1 CH1 pada PA8.
 - Fork BTS7960: LPWM PA2 / TIM2 CH3, RPWM PB8 / TIM4 CH3.
 - Limit switch aktif-LOW + pull-up: PB6 = TOP, PB7 = BOTTOM.

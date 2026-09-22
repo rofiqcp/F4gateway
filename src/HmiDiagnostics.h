@@ -89,7 +89,7 @@ struct HmiDiagnostics {
   bool pa7SpiMosi{false};
   bool pb0TftCs{false};
   bool pb1TftDc{false};
-  bool pb2TftRst{false};
+  bool tftRst{false};
   bool pa4TouchCs{false};
   bool pa11UsbDm{false};
   bool pa12UsbDp{false};

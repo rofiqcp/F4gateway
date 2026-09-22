@@ -507,7 +507,7 @@ static void serviceEmergencyStopHold() {
 #if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static bool motionSafeForHeavyMaintenance();
 #endif
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static bool runTftSelfTest();
 #endif
 static float actualEditValue(UiEditKey key);
@@ -974,9 +974,12 @@ static void forceRosOffline() {
   gTelemetry.magReady = false;
   gTelemetry.cameraReady = false;
   gTelemetry.perceptionReady = false;
+  gTelemetry.perceptionInference = false;
   gTelemetry.motionReady = false;
   gTelemetry.nav2Ready = false;
   gTelemetry.navigationStatus = NAV_STOPPED;
+  snprintf(gTelemetry.missionState, sizeof(gTelemetry.missionState), "%s", "OFFLINE");
+  snprintf(gTelemetry.activeTarget, sizeof(gTelemetry.activeTarget), "%s", "NONE");
   gTelemetry.goalRemainingDistanceM = 0.0F;
   gTelemetry.goalRemainingDistanceValid = false;
   gTelemetry.escFresh = false;
@@ -1144,7 +1147,11 @@ static void sampleDiagnostics(uint32_t now) {
   gDiagnostics.pa7SpiMosi = pinHigh(GPIOA, GPIO_PIN_7);
   gDiagnostics.pb0TftCs = pinHigh(GPIOB, GPIO_PIN_0);
   gDiagnostics.pb1TftDc = pinHigh(GPIOB, GPIO_PIN_1);
-  gDiagnostics.pb2TftRst = pinHigh(GPIOB, GPIO_PIN_2);
+#if defined(BOARD_F103C8)
+  gDiagnostics.tftRst = pinHigh(GPIOB, GPIO_PIN_10);
+#else
+  gDiagnostics.tftRst = pinHigh(GPIOB, GPIO_PIN_2);
+#endif
   gDiagnostics.pa4TouchCs = pinHigh(GPIOA, GPIO_PIN_4);
   gDiagnostics.pa11UsbDm = pinHigh(GPIOA, GPIO_PIN_11);
   gDiagnostics.pa12UsbDp = pinHigh(GPIOA, GPIO_PIN_12);
@@ -1191,7 +1198,7 @@ static bool motionSafeForHeavyMaintenance() {
 }
 #endif
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
 static bool runTftSelfTest() {
   if (gUiDrawActive || !splashComplete || !tft.displayReady() ||
       tft.displayFaulted() || !motionSafeForHeavyMaintenance()) {
@@ -1404,7 +1411,7 @@ static void handleSerialCommand(char *command) {
 #endif
     return;
   }
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
   if (!std::strncmp(command, "EEPROM:GET:", 11)) {
     uint32_t key = 0U, value = 0U;
     if (!parseU32Strict(command + 11, key) || key == 0U || key > 0xFFFFU ||
@@ -1463,10 +1470,11 @@ static void handleSerialCommand(char *command) {
   }
 #if defined(BOARD_F103C8)
   if (!strcmp(command, "USB:STATUS")) {
-    char line[196];
+#if defined(BOARD_F103_256K)
+    char line[224];
     std::snprintf(
         line, sizeof(line),
-        "USB:STAT:host=%u,gen=%lu,init=%lu,deinit=%lu,restart=%lu,auto=%lu,reason=%lu,tx_busy=%u,rx=%lu,drop=%lu,reset=%08lX",
+        "USB:STAT:host=%u,gen=%lu,init=%lu,deinit=%lu,restart=%lu,auto=%lu,reason=%lu,tx_busy=%u,rx=%lu,rx_age=%lu,drop=%lu,reset=%08lX",
         gUsb.hostSessionEstablished() ? 1U : 0U,
         static_cast<unsigned long>(gUsb.transportGeneration()),
         static_cast<unsigned long>(gUsb.classInitCount()),
@@ -1476,8 +1484,23 @@ static void handleSerialCommand(char *command) {
         static_cast<unsigned long>(gUsb.lastRecoveryReason()),
         gUsb.txBusy() ? 1U : 0U,
         static_cast<unsigned long>(gUsb.rxPacketCount()),
+        static_cast<unsigned long>(gUsb.lastRxAgeMs()),
         static_cast<unsigned long>(gUsb.rxDropped()),
         static_cast<unsigned long>(gResetCauseFlags));
+#else
+    char line[160];
+    std::snprintf(
+        line, sizeof(line),
+        "USB:STAT:host=%u,gen=%lu,restart=%lu,auto=%lu,reason=%lu,rx=%lu,drop=%lu,reset=%08lX",
+        gUsb.hostSessionEstablished() ? 1U : 0U,
+        static_cast<unsigned long>(gUsb.transportGeneration()),
+        static_cast<unsigned long>(gUsb.softRestartCount()),
+        static_cast<unsigned long>(gUsb.autoRestartCount()),
+        static_cast<unsigned long>(gUsb.lastRecoveryReason()),
+        static_cast<unsigned long>(gUsb.rxPacketCount()),
+        static_cast<unsigned long>(gUsb.rxDropped()),
+        static_cast<unsigned long>(gResetCauseFlags));
+#endif
     (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
@@ -1615,7 +1638,7 @@ static void handleSerialCommand(char *command) {
     return;
   }
 
-#if !defined(BOARD_F103C8)
+#if !defined(BOARD_F103C8) || defined(BOARD_F103_256K)
   if (!strcmp(command, "TFT:STATUS")) {
     char line[96];
     const bool idOk = (gTftControllerId & 0xFFFFU) == 0x9341U;
@@ -1996,6 +2019,9 @@ static void handleSerialCommand(char *command) {
   } else if (!strncmp(command, "TARGET:", 7)) {
     snprintf(gTelemetry.activeTarget, sizeof(gTelemetry.activeTarget), "%.19s",
              command + 7);
+  } else if (!strncmp(command, "MISSION:", 8)) {
+    snprintf(gTelemetry.missionState, sizeof(gTelemetry.missionState), "%.23s",
+             command + 8);
   } else if (!strncmp(command, "NAV:", 4)) {
     const char *state = command + 4;
     if (eqIgnoreCase(state, "SELECTED"))

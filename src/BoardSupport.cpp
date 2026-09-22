@@ -20,6 +20,12 @@ extern "C" uint8_t _end;
 extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason);
 
 namespace {
+#if defined(BOARD_F103C8)
+constexpr uint16_t kTftResetPin = GPIO_PIN_10;
+#else
+constexpr uint16_t kTftResetPin = GPIO_PIN_2;
+#endif
+
 void (*g_watchdog_callback)() = nullptr;
 void (*g_realtime_service_callback)() = nullptr;
 bool g_realtime_service_active = false;
@@ -119,7 +125,7 @@ void Gpio_Init() {
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
 
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_2, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | kTftResetPin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
@@ -130,7 +136,7 @@ void Gpio_Init() {
 #endif
 
   GPIO_InitTypeDef gpio{};
-  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2;
+  gpio.Pin = GPIO_PIN_0 | GPIO_PIN_1 | kTftResetPin;
   gpio.Mode = GPIO_MODE_OUTPUT_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;

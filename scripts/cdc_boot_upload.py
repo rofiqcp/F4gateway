@@ -1,11 +1,14 @@
 #!/usr/bin/python3
-import argparse, glob, os, signal, struct, subprocess, sys, time, zlib
+import argparse, fcntl, glob, os, signal, struct, subprocess, sys, time, zlib
 from pathlib import Path
 
 RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_CDC_in_FS_Mode*-if00"
 BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_BOOT_CDC*-if00"
 APP_BASE=0x08004000; APP_LIMIT=0x08060000; SRAM_END=0x20020000; CHUNK=240
 EXPECTED_LAYOUT="AGVBL3-04000-60000"; EXPECTED_BOARD="F411CE01"
+UPDATE_LOCK = Path('/tmp/f4gateway_firmware_update.lock')
+_UPDATE_LOCK_FD = None
+
 PROFILES={
     "f411ce": (0x08060000, "AGVBL3-04000-60000", "F411CE01", 0x20020000),
     "f411cc": (0x08020000, "AGVBL3-04000-20000", "F411CC01", 0x20020000),
@@ -62,10 +65,40 @@ def port_holders(path):
     cp=subprocess.run(['fuser',real],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     return [int(x) for x in cp.stdout.split() if x.isdigit() and int(x)!=os.getpid()]
 
+def acquire_update_lock():
+    global _UPDATE_LOCK_FD
+    fd=os.open(UPDATE_LOCK, os.O_CREAT|os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise RuntimeError('another F4gateway firmware update is already active')
+    os.ftruncate(fd,0)
+    os.write(fd,(str(os.getpid())+'\n').encode())
+    os.fsync(fd)
+    _UPDATE_LOCK_FD=fd
+    print('[BOOT-CDC] firmware-update lock acquired')
+
+def release_update_lock():
+    global _UPDATE_LOCK_FD
+    if _UPDATE_LOCK_FD is None:
+        return
+    try:
+        # Keep the lock inode persistent. Unlinking a flock file before/after
+        # unlock creates an inode race where a second updater can lock a new file.
+        fcntl.flock(_UPDATE_LOCK_FD, fcntl.LOCK_UN)
+    finally:
+        os.close(_UPDATE_LOCK_FD)
+        _UPDATE_LOCK_FD=None
+
 def release_port(path):
+    deadline=time.monotonic()+1.0
     pids=port_holders(path)
+    while pids and time.monotonic()<deadline:
+        time.sleep(.04)
+        pids=port_holders(path)
     if not pids: return
-    print('[BOOT-CDC] releasing CDC holders',pids)
+    print('[BOOT-CDC] force-releasing CDC holders',pids)
     for pid in pids:
         try: os.kill(pid,signal.SIGTERM)
         except ProcessLookupError: pass
@@ -139,48 +172,33 @@ def ensure_runtime_session(ser):
 
 def trigger_resident(runtime):
     import serial
-    last=None
-    for attempt in range(1,6):
-        release_port(runtime)
-        try:
-            with open_serial_claim(runtime,5.0) as s:
-                time.sleep(.20)
-                # Close any partial command left by a previous host session before
-                # arming DFU. Re-open/retry the whole non-destructive negotiation
-                # if the USB endpoint stalls before ACK:DFU:ARMED.
-                s.write(b'\n\n'); s.flush(); time.sleep(.05); s.reset_input_buffer()
-                ensure_runtime_session(s)
-                r=transact(s,'BOOT:DFU:ARM',['ACK:DFU:ARMED'],2)
-                print('[BOOT-CDC]',r)
-
-                # From this point on do not blindly retry the destructive transition.
-                # A detach/serial exception after CONFIRM means the bootloader handoff
-                # may already be in progress, so return and let wait_one(BOOT_GLOB)
-                # decide authoritatively.
-                try:
-                    s.write(b'BOOT:DFU:CONFIRM\n'); s.flush()
-                except (OSError,serial.SerialException):
-                    return
-
-                end=time.monotonic()+1.5
-                while time.monotonic()<end:
-                    try:
-                        line=line_read(s,.15)
-                        if not line:
-                            continue
-                        if line.startswith('ACK:DFU'):
-                            print('[BOOT-CDC]',line)
-                            return
-                        if line.startswith('ERR:'):
-                            raise RuntimeError(line)
-                    except (OSError,serial.SerialException):
-                        return
+    release_port(runtime)
+    with open_serial_claim(runtime,5.0) as s:
+        time.sleep(.15)
+        runtime_resync(s)
+        # ARM/CONFIRM are intentionally accepted without a HOST session. Do not
+        # require a runtime TX reply here: after another host closes CDC, the
+        # application RX path can still be healthy while its old IN transfer is
+        # stalled. The appearance of BOOT_CDC is the authoritative handoff ACK.
+        s.write(b'BOOT:DFU:ARM\n')
+        s.flush()
+        time.sleep(.05)
+        s.write(b'BOOT:DFU:CONFIRM\n')
+        s.flush()
+        end=time.monotonic()+.75
+        while time.monotonic()<end:
+            try:
+                line=line_read(s,.10)
+            except (OSError,serial.SerialException):
                 return
-        except (OSError,serial.SerialException,TimeoutError) as e:
-            last=e
-            print(f'[BOOT-CDC] runtime transport retry {attempt}/5: {e}')
-            time.sleep(.15)
-    raise RuntimeError(f'runtime CDC negotiation failed after retries: {last}')
+            if not line:
+                continue
+            if line.startswith('ACK:DFU'):
+                print('[BOOT-CDC]',line)
+            elif line.startswith('ERR:DFU:'):
+                raise RuntimeError(line)
+            else:
+                print('[BOOT-CDC] runtime:',line)
 
 def fallback_rom(image_path):
     script=Path(__file__).resolve().parent/'dfu_upload_blackpill.sh'
@@ -364,16 +382,21 @@ def main():
     ap.add_argument('image'); ap.add_argument('--boot-wait',type=float,default=25.0)
     ap.add_argument('--target',choices=sorted(PROFILES),default='f411ce')
     args=ap.parse_args()
+    acquire_update_lock()
     APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END = PROFILES[args.target]
     if args.target == 'f103':
-        # Keep F103 CDC commands comfortably below the 600-byte boot parser
-        # line buffer and reduce USB FS burst pressure on low-cost hubs/clones.
-        CHUNK = 16
+        # 64-byte payload keeps each DATA2 line well below the 600-byte parser
+        # limit while reducing transaction count and exposure to USB hub hiccups.
+        CHUNK = 64
         RUNTIME_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_CDC_in_FS_Mode*-if00'
         BOOT_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_BOOT_CDC*-if00'
     data=normalize_image(args.image)
     print(f'[BOOT-CDC] image={len(data)} crc=0x{zlib.crc32(data)&0xffffffff:08X}')
     boot=find_one(BOOT_GLOB)
+    if not boot and args.target == 'f103':
+        # A lock-aware ROS bridge may already own the healthy runtime session.
+        # Give it first chance to ARM/CONFIRM DFU and release the port cleanly.
+        boot=wait_one(BOOT_GLOB,4.0)
     if not boot:
         runtime=find_one(RUNTIME_GLOB)
         if runtime:
@@ -395,6 +418,10 @@ def main():
     print('[BOOT-CDC] SUCCESS committed image verified and runtime ACK:PONG healthy')
     return 0
 if __name__=='__main__':
-    try: raise SystemExit(main())
+    try:
+        raise SystemExit(main())
     except Exception as e:
-        print('[BOOT-CDC] ERROR:',e,file=sys.stderr); raise SystemExit(1)
+        print('[BOOT-CDC] ERROR:',e,file=sys.stderr)
+        raise SystemExit(1)
+    finally:
+        release_update_lock()

@@ -84,6 +84,9 @@ void UsbCdcPort::resetSessionState(bool drop_queues, bool count_abort) {
 }
 
 bool UsbCdcPort::startUsbStack() {
+  // Timestamp every start attempt, including failures, so service() can retry a
+  // stack that never reached CONFIGURED instead of leaving USB dead forever.
+  usb_stack_started_ms_ = HAL_GetTick();
   if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK)
     return false;
 
@@ -155,6 +158,7 @@ void UsbCdcPort::onUsbClassInit() {
   ++usb_class_init_count_;
   usb_seen_configured_ = true;
   usb_loss_started_ms_ = 0U;
+  usb_stack_started_ms_ = 0U;
   invalidateHostSession();
   resetSessionState(true, true);
   tx_complete_ms_ = HAL_GetTick();
@@ -268,6 +272,7 @@ bool UsbCdcPort::softRestartUsb() {
   ++usb_soft_restart_count_;
   usb_seen_configured_ = false;
   usb_loss_started_ms_ = 0U;
+  usb_stack_started_ms_ = 0U;
   invalidateHostSession();
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
@@ -452,7 +457,19 @@ void UsbCdcPort::service() {
   if (connected()) {
     usb_seen_configured_ = true;
     usb_loss_started_ms_ = 0U;
-  } else if (!explicit_recovery && usb_seen_configured_) {
+
+#if defined(BOARD_F103_256K)
+    // A configured device can lose only its OUT path while remaining addressed.
+    // On the production RC target, authenticated ROS/HMI traffic is periodic,
+    // so bounded RX silence recovery is safe without penalizing the 64 KiB C8.
+    if (!restart_requested && host_session_established_ && last_rx_ms_ != 0U &&
+        static_cast<uint32_t>(now - last_rx_ms_) >= kHostRxSilenceRecoveryMs) {
+      ++usb_auto_restart_count_;
+      last_recovery_reason_ = 4U;
+      restart_requested = true;
+    }
+#endif
+  } else if (!restart_requested && usb_seen_configured_) {
     if (usb_loss_started_ms_ == 0U) {
       usb_loss_started_ms_ = now;
     } else if (static_cast<uint32_t>(now - usb_loss_started_ms_) >=
@@ -462,6 +479,16 @@ void UsbCdcPort::service() {
       restart_requested = true;
     }
   }
+#if defined(BOARD_F103_256K)
+  else if (!restart_requested && !usb_seen_configured_ &&
+           usb_stack_started_ms_ != 0U &&
+           static_cast<uint32_t>(now - usb_stack_started_ms_) >=
+               kInitialEnumerationRecoveryMs) {
+    ++usb_auto_restart_count_;
+    last_recovery_reason_ = 5U;
+    restart_requested = true;
+  }
+#endif
 
   // TX-complete runs in USB IRQ context. Revalidate wrapper + ST class state
   // atomically; otherwise the ISR can complete between the first tx_busy read
