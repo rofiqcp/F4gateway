@@ -8,6 +8,8 @@ extern "C" {
 
 bool boot_usb_begin(void);
 void boot_usb_end(void);
+void boot_usb_disconnect_hold(void);
+uint32_t boot_usb_rx_dropped(void);
 bool boot_usb_connected(void);
 int boot_usb_available(void);
 int boot_usb_read(void);

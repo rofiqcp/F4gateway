@@ -20,6 +20,8 @@
 #define MANIFEST_FORMAT 2UL
 #define BOOT_IDLE_TIMEOUT_MS 20000UL
 #define BOOT_WATCHDOG_TIMEOUT_MS 10000UL
+#define BOOT_UPDATE_TIMEOUT_MS 30000UL
+#define BOOT_USB_LOSS_RECOVERY_MS 2000UL
 #define BOOT_LINE_MAX 600U
 #define BOOT_DATA_MAX 240U
 
@@ -29,14 +31,35 @@ typedef struct {
 } app_manifest_t;
 static char line_buf[BOOT_LINE_MAX];
 static uint32_t line_len;
+static bool line_discard_until_newline;
+static uint32_t rx_drop_seen;
 static bool update_started;
 static uint32_t expected_size, expected_crc, write_offset;
+static uint32_t update_last_activity_ms;
 static uint32_t boot_started_ms;
+static uint32_t begin_fail_reason, begin_fail_addr, begin_fail_sr, begin_fail_cr, begin_fail_aux;
 static bool boot_usb_started;
 static volatile bool watchdog_armed;
 static volatile uint32_t watchdog_last_pat_ms;
 
 static void watchdog_pat(void) { watchdog_last_pat_ms = HAL_GetTick(); }
+
+/*
+ * Assert a physical USB disconnect before HAL or the clock tree is touched.
+ * Bluepill-class boards use an external D+ pull-up, so a plain core reset would
+ * otherwise expose a short reconnect pulse before firmware can take PA12 low.
+ */
+static void early_usb_detach_hold(void) {
+  RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
+  __DSB();
+  uint32_t crh = GPIOA->CRH;
+  crh &= ~(0xFUL << 16U);     /* PA12 configuration nibble. */
+  crh |=  (0x2UL << 16U);     /* 2 MHz push-pull output. */
+  GPIOA->CRH = crh;
+  GPIOA->BRR = GPIO_PIN_12;
+  __DSB();
+}
+
 static void fatal_reset(void) { NVIC_SystemReset(); while (1) {} }
 
 static void system_clock_config(void) {
@@ -150,11 +173,33 @@ static void quiesce(void) {
   }
   __DSB(); __ISB();
 }
+__attribute__((noreturn)) static void reset_to_app_after_usb(void) {
+  if (boot_usb_started) {
+    boot_usb_disconnect_hold();
+    boot_usb_started = false;
+  } else {
+    early_usb_detach_hold();
+  }
+  watchdog_armed = false;
+  /* Give the host a real detach window before the core/peripherals reset. */
+  HAL_Delay(350U);
+  NVIC_SystemReset();
+  while (1) {}
+}
+
 __attribute__((noreturn)) static void jump_app(void) {
+  /*
+   * Direct jump is allowed only from a freshly reset boot path. Once the USB
+   * stack has ever been active, perform a hardware reset first so the app never
+   * inherits endpoint/PCD state from the resident bootloader.
+   */
+  if (boot_usb_started)
+    reset_to_app_after_usb();
+
   const uint32_t sp = *(volatile const uint32_t *)APP_BASE;
   const uint32_t reset = *(volatile const uint32_t *)(APP_BASE + 4U);
-  if (boot_usb_started) { boot_usb_end(); boot_usb_started = false; }
   watchdog_armed = false;
+  if (HAL_RCC_DeInit() != HAL_OK) fatal_reset();
   quiesce();
   SCB->VTOR = APP_BASE;
   __set_CONTROL(0U);
@@ -166,75 +211,175 @@ __attribute__((noreturn)) static void jump_app(void) {
   while (1) {}
 }
 
-static bool erase_page(uint32_t address) {
-  watchdog_pat();
-  FLASH_EraseInitTypeDef erase = {0};
-  uint32_t error = 0U;
-  erase.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase.PageAddress = address;
-  erase.NbPages = 1U;
-  const bool ok = HAL_FLASHEx_Erase(&erase, &error) == HAL_OK;
-  watchdog_pat();
-  return ok;
+__attribute__((section(".RamFunc"), noinline, used))
+static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
+  if ((start & (FLASH_PAGE_BYTES - 1U)) != 0U || end <= start ||
+      end > MANIFEST_LIMIT)
+    return false;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  if ((FLASH->CR & FLASH_CR_LOCK) != 0U) {
+    FLASH->KEYR = FLASH_KEY1;
+    FLASH->KEYR = FLASH_KEY2;
+  }
+  if ((FLASH->CR & FLASH_CR_LOCK) != 0U) {
+    begin_fail_reason = 3U;
+    begin_fail_sr = FLASH->SR;
+    begin_fail_cr = FLASH->CR;
+    if (primask == 0U) __enable_irq();
+    return false;
+  }
+
+  for (uint32_t guard = 0U; (FLASH->SR & FLASH_SR_BSY) != 0U; ++guard) {
+    if (guard >= 8000000U) {
+      begin_fail_reason = 4U;
+      begin_fail_addr = start;
+      begin_fail_sr = FLASH->SR;
+      begin_fail_cr = FLASH->CR;
+      begin_fail_aux = 1U;
+      FLASH->CR = FLASH_CR_LOCK;
+      if (primask == 0U) __enable_irq();
+      return false;
+    }
+  }
+
+  FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
+
+  for (uint32_t address = start; address < end; address += FLASH_PAGE_BYTES) {
+    FLASH->CR = FLASH_CR_PER;
+    FLASH->AR = address;
+    FLASH->CR = FLASH_CR_PER | FLASH_CR_STRT;
+
+    uint32_t guard = 0U;
+    while ((FLASH->SR & FLASH_SR_BSY) != 0U && guard < 8000000U)
+      ++guard;
+
+    const uint32_t sr = FLASH->SR;
+    if (guard >= 8000000U ||
+        (sr & (FLASH_SR_PGERR | FLASH_SR_WRPRTERR)) != 0U) {
+      begin_fail_reason = 4U;
+      begin_fail_addr = address;
+      begin_fail_sr = sr;
+      begin_fail_cr = FLASH->CR;
+      begin_fail_aux = guard >= 8000000U ? 2U : 3U;
+      FLASH->CR = FLASH_CR_LOCK;
+      if (primask == 0U) __enable_irq();
+      return false;
+    }
+
+    FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
+  }
+
+  FLASH->CR = FLASH_CR_LOCK;
+  __DSB();
+  if (primask == 0U) __enable_irq();
+  return true;
 }
 
 static bool begin_update(uint32_t size, uint32_t crc) {
-  if (size < 8U || size > (APP_LIMIT - APP_BASE)) return false;
-  if (manifest_next_address() == 0U) return false;
-  if (HAL_FLASH_Unlock() != HAL_OK) return false;
-  bool ok = true;
-  for (uint32_t a = APP_BASE; ok && a < APP_LIMIT; a += FLASH_PAGE_BYTES)
-    ok = erase_page(a);
-  (void)HAL_FLASH_Lock();
-  if (!ok) return false;
+  begin_fail_reason = begin_fail_addr = begin_fail_sr = begin_fail_cr = begin_fail_aux = 0U;
+  if (size < 8U || size > (APP_LIMIT - APP_BASE)) {
+    begin_fail_reason = 1U;
+    return false;
+  }
+  /*
+   * The manifest occupies one dedicated flash page. When all record slots are
+   * consumed, recycle only that page. A power loss after this point is still
+   * recoverable because the resident bootloader remains intact and the app
+   * update protocol can be restarted from BEGIN.
+   */
+  if (manifest_next_address() == 0U) {
+    if (!erase_flash_pages_ram(MANIFEST_BASE, MANIFEST_LIMIT)) {
+      begin_fail_reason = 2U;
+      return false;
+    }
+  }
+
+  const uint32_t erase_end =
+      APP_BASE + ((size + FLASH_PAGE_BYTES - 1U) & ~(FLASH_PAGE_BYTES - 1U));
+  if (!erase_flash_pages_ram(APP_BASE, erase_end))
+    return false;
+
   expected_size = size;
   expected_crc = crc;
   write_offset = 0U;
+  update_last_activity_ms = HAL_GetTick();
   update_started = true;
   return true;
+}
+
+__attribute__((section(".RamFunc"), noinline, used))
+static bool flash_wait_ready_atomic(void) {
+  for (uint32_t guard = 0U; guard < 8000000U; ++guard)
+    if ((FLASH->SR & FLASH_SR_BSY) == 0U) return true;
+  return false;
+}
+
+/*
+ * Match OpenOCD's proven STM32F1 block-writer sequence:
+ * unlock once, keep PG asserted for the entire halfword stream, wait for BSY
+ * after every halfword, then lock once.  Do not call HAL_FLASH_Program() for
+ * each halfword because HAL toggles PG between writes.
+ */
+__attribute__((section(".RamFunc"), noinline, used))
+static bool program_halfword_stream(uint32_t address, const uint8_t *data,
+                                    uint32_t len) {
+  if (data == NULL || len == 0U || (address & 1U) != 0U) return false;
+  if (HAL_FLASH_Unlock() != HAL_OK) return false;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  bool ok = flash_wait_ready_atomic();
+  FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
+  FLASH->CR = FLASH_CR_PG;
+
+  for (uint32_t pos = 0U; ok && pos < len; pos += 2U) {
+    uint16_t half = data[pos];
+    if ((pos + 1U) < len)
+      half |= (uint16_t)((uint16_t)data[pos + 1U] << 8U);
+    else
+      half |= 0xFF00U;
+
+    *(__IO uint16_t *)(address + pos) = half;
+    __DSB();
+
+    ok = flash_wait_ready_atomic();
+    const uint32_t sr = FLASH->SR;
+    if ((sr & (FLASH_SR_PGERR | FLASH_SR_WRPRTERR)) != 0U)
+      ok = false;
+    if (*(volatile const uint16_t *)(address + pos) != half)
+      ok = false;
+  }
+
+  FLASH->CR = FLASH_CR_LOCK;
+  FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
+  __DSB();
+  if (primask == 0U) __enable_irq();
+
+  return ok && memcmp((const void *)address, data, len) == 0;
 }
 
 static bool program_chunk(uint32_t offset, const uint8_t *data, uint32_t len) {
   if (!update_started || data == NULL || len == 0U || len > BOOT_DATA_MAX)
     return false;
   if (offset != write_offset || offset + len > expected_size) return false;
-  if (HAL_FLASH_Unlock() != HAL_OK) return false;
-  bool ok = true;
-  uint32_t pos = 0U;
-  while (pos < len) {
-    uint16_t half = 0xFFFFU;
-    const uint32_t take = (len - pos) >= 2U ? 2U : 1U;
-    memcpy(&half, data + pos, take);
-    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
-                          APP_BASE + offset + pos, half) != HAL_OK) {
-      ok = false;
-      break;
-    }
-    pos += take;
-    if ((pos & 0x3FU) == 0U) watchdog_pat();
+  if ((offset & 1U) != 0U) return false;
+
+  const bool ok = program_halfword_stream(APP_BASE + offset, data, len);
+  if (ok) {
+    write_offset += len;
+    update_last_activity_ms = HAL_GetTick();
   }
-  (void)HAL_FLASH_Lock();
-  if (ok) ok = memcmp((const void *)(APP_BASE + offset), data, len) == 0;
-  if (ok) write_offset += len;
   watchdog_pat();
   return ok;
 }
-static bool program_bytes_halfword(uint32_t address, const void *src, uint32_t len) {
-  const uint8_t *data = (const uint8_t *)src;
-  if ((address & 1U) != 0U || (len & 1U) != 0U) return false;
-  if (HAL_FLASH_Unlock() != HAL_OK) return false;
-  bool ok = true;
-  for (uint32_t pos = 0U; pos < len; pos += 2U) {
-    uint16_t half;
-    memcpy(&half, data + pos, 2U);
-    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD,
-                          address + pos, half) != HAL_OK) {
-      ok = false;
-      break;
-    }
-  }
-  (void)HAL_FLASH_Lock();
-  return ok && memcmp((const void *)address, src, len) == 0;
+
+static bool program_bytes_stream(uint32_t address, const void *src, uint32_t len) {
+  if (src == NULL || (address & 1U) != 0U || (len & 1U) != 0U) return false;
+  return program_halfword_stream(address, (const uint8_t *)src, len);
 }
 
 static bool commit_manifest(void) {
@@ -255,7 +400,7 @@ static bool commit_manifest(void) {
   m.header_crc32 = crc32_bytes((const uint8_t *)&m, 20U);
   m.generation = previous == NULL ? 1U : previous->generation + 1U;
   m.reserved = GATEWAY_BOARD_ID;
-  return program_bytes_halfword(target, &m, sizeof(m)) && application_valid();
+  return program_bytes_stream(target, &m, sizeof(m)) && application_valid();
 }
 
 static int hex_nibble(char c) {
@@ -324,6 +469,21 @@ static void reply_info(void) {
   (void)boot_usb_write_line(out, 250U);
 }
 
+static void reply_state(void) {
+  char out[160];
+  char *p = out, *end = out + sizeof(out) - 1U;
+  p = append_text(p, end, "BOOT:STATE:active=");
+  p = append_dec(p, end, update_started ? 1U : 0U);
+  p = append_text(p, end, ":offset=");
+  p = append_dec(p, end, write_offset);
+  p = append_text(p, end, ":size=");
+  p = append_dec(p, end, expected_size);
+  p = append_text(p, end, ":crc=");
+  p = append_hex8(p, end, expected_crc);
+  *p = '\0';
+  (void)boot_usb_write_line(out, 250U);
+}
+
 static void handle_line(char *line) {
   if (!strcmp(line, "PING")) {
     (void)boot_usb_write_line("BOOT:PONG", 250U);
@@ -331,6 +491,10 @@ static void handle_line(char *line) {
   }
   if (!strcmp(line, "INFO")) {
     reply_info();
+    return;
+  }
+  if (!strcmp(line, "STATE")) {
+    reply_state();
     return;
   }
   if (!strncmp(line, "BEGIN:", 6U)) {
@@ -349,7 +513,15 @@ static void handle_line(char *line) {
     (void)boot_usb_write_line("BOOT:ERASING", 250U);
     boot_usb_flush(250U);
     if (!begin_update(size, crc)) {
-      (void)boot_usb_write_line("ERR:BEGIN:FLASH", 250U);
+      char out[112], *p = out, *end = out + sizeof(out) - 1U;
+      p = append_text(p,end,"ERR:BEGIN:FLASH:");
+      p = append_dec(p,end,begin_fail_reason);
+      p = append_text(p,end,":A="); p = append_hex8(p,end,begin_fail_addr);
+      p = append_text(p,end,":SR="); p = append_hex8(p,end,begin_fail_sr);
+      p = append_text(p,end,":CR="); p = append_hex8(p,end,begin_fail_cr);
+      p = append_text(p,end,":X="); p = append_hex8(p,end,begin_fail_aux);
+      *p='\0';
+      (void)boot_usb_write_line(out, 250U);
       return;
     }
     (void)boot_usb_write_line("ACK:BEGIN:0", 250U);
@@ -396,11 +568,17 @@ static void handle_line(char *line) {
       return;
     }
     update_started = false;
+    update_last_activity_ms = 0U;
     (void)boot_usb_write_line("ACK:END:OK",250U);
     boot_usb_flush(300U);
     HAL_Delay(30U);
-    NVIC_SystemReset();
-    while (1) {}
+    /*
+     * After a committed image, leave the active USB stack through a real core
+     * reset. PA12 is held low before reset and asserted low again at the very
+     * start of bootloader main(), so the host sees one clean detach while the
+     * app starts from reset-clean peripheral state.
+     */
+    reset_to_app_after_usb();
   }
   (void)boot_usb_write_line("ERR:UNKNOWN",250U);
 }
@@ -408,16 +586,40 @@ static void handle_line(char *line) {
 static void maintenance_loop(bool allow_timeout) {
   update_started = false;
   expected_size = expected_crc = write_offset = 0U;
+  line_len = 0U;
+  line_discard_until_newline = false;
   if (!boot_usb_begin()) fatal_reset();
   boot_usb_started = true;
+  rx_drop_seen = boot_usb_rx_dropped();
   boot_started_ms = HAL_GetTick();
+  bool usb_was_configured = false;
+  uint32_t usb_loss_started_ms = 0U;
   while (1) {
     watchdog_pat();
+
+    const uint32_t dropped_now = boot_usb_rx_dropped();
+    if (dropped_now != rx_drop_seen) {
+      rx_drop_seen = dropped_now;
+      line_len = 0U;
+      line_discard_until_newline = true;
+      (void)boot_usb_write_line("ERR:RX:OVERFLOW", 250U);
+    }
+
     while (boot_usb_available() > 0) {
       const int v = boot_usb_read();
       if (v < 0) break;
       const char c = (char)v;
       if (c == '\r') continue;
+
+      if (line_discard_until_newline) {
+        if (c == '\n') {
+          line_discard_until_newline = false;
+          line_len = 0U;
+          boot_started_ms = HAL_GetTick();
+        }
+        continue;
+      }
+
       if (c == '\n') {
         line_buf[line_len] = '\0';
         if (line_len != 0U) handle_line(line_buf);
@@ -427,10 +629,52 @@ static void maintenance_loop(bool allow_timeout) {
         line_buf[line_len++] = c;
       } else {
         line_len = 0U;
+        line_discard_until_newline = true;
+        (void)boot_usb_write_line("ERR:LINE:TOO_LONG", 250U);
       }
     }
+    const uint32_t now = HAL_GetTick();
+
+    /*
+     * A host-side close must not matter, but a hub reset/endpoint fault can
+     * de-configure USB without resetting the MCU. Once this boot session has
+     * been configured at least once, recover a sustained link loss locally
+     * instead of requiring NRST/ST-Link or a physical reconnect.
+     */
+    if (boot_usb_connected()) {
+      usb_was_configured = true;
+      usb_loss_started_ms = 0U;
+    } else if (usb_was_configured) {
+      if (usb_loss_started_ms == 0U) {
+        usb_loss_started_ms = now;
+      } else if ((uint32_t)(now - usb_loss_started_ms) >=
+                 BOOT_USB_LOSS_RECOVERY_MS) {
+        boot_usb_disconnect_hold();
+        boot_usb_started = false;
+        if (!boot_usb_begin()) fatal_reset();
+        boot_usb_started = true;
+        usb_was_configured = false;
+        usb_loss_started_ms = 0U;
+        line_len = 0U;
+        line_discard_until_newline = false;
+        rx_drop_seen = boot_usb_rx_dropped();
+        boot_started_ms = HAL_GetTick();
+      }
+    }
+
+    if (update_started &&
+        (uint32_t)(now - update_last_activity_ms) >= BOOT_UPDATE_TIMEOUT_MS) {
+      update_started = false;
+      expected_size = expected_crc = write_offset = 0U;
+      update_last_activity_ms = 0U;
+      line_len = 0U;
+      line_discard_until_newline = false;
+      boot_started_ms = now;
+      (void)boot_usb_write_line("ERR:UPDATE:TIMEOUT", 250U);
+    }
+
     if (allow_timeout && !update_started &&
-        (uint32_t)(HAL_GetTick() - boot_started_ms) >= BOOT_IDLE_TIMEOUT_MS &&
+        (uint32_t)(now - boot_started_ms) >= BOOT_IDLE_TIMEOUT_MS &&
         application_valid()) {
       jump_app();
     }
@@ -438,6 +682,7 @@ static void maintenance_loop(bool allow_timeout) {
 }
 
 int main(void) {
+  early_usb_detach_hold();
   HAL_Init();
   system_clock_config();
   backup_access_enable();

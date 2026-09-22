@@ -190,6 +190,7 @@ private:
   uint32_t init_deadline_ms_{0U};
 
   SpiOwner spi_owner_{SpiOwner::IDLE};
+  bool transaction_error_{false};
   bool display_ready_{false};
   bool display_faulted_{false};
   uint32_t spi_transactions_{0U};

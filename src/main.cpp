@@ -46,7 +46,7 @@ static void emitServiceLine(const char *line) {
   if (line != nullptr) (void)gUsb.writeLineCritical(line, 120U);
 }
 
-static volatile uint32_t gMainLoopHeartbeatEpoch = 0U;
+static volatile uint32_t gWatchdogProgressEpoch = 0U;
 static volatile uint32_t gAppWatchdogLastEpoch = 0U;
 static volatile uint8_t gAppWatchdogStallTicks = 0U;
 static volatile bool gAppWatchdogArmed = false;
@@ -157,7 +157,7 @@ static void appWatchdogIsr() {
 
   // Use TIM11's own periodic interrupt as the timebase. This keeps the watchdog
   // effective even if the HAL/SysTick timebase itself stops advancing.
-  const uint32_t epoch = gMainLoopHeartbeatEpoch;
+  const uint32_t epoch = gWatchdogProgressEpoch;
   if (epoch != gAppWatchdogLastEpoch) {
     gAppWatchdogLastEpoch = epoch;
     gAppWatchdogStallTicks = 0U;
@@ -166,6 +166,13 @@ static void appWatchdogIsr() {
   if (gAppWatchdogStallTicks < 0xFFU)
     ++gAppWatchdogStallTicks;
   if (gAppWatchdogStallTicks >= APP_WATCHDOG_TIMEOUT_TICKS) {
+#if BTS_WINCH_ENABLED
+    // Fail closed before reset: a stalled main loop must never leave the
+    // BTS7960 energized while reset diagnostics are being recorded.
+    TIM2->CCR3 = 0U;
+    TIM4->CCR3 = 0U;
+    __DSB();
+#endif
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
     Board_BackupWrite(1U, kAppCrashMagic);
@@ -177,8 +184,13 @@ static void appWatchdogIsr() {
   }
 }
 
+static inline void noteWatchdogProgress() {
+  ++gWatchdogProgressEpoch;
+}
+
 static void startAppWatchdog() {
-  gAppWatchdogLastEpoch = gMainLoopHeartbeatEpoch;
+  noteWatchdogProgress();
+  gAppWatchdogLastEpoch = gWatchdogProgressEpoch;
   gAppWatchdogStallTicks = 0U;
   Board_SetWatchdogCallback(appWatchdogIsr);
   Board_WatchdogStart();
@@ -338,7 +350,27 @@ static void enterSystemDfu() {
   gUsb.flush(150U);
   HAL_Delay(20U);
   gUsb.end();
+
+#if defined(BOARD_F103_256K)
+  /*
+   * The resident bootloader now asserts PA12 LOW at the very start of main()
+   * before HAL/clock setup. Use a real core reset here so USB, SPI, timers,
+   * DMA and NVIC state are reset by hardware instead of being inherited by a
+   * direct image jump. The BKP request above selects maintenance mode.
+   */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitTypeDef usbDetach{};
+  usbDetach.Pin = GPIO_PIN_12;
+  usbDetach.Mode = GPIO_MODE_OUTPUT_PP;
+  usbDetach.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &usbDetach);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(350U);
+  __DSB();
   NVIC_SystemReset();
+#else
+  NVIC_SystemReset();
+#endif
   while (true) {
   }
 }
@@ -1145,9 +1177,17 @@ static bool motionSafeForHeavyMaintenance() {
                          gTelemetry.navigationStatus == NAV_NAVIGATING;
   const bool stateSafe =
       gTelemetry.state == STATE_STOPPED || gTelemetry.state == STATE_STANDBY;
+#if BTS_WINCH_ENABLED
+  const bool winchSafe = Bts7960Winch::direction() == 0 &&
+                         !Bts7960Winch::motionPending() &&
+                         Bts7960Winch::appliedPwm() == 0U;
+#else
+  const bool winchSafe = true;
+#endif
   return stateSafe && std::fabs(gTelemetry.speedKmh) <= 0.2F &&
          std::fabs(gTelemetry.driveActualMps) <= 0.02F && !navActive &&
-         !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop;
+         !driveTestRunning && !steeringTestRunning && !gTelemetry.eStop &&
+         winchSafe;
 }
 #endif
 
@@ -1412,16 +1452,33 @@ static void handleSerialCommand(char *command) {
     return;
   }
   if (!strcmp(command, "USB:RECOVER")) {
-    // No ACK dependency: a host may issue this specifically because CDC TX is
-    // wedged. Recovery executes from the outer main loop via gUsb.service().
+    // Recovery intentionally destroys the current USB session. Revoke every
+    // motion authority first so the physical D+ detach can never leave an
+    // actuator running while host communication is unavailable.
+    forceRosOffline();
+    latchAllSafetyStops();
+    serviceSafetyControlTx();
     gUsb.requestRecovery();
     return;
   }
 #if defined(BOARD_F103C8)
   if (!strcmp(command, "USB:STATUS")) {
-    (void)gUsb.writeLineCritical(
-        gUsb.hostSessionEstablished() ? "USB:STAT:HOST=1" : "USB:STAT:HOST=0",
-        120U);
+    char line[196];
+    std::snprintf(
+        line, sizeof(line),
+        "USB:STAT:host=%u,gen=%lu,init=%lu,deinit=%lu,restart=%lu,auto=%lu,reason=%lu,tx_busy=%u,rx=%lu,drop=%lu,reset=%08lX",
+        gUsb.hostSessionEstablished() ? 1U : 0U,
+        static_cast<unsigned long>(gUsb.transportGeneration()),
+        static_cast<unsigned long>(gUsb.classInitCount()),
+        static_cast<unsigned long>(gUsb.classDeInitCount()),
+        static_cast<unsigned long>(gUsb.softRestartCount()),
+        static_cast<unsigned long>(gUsb.autoRestartCount()),
+        static_cast<unsigned long>(gUsb.lastRecoveryReason()),
+        gUsb.txBusy() ? 1U : 0U,
+        static_cast<unsigned long>(gUsb.rxPacketCount()),
+        static_cast<unsigned long>(gUsb.rxDropped()),
+        static_cast<unsigned long>(gResetCauseFlags));
+    (void)gUsb.writeLineCritical(line, 120U);
     return;
   }
 #else
@@ -1483,9 +1540,12 @@ static void handleSerialCommand(char *command) {
 #endif
   if (!strcmp(command, "FAULT:STATUS")) {
 #if defined(BOARD_F103C8)
-    (void)gUsb.writeLineCritical(
-        Board_BackupRead(3U) == 0U ? "FAULT:STAT:CLEAR" : "FAULT:STAT:LATCHED",
-        120U);
+    char line[112];
+    std::snprintf(line, sizeof(line),
+                  "FAULT:STAT:reason=%04lX:reset=%08lX",
+                  static_cast<unsigned long>(Board_BackupRead(3U)),
+                  static_cast<unsigned long>(gResetCauseFlags));
+    (void)gUsb.writeLineCritical(line, 120U);
     return;
 #else
     __HAL_RCC_PWR_CLK_ENABLE();
@@ -1512,8 +1572,10 @@ static void handleSerialCommand(char *command) {
     return;
   }
   if (!strcmp(command, "FW:INFO")) {
-#if defined(BOARD_F103C8)
-    (void)gUsb.writeLineCritical("FW:INFO:V3:F103C8", 120U);
+#if defined(BOARD_F103_256K)
+    (void)gUsb.writeLineCritical("FW:INFO:V3:F103RC:256K", 120U);
+#elif defined(BOARD_F103C8)
+    (void)gUsb.writeLineCritical("FW:INFO:V3:F103C8:64K", 120U);
 #else
     char line[190];
     std::snprintf(
@@ -1718,6 +1780,12 @@ static void handleSerialCommand(char *command) {
       return;
     }
     stopAllManualTest();
+#if BTS_WINCH_ENABLED
+    // Firmware update is destructive maintenance: cut BTS7960 power first and
+    // reject the transition unless the actuator is observably de-energized.
+    Bts7960Winch::emergencyStop();
+    refreshWinchSafetyInputs();
+#endif
     if (!motionSafeForHeavyMaintenance()) {
       (void)gUsb.writeLineCritical("ERR:DFU:WAIT_SAFE");
       return;
@@ -2239,23 +2307,33 @@ int main() {
   // TIM11 supervises every subsystem after the base clock/peripheral bring-up:
   // persistent config, winch/touch init, USB, SPI/display init, then main loop.
   startAppWatchdog();
+  noteWatchdogProgress();
   gPersistentConfigReady = gPersistentConfig.begin();
+  noteWatchdogProgress();
 #if BTS_WINCH_ENABLED
   Bts7960Winch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
   HmiTouchService::begin(emitServiceLine);
+  noteWatchdogProgress();
 #endif
   bool usbInitOk = false;
   for (uint8_t attempt = 0U; attempt < 3U && !usbInitOk; ++attempt) {
+    noteWatchdogProgress();
     usbInitOk = gUsb.begin();
+    noteWatchdogProgress();
     if (!usbInitOk) {
       gUsb.end();
       HAL_Delay(50U * static_cast<uint32_t>(attempt + 1U));
+      noteWatchdogProgress();
     }
   }
   HAL_Delay(50U);
+  noteWatchdogProgress();
   printBoth("ADV HMI native realtime menu firmware - boot");
   if (!gPersistentConfigReady) printBoth("ERR:EEPROM:INIT");
   Board_SetRealtimeServiceCallback([]() {
+    // Realtime safety/transport service is valid watchdog progress even while
+    // startup or a long TFT operation has not yet completed a full main loop.
+    noteWatchdogProgress();
     // USB completion IRQ never starts the next packet. Service it here in
     // thread context so long TFT transfers cannot starve CDC progress.
     gUsb.service();
@@ -2355,6 +2433,6 @@ int main() {
       ledMs = HAL_GetTick();
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
     }
-      ++gMainLoopHeartbeatEpoch;
+      noteWatchdogProgress();
   }
 }

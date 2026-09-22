@@ -99,6 +99,7 @@ bool HmiDisplay::recoverSpi() {
   TftCs(true);
   TouchCs(true);
   spi_owner_ = SpiOwner::IDLE;
+  transaction_error_ = false;
   ++spi_recovery_count_;
   const bool ok = Board_ReinitSpi1();
   if (!ok) {
@@ -126,10 +127,13 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
     // restores the correct mode/clock for each device.
     if (!Board_SpiAcquire(board_owner, prescaler)) {
       ++spi_bus_conflict_count_;
-      // A stale board-level owner must not permanently wedge TFT/touch access.
-      // SPI1 is HMI-only and this path is thread-context only, so a one-shot
-      // peripheral reset is safe after ownership acquisition times out.
-      if (Board_SpiOwner() != BoardSpiOwner::NONE && attempt == 0U) {
+      /*
+       * Recover on the first acquisition failure regardless of the visible
+       * owner. Board_SpiAcquire() deliberately releases ownership when SPI1
+       * stays BSY past its deadline, so checking owner!=NONE misses the most
+       * important wedged-peripheral case and can otherwise fail forever.
+       */
+      if (attempt == 0U) {
         if (!recoverSpi())
           return false;
         continue;
@@ -137,6 +141,7 @@ bool HmiDisplay::beginTransaction(SpiOwner owner, uint32_t prescaler) {
       return false;
     }
     drainSpiRx();
+    transaction_error_ = false;
     spi_owner_ = owner;
     if (owner == SpiOwner::TOUCH)
       TouchCs(false);
@@ -157,13 +162,17 @@ bool HmiDisplay::endTransaction() {
   const BoardSpiOwner board_owner = finishing_owner == SpiOwner::TOUCH
       ? BoardSpiOwner::HMI_TOUCH : BoardSpiOwner::HMI_TFT;
   const bool idle = waitSpiIdle();
+  const bool transferOk = !transaction_error_;
   TftCs(true);
   TouchCs(true);
   drainSpiRx();
   spi_owner_ = SpiOwner::IDLE;
+  transaction_error_ = false;
   Board_SpiRelease(board_owner);
-  if (!idle)
-    return recoverSpi();
+  if (!idle || !transferOk) {
+    (void)recoverSpi();
+    return false;
+  }
   return true;
 }
 
@@ -172,6 +181,7 @@ bool HmiDisplay::tx(const uint8_t *bytes, uint16_t length) {
   if (test_tx_failure_once_) {
     test_tx_failure_once_ = false;
     ++spi_hal_error_count_;
+    transaction_error_ = true;
     return false;
   }
 #endif
@@ -181,6 +191,7 @@ bool HmiDisplay::tx(const uint8_t *bytes, uint16_t length) {
       &hspi1, const_cast<uint8_t *>(bytes), length, kSpiHalTimeoutMs);
   if (status != HAL_OK) {
     ++spi_hal_error_count_;
+    transaction_error_ = true;
     return false;
   }
   spi_bytes_tx_ += length;
@@ -193,6 +204,7 @@ bool HmiDisplay::txrx(const uint8_t *txBytes, uint8_t *rxBytes,
   if (test_tx_failure_once_) {
     test_tx_failure_once_ = false;
     ++spi_hal_error_count_;
+    transaction_error_ = true;
     return false;
   }
 #endif
@@ -203,6 +215,7 @@ bool HmiDisplay::txrx(const uint8_t *txBytes, uint8_t *rxBytes,
                               length, kSpiHalTimeoutMs);
   if (status != HAL_OK) {
     ++spi_hal_error_count_;
+    transaction_error_ = true;
     return false;
   }
   spi_bytes_tx_ += length;

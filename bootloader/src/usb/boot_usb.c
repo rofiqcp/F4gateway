@@ -15,6 +15,17 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
 #define BOOT_RX_SIZE 2048U
 
 #if defined(BOARD_F103_BOOT)
+static void reset_usb_peripheral_while_detached(void) {
+  HAL_NVIC_DisableIRQ(USB_LP_CAN1_RX0_IRQn);
+  HAL_NVIC_ClearPendingIRQ(USB_LP_CAN1_RX0_IRQn);
+  __HAL_RCC_USB_FORCE_RESET();
+  __DSB();
+  for (volatile uint32_t i = 0U; i < 64U; ++i) __NOP();
+  __HAL_RCC_USB_RELEASE_RESET();
+  __HAL_RCC_USB_CLK_DISABLE();
+  __DSB();
+}
+
 static void force_usb_disconnect_pulse(void) {
   __HAL_RCC_GPIOA_CLK_ENABLE();
   GPIO_InitTypeDef gpio = {0};
@@ -23,7 +34,8 @@ static void force_usb_disconnect_pulse(void) {
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &gpio);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
-  HAL_Delay(25U);
+  reset_usb_peripheral_while_detached();
+  HAL_Delay(500U);
   HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
 }
 #endif
@@ -40,16 +52,51 @@ bool boot_usb_begin(void) {
 #endif
   rx_head = rx_tail = 0U;
   rx_dropped = 0U;
-  if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK) return false;
-  if (USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS) != USBD_OK) return false;
-  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK) return false;
-  return USBD_Start(&hUsbDeviceFS) == USBD_OK;
+
+  if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK)
+    return false;
+  if (USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS) != USBD_OK) {
+    (void)USBD_DeInit(&hUsbDeviceFS);
+    return false;
+  }
+  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK) {
+    (void)USBD_DeInit(&hUsbDeviceFS);
+    return false;
+  }
+  if (USBD_Start(&hUsbDeviceFS) != USBD_OK) {
+    (void)USBD_Stop(&hUsbDeviceFS);
+    (void)USBD_DeInit(&hUsbDeviceFS);
+    return false;
+  }
+  return true;
 }
 
 void boot_usb_end(void) {
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
 }
+
+void boot_usb_disconnect_hold(void) {
+  boot_usb_end();
+#if defined(BOARD_F103_BOOT)
+  /*
+   * Bluepill-class boards use an external D+ pull-up. Merely stopping the USB
+   * peripheral does not guarantee a physical detach, so hold PA12 low across
+   * the bootloader -> application handoff. The application startup pulse will
+   * take ownership of PA12 and release it only after its own detach interval.
+   */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  GPIO_InitTypeDef gpio = {0};
+  gpio.Pin = GPIO_PIN_12;
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+  reset_usb_peripheral_while_detached();
+#endif
+}
+
+uint32_t boot_usb_rx_dropped(void) { return rx_dropped; }
 
 bool boot_usb_connected(void) {
   return hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED;

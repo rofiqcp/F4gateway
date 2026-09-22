@@ -201,9 +201,18 @@ bool Spi1_Configure() {
   return HAL_SPI_Init(&hspi1) == HAL_OK;
 }
 
-void Spi1_InitBootOrFatal() {
-  if (!Spi1_Configure())
-    FatalError();
+void Spi1_InitBootBestEffort() {
+  if (Spi1_Configure())
+    return;
+
+  // HMI is recoverable and must never keep the gateway in a reset loop before
+  // USB diagnostics become available. Leave SPI1 quiescent; HmiDisplay will
+  // perform its bounded Board_ReinitSpi1() recovery when initialization starts.
+  (void)HAL_SPI_DeInit(&hspi1);
+  __HAL_RCC_SPI1_FORCE_RESET();
+  __NOP();
+  __NOP();
+  __HAL_RCC_SPI1_RELEASE_RESET();
 }
 
 
@@ -355,6 +364,13 @@ uint32_t Board_BackupRead(uint8_t slot) {
 
 extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason) {
   __disable_irq();
+#if BTS_WINCH_ENABLED
+  // Fault handlers bypass the normal winch state machine; cut both bridge
+  // directions at the timer registers before touching diagnostics/reset state.
+  TIM2->CCR3 = 0U;
+  TIM4->CCR3 = 0U;
+  __DSB();
+#endif
   Board_BackupWrite(1U, kAppCrashMagic);
   Board_BackupWrite(3U, reason);
   Board_BackupWrite(4U, SCB->CFSR);
@@ -376,7 +392,7 @@ void Board_Init() {
 #endif
   SystemClock_Config();
   Gpio_Init();
-  Spi1_InitBootOrFatal();
+  Spi1_InitBootBestEffort();
   Timers_Init();
   Board_SpiDeselectAll();
   // DWT powers deterministic microsecond delays used by TFT/touch timing.

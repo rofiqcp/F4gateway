@@ -16,11 +16,21 @@ UsbCdcPort gUsb;
 
 namespace {
 #if defined(BOARD_F103C8)
+void ResetUsbPeripheralWhileDetached() {
+  HAL_NVIC_DisableIRQ(USB_LP_CAN1_RX0_IRQn);
+  HAL_NVIC_ClearPendingIRQ(USB_LP_CAN1_RX0_IRQn);
+  __HAL_RCC_USB_FORCE_RESET();
+  __DSB();
+  for (volatile uint32_t i = 0U; i < 64U; ++i) __NOP();
+  __HAL_RCC_USB_RELEASE_RESET();
+  __HAL_RCC_USB_CLK_DISABLE();
+  __DSB();
+}
+
 void ForceUsbDisconnectPulse() {
   // Blue Pill boards normally expose USB D+ through an external pull-up.
-  // Driving PA12 low briefly guarantees the host observes a real disconnect
-  // after MCU reset or a software USB recovery before the USB peripheral owns
-  // D+ again.
+  // Keep D+ physically low while the F1 USB peripheral is hard-reset so every
+  // stack start begins from a clean endpoint/register state.
   __HAL_RCC_GPIOA_CLK_ENABLE();
   GPIO_InitTypeDef gpio{};
   gpio.Pin = GPIO_PIN_12;
@@ -28,7 +38,8 @@ void ForceUsbDisconnectPulse() {
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &gpio);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
-  HAL_Delay(20U);
+  ResetUsbPeripheralWhileDetached();
+  HAL_Delay(500U);
   HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
 }
 #endif
@@ -75,11 +86,21 @@ void UsbCdcPort::resetSessionState(bool drop_queues, bool count_abort) {
 bool UsbCdcPort::startUsbStack() {
   if (USBD_Init(&hUsbDeviceFS, &USBD_Desc, 0U) != USBD_OK)
     return false;
-  if (USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS) != USBD_OK)
+
+  if (USBD_RegisterClass(&hUsbDeviceFS, USBD_CDC_CLASS) != USBD_OK) {
+    (void)USBD_DeInit(&hUsbDeviceFS);
     return false;
-  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK)
+  }
+  if (USBD_CDC_RegisterInterface(&hUsbDeviceFS, &USBD_Interface_fops_FS) != USBD_OK) {
+    (void)USBD_DeInit(&hUsbDeviceFS);
     return false;
-  return USBD_Start(&hUsbDeviceFS) == USBD_OK;
+  }
+  if (USBD_Start(&hUsbDeviceFS) != USBD_OK) {
+    (void)USBD_Stop(&hUsbDeviceFS);
+    (void)USBD_DeInit(&hUsbDeviceFS);
+    return false;
+  }
+  return true;
 }
 
 bool UsbCdcPort::begin() {
@@ -98,6 +119,9 @@ bool UsbCdcPort::begin() {
   tx_complete_count_ = 0U;
   tx_stall_recovery_count_ = 0U;
   usb_soft_restart_count_ = 0U;
+  usb_auto_restart_count_ = 0U;
+  usb_seen_configured_ = false;
+  usb_loss_started_ms_ = 0U;
   last_rx_ms_ = 0U;
   rx_packet_count_ = 0U;
   rx_resync_count_ = 0U;
@@ -129,6 +153,8 @@ void UsbCdcPort::end() {
 
 void UsbCdcPort::onUsbClassInit() {
   ++usb_class_init_count_;
+  usb_seen_configured_ = true;
+  usb_loss_started_ms_ = 0U;
   invalidateHostSession();
   resetSessionState(true, true);
   tx_complete_ms_ = HAL_GetTick();
@@ -240,11 +266,21 @@ uint32_t UsbCdcPort::cdcTxState() const {
 
 bool UsbCdcPort::softRestartUsb() {
   ++usb_soft_restart_count_;
+  usb_seen_configured_ = false;
+  usb_loss_started_ms_ = 0U;
   invalidateHostSession();
   (void)USBD_Stop(&hUsbDeviceFS);
   (void)USBD_DeInit(&hUsbDeviceFS);
   resetSessionState(true, true);
+
+#if defined(BOARD_F103C8)
+  // F103 boards use an external D+ pull-up. A logical USB stop/deinit alone
+  // cannot guarantee that the host observes a detach, so always force a real
+  // D+ low interval and reset the peripheral before rebuilding the CDC stack.
+  ForceUsbDisconnectPulse();
+#else
   HAL_Delay(10U);
+#endif
   return startUsbStack();
 }
 
@@ -406,6 +442,26 @@ void UsbCdcPort::testSuppressTx(uint32_t duration_ms) {
 void UsbCdcPort::service() {
   const bool explicit_recovery = recovery_pending_;
   recovery_pending_ = false;
+  bool restart_requested = explicit_recovery;
+
+  // A cable/hub reset normally lets the peripheral enumerate again without
+  // intervention. If a previously configured session stays deconfigured for a
+  // full two seconds, perform one clean stack rebuild. The latch is cleared by
+  // softRestartUsb(), so a physically missing cable cannot cause a restart loop.
+  const uint32_t now = HAL_GetTick();
+  if (connected()) {
+    usb_seen_configured_ = true;
+    usb_loss_started_ms_ = 0U;
+  } else if (!explicit_recovery && usb_seen_configured_) {
+    if (usb_loss_started_ms_ == 0U) {
+      usb_loss_started_ms_ = now;
+    } else if (static_cast<uint32_t>(now - usb_loss_started_ms_) >=
+               kUsbLossRecoveryMs) {
+      ++usb_auto_restart_count_;
+      last_recovery_reason_ = 3U;
+      restart_requested = true;
+    }
+  }
 
   // TX-complete runs in USB IRQ context. Revalidate wrapper + ST class state
   // atomically; otherwise the ISR can complete between the first tx_busy read
@@ -437,7 +493,7 @@ void UsbCdcPort::service() {
   if (primask == 0U)
     __enable_irq();
 
-  if (explicit_recovery)
+  if (restart_requested)
     (void)softRestartUsb();
   // TX completion IRQ only updates ring state and raises this event. All calls
   // into the ST USB transmit stack occur here in thread/main-loop context.

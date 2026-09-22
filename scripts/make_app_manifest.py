@@ -12,6 +12,7 @@ PROFILES = {
     "f411ce": (0x08060000, 0xF411CE01, 0x20020000),
     "f411cc": (0x08020000, 0xF411CC01, 0x20020000),
     "f401cd": (0x08040000, 0xF401CD01, 0x20018000),
+    "f103": (0x0803E000, 0xF1030101, 0x20005000),
 }
 parser = argparse.ArgumentParser()
 parser.add_argument("image", type=Path)

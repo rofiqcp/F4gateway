@@ -56,12 +56,15 @@ need('gUsb.writeLineHighPriority("ERR:ESTOP:ARGS")' in main,
 
 watch = main.split("static void appWatchdogIsr()", 1)[1].split(
     "static void startAppWatchdog()", 1)[0]
-need("gMainLoopHeartbeatEpoch" in watch and "gAppWatchdogStallTicks" in watch,
+need("gWatchdogProgressEpoch" in watch and "gAppWatchdogStallTicks" in watch,
      "watchdog uses independent TIM11 progress epochs")
 need("HAL_GetTick() - gMainLoopHeartbeatMs" not in watch,
      "watchdog timeout does not depend on SysTick")
-need(main.count("++gMainLoopHeartbeatEpoch;") == 1,
-     "watchdog heartbeat epoch commits only at full loop completion")
+need("noteWatchdogProgress();" in main and
+     "Board_SetRealtimeServiceCallback([]()" in main,
+     "watchdog accepts realtime safety-service progress during long startup/recovery")
+need(main.count("noteWatchdogProgress();") >= 3,
+     "watchdog progress is refreshed at start, realtime service, and main-loop completion")
 need("TIM1_TRG_COM_TIM11_IRQHandler" in board and
      "HAL_TIM_PeriodElapsedCallback" in board,
      "TIM11 watchdog interrupt is present")
@@ -74,10 +77,18 @@ need("kSpiWaitTimeoutUs = 2500U" in display_h,
      "SPI busy wait is time-bounded")
 need("kSpiHalTimeoutMs = 8U" in display_h,
      "SPI HAL transfers are time-bounded")
-need("Board_SpiOwner() != BoardSpiOwner::NONE" in display and
-     "recoverSpi()" in display,
-     "stale SPI owner is recovered")
+acquire = display.split("bool HmiDisplay::beginTransaction", 1)[1].split(
+    "bool HmiDisplay::endTransaction", 1)[0]
+need("if (attempt == 0U)" in acquire and "recoverSpi()" in acquire,
+     "SPI acquisition failure performs one-shot peripheral recovery")
+need("transaction_error_" in display and "recoverSpi()" in display,
+     "SPI transfer errors are latched and recovered on transaction close")
 need("SPI_SR_OVR" in display and "Board_ReinitSpi1" in display,
      "SPI OVR cleanup and peripheral reinit are present")
+need("TIM2->CCR3 = 0U" in watch and "TIM4->CCR3 = 0U" in watch,
+     "watchdog cuts both BTS7960 PWM directions before reset")
+fault = board.split("void Board_FaultReset", 1)[1]
+need("TIM2->CCR3 = 0U" in fault and "TIM4->CCR3 = 0U" in fault,
+     "fault reset cuts both BTS7960 PWM directions before reset")
 
 print("ESTOP_WATCHDOG_SPI_SELF_CHECK_PASS")

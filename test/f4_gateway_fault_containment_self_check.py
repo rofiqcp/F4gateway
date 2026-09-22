@@ -16,7 +16,7 @@ need('kTxStallRepairMs' in rd('src/usb/UsbCdcPort.h') and 'tx_stall_recovery_cou
 need('kAppCrashMagic' in board and 'NVIC_SystemReset' in board,'fatal failures reset into recovery path')
 for handler in ('HardFault_Handler','MemManage_Handler','BusFault_Handler','UsageFault_Handler'):
     need(handler in board,handler+' resets through common fault path')
-need('APP_WATCHDOG_TIMEOUT_TICKS' in main and 'gMainLoopHeartbeatEpoch' in main and 'Board_WatchdogStart' in main,'application watchdog remains enabled')
+need('APP_WATCHDOG_TIMEOUT_TICKS' in main and 'gWatchdogProgressEpoch' in main and 'Board_WatchdogStart' in main,'application watchdog remains enabled')
 need('default_envs = bluepill_f103c8' in pio and '[env:bluepill_f103c8]' in pio and '[env:blackpill_f411ce_v2]' in pio,'v3 defaults to F103C8 while F411 recovery target remains available')
 need('MCP2515' not in board and 'NEO3PRO' not in main,'removed CAN path cannot re-enter runtime')
 print('F4_GATEWAY_FAULT_CONTAINMENT_SELF_CHECK_PASS')

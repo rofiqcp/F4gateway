@@ -40,6 +40,18 @@ need("upHomeLocal" in header and "upHomeLocal" in ui and "baseSafetyValid(requir
      "local HMI fork does not depend on ROS host but retains common safety")
 need("processCommand" in winch and "upHome(); return true" in winch,
      "remote winch commands retain host-authority path")
+dfu = main[main.index('if (!strcmp(command, "BOOT:DFU:CONFIRM"))'):
+           main.index('if (!strcmp(command, "BOOT:DFU")) {')]
+need("Bts7960Winch::emergencyStop();" in dfu and
+     "motionSafeForHeavyMaintenance()" in dfu,
+     "DFU transition cuts winch power and rechecks maintenance safety")
+maint_start = main.rindex("static bool motionSafeForHeavyMaintenance()")
+maint_end = main.index("}\n#endif", maint_start) + 1
+maint = main[maint_start:maint_end]
+need("Bts7960Winch::direction() == 0" in maint and
+     "!Bts7960Winch::motionPending()" in maint and
+     "Bts7960Winch::appliedPwm() == 0U" in maint,
+     "heavy maintenance requires winch direction/pending/PWM all zero")
 need("goalRemainingDistanceM" in telemetry and
      "d.objectDistanceM" not in ui[ui.index("void drawNav"):ui.index("void forkCard")],
      "object distance is not used as goal distance")
