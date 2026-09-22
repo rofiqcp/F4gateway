@@ -21,7 +21,9 @@
 #define BOOT_IDLE_TIMEOUT_MS 20000UL
 #define BOOT_WATCHDOG_TIMEOUT_MS 10000UL
 #define BOOT_UPDATE_TIMEOUT_MS 30000UL
-#define BOOT_USB_LOSS_RECOVERY_MS 2000UL
+#define BOOT_USB_LOSS_RECOVERY_MS 5000UL
+#define BOOT_USB_RECOVERY_COOLDOWN_MS 15000UL
+#define BOOT_USB_MAX_RECOVERIES 3U
 #define BOOT_LINE_MAX 600U
 #define BOOT_DATA_MAX 240U
 
@@ -616,6 +618,8 @@ static void maintenance_loop(bool allow_timeout) {
   boot_started_ms = HAL_GetTick();
   bool usb_was_configured = false;
   uint32_t usb_loss_started_ms = 0U;
+  uint32_t usb_last_recovery_ms = 0U;
+  uint8_t usb_recovery_count = 0U;
   while (1) {
     watchdog_pat();
 
@@ -670,7 +674,18 @@ static void maintenance_loop(bool allow_timeout) {
       if (usb_loss_started_ms == 0U) {
         usb_loss_started_ms = now;
       } else if ((uint32_t)(now - usb_loss_started_ms) >=
-                 BOOT_USB_LOSS_RECOVERY_MS) {
+                     BOOT_USB_LOSS_RECOVERY_MS &&
+                 usb_recovery_count < BOOT_USB_MAX_RECOVERIES &&
+                 (usb_last_recovery_ms == 0U ||
+                  (uint32_t)(now - usb_last_recovery_ms) >=
+                      BOOT_USB_RECOVERY_COOLDOWN_MS)) {
+        /*
+         * F103 needs a physical D+ detach to make a dead boot CDC visible again,
+         * but never pulse it in a rapid loop. The resumable protocol lets the
+         * host reconnect at write_offset after this bounded recovery.
+         */
+        ++usb_recovery_count;
+        usb_last_recovery_ms = now;
         boot_usb_disconnect_hold();
         boot_usb_started = false;
         if (!boot_usb_begin()) fatal_reset();

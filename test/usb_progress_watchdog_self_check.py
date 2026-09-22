@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 from pathlib import Path
-h=Path(__file__).parents[1]/'src/usb/UsbCdcPort.h'
-c=Path(__file__).parents[1]/'src/usb/UsbCdcPort.cpp'
-m=Path(__file__).parents[1]/'src/main.cpp'
-s=h.read_text()+c.read_text()+m.read_text()
+root=Path(__file__).parents[1]
+h=(root/'src/usb/UsbCdcPort.h').read_text()
+c=(root/'src/usb/UsbCdcPort.cpp').read_text()
+cdc=(root/'src/usb/usbd_cdc_if.cpp').read_text()
+m=(root/'src/main.cpp').read_text()
+s=h+c+cdc+m
 checks={
  'busy age':'txBusyAgeMs() const',
  'tx age':'lastTxCompleteAgeMs() const',
@@ -11,20 +13,23 @@ checks={
  'queue depth':'txHighQueueDepth() const',
  'progress counter':'tx_progress_stall_count_',
  'middleware state':'hcdc->TxState == 0U',
- 'explicit soft restart':'restart_requested = explicit_recovery',
- 'sustained link-loss recovery':'kUsbLossRecoveryMs = 2000U',
- 'configured RX-silence recovery':'kHostRxSilenceRecoveryMs = 4000U',
- 'RX-silence recovery reason':'last_recovery_reason_ = 4U',
- 'initial enumeration recovery':'kInitialEnumerationRecoveryMs = 8000U',
- 'initial enumeration reason':'last_recovery_reason_ = 5U',
- 'initial stack timestamp':'usb_stack_started_ms_ = HAL_GetTick()',
- 'single-shot link-loss latch':'usb_seen_configured_ = false',
- 'no tx-stall timed soft restart':'kTxStallSoftRestartMs',
+ 'explicit physical recovery':'const bool explicit_recovery = recovery_pending_',
+ 'main-context RX rearm':'F4Gateway_CdcTryRearmRxFromMain',
+ 'RX rearm failure counter':'rx_rearm_failure_count_',
+ 'RX rearm recovery counter':'rx_rearm_recovery_count_',
+ 'RX rearm status':'rearm_pending=%u',
  'reset cause':'reset_csr=%08lX',
 }
+forbidden={
+ 'autonomous link-loss restart':'kUsbLossRecoveryMs',
+ 'autonomous RX-silence restart':'kHostRxSilenceRecoveryMs',
+ 'autonomous initial-enum restart':'kInitialEnumerationRecoveryMs',
+ 'legacy RX-silence reason':'last_recovery_reason_ = 4U',
+ 'legacy initial-enum reason':'last_recovery_reason_ = 5U',
+ 'tx-stall timed soft restart':'kTxStallSoftRestartMs',
+}
 for name,tok in checks.items():
-    if name=='no tx-stall timed soft restart':
-        assert tok not in s, 'TX-stall autonomous soft restart reintroduced'
-    else:
-        assert tok in s, f'missing {name}'
+    assert tok in s, f'missing {name}'
+for name,tok in forbidden.items():
+    assert tok not in s, f'{name} reintroduced'
 print('USB_PROGRESS_WATCHDOG_SELF_CHECK_PASS')

@@ -42,6 +42,37 @@ HmiDiagnostics gDiagnostics{};
 PersistentConfigStore gPersistentConfig;
 static bool gPersistentConfigReady = false;
 
+static constexpr uint16_t kTouchCalibrationKey = 0x5443U; // "TC"
+struct TouchCalibrationRecord {
+  uint16_t version;
+  uint16_t parameters[5];
+};
+static_assert(sizeof(TouchCalibrationRecord) <= PersistentConfigStore::kMaxValueBytes,
+              "touch calibration record must fit persistent config");
+
+static bool persistTouchCalibration(const uint16_t *parameters) {
+  if (!gPersistentConfigReady || parameters == nullptr)
+    return false;
+  TouchCalibrationRecord record{1U, {parameters[0], parameters[1], parameters[2],
+                                     parameters[3], parameters[4]}};
+  return gPersistentConfig.write(kTouchCalibrationKey, &record, sizeof(record));
+}
+
+static bool loadTouchCalibration() {
+  if (!gPersistentConfigReady)
+    return false;
+  TouchCalibrationRecord record{};
+  if (!gPersistentConfig.read(kTouchCalibrationKey, &record, sizeof(record)) ||
+      record.version != 1U)
+    return false;
+  const uint16_t *p = record.parameters;
+  if (p[0] > 4095U || p[2] > 4095U || p[1] < 500U || p[1] > 4095U ||
+      p[3] < 500U || p[3] > 4095U || (p[4] & ~7U) != 0U)
+    return false;
+  tft.setTouch(p);
+  return true;
+}
+
 static void emitServiceLine(const char *line) {
   if (line != nullptr) (void)gUsb.writeLineCritical(line, 120U);
 }
@@ -1471,10 +1502,10 @@ static void handleSerialCommand(char *command) {
 #if defined(BOARD_F103C8)
   if (!strcmp(command, "USB:STATUS")) {
 #if defined(BOARD_F103_256K)
-    char line[224];
+    char line[300];
     std::snprintf(
         line, sizeof(line),
-        "USB:STAT:host=%u,gen=%lu,init=%lu,deinit=%lu,restart=%lu,auto=%lu,reason=%lu,tx_busy=%u,rx=%lu,rx_age=%lu,drop=%lu,reset=%08lX",
+        "USB:STAT:host=%u,gen=%lu,init=%lu,deinit=%lu,restart=%lu,auto=%lu,reason=%lu,tx_busy=%u,rx=%lu,rx_age=%lu,rearm_fail=%lu,rearm_ok=%lu,rearm_pending=%u,drop=%lu,reset=%08lX",
         gUsb.hostSessionEstablished() ? 1U : 0U,
         static_cast<unsigned long>(gUsb.transportGeneration()),
         static_cast<unsigned long>(gUsb.classInitCount()),
@@ -1485,6 +1516,9 @@ static void handleSerialCommand(char *command) {
         gUsb.txBusy() ? 1U : 0U,
         static_cast<unsigned long>(gUsb.rxPacketCount()),
         static_cast<unsigned long>(gUsb.lastRxAgeMs()),
+        static_cast<unsigned long>(gUsb.rxRearmFailureCount()),
+        static_cast<unsigned long>(gUsb.rxRearmRecoveryCount()),
+        gUsb.rxRearmPending() ? 1U : 0U,
         static_cast<unsigned long>(gUsb.rxDropped()),
         static_cast<unsigned long>(gResetCauseFlags));
 #else
@@ -1651,12 +1685,16 @@ static void handleSerialCommand(char *command) {
     return;
   }
   if (!strcmp(command, "TOUCH:STATUS")) {
-    char line[190];
+    char line[260];
     sampleDiagnostics(HAL_GetTick());
     std::snprintf(line, sizeof(line),
-                  "TOUCH:STATUS:READ=%lu:REJECT=%lu:Z=%u:RAW=%u,%u:XY=%u,%u:CS=%u:BUS=%lu:PAGE=%s",
+                  "TOUCH:STATUS:READ=%lu:PRESS_REJECT=%lu:P2_REJECT=%lu:RAW_REJECT=%lu:JITTER_REJECT=%lu:BOUNDS_REJECT=%lu:Z=%u:RAW=%u,%u:XY=%u,%u:CS=%u:BUS=%lu:MODE=%s:PAGE=%s",
                   static_cast<unsigned long>(gDiagnostics.touchReadCount),
                   static_cast<unsigned long>(gDiagnostics.touchRejectFastCount),
+                  static_cast<unsigned long>(tft.touchRejectSecondPressureCount()),
+                  static_cast<unsigned long>(tft.touchRejectRawRangeCount()),
+                  static_cast<unsigned long>(tft.touchRejectJitterCount()),
+                  static_cast<unsigned long>(tft.touchRejectBoundsCount()),
                   static_cast<unsigned>(tft.touchCurrentZ()),
                   static_cast<unsigned>(tft.touchLastRawX()),
                   static_cast<unsigned>(tft.touchLastRawY()),
@@ -1664,6 +1702,7 @@ static void handleSerialCommand(char *command) {
                   static_cast<unsigned>(tft.touchLastY()),
                   gDiagnostics.pa4TouchCs ? 1U : 0U,
                   static_cast<unsigned long>(gDiagnostics.spiBusConflictCount),
+                  HmiTouchService::modeName(),
                   gOperatorUi.wireName());
     (void)gUsb.writeLineCritical(line, 120U);
     return;
@@ -2335,10 +2374,11 @@ int main() {
   startAppWatchdog();
   noteWatchdogProgress();
   gPersistentConfigReady = gPersistentConfig.begin();
+  (void)loadTouchCalibration();
   noteWatchdogProgress();
 #if BTS_WINCH_ENABLED
   Bts7960Winch::begin(gPersistentConfigReady ? &gPersistentConfig : nullptr);
-  HmiTouchService::begin(emitServiceLine);
+  HmiTouchService::begin(emitServiceLine, persistTouchCalibration);
   noteWatchdogProgress();
 #endif
   bool usbInitOk = false;

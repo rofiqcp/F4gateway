@@ -1116,6 +1116,7 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
   touch_current_z_ = z2;
   if (z2 <= threshold) {
     (void)endTransaction();
+    ++touch_reject_second_pressure_count_;
     press_time_ms_ = 0U;
     return false;
   }
@@ -1140,6 +1141,7 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
   // floating/corrupted MISO return path and must never become a UI action.
   if (x1 > 4095U || x2 > 4095U || x3 > 4095U ||
       y1 > 4095U || y2 > 4095U || y3 > 4095U) {
+    ++touch_reject_raw_range_count_;
     press_time_ms_ = 0U;
     return false;
   }
@@ -1154,6 +1156,7 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
   const uint16_t ymax = std::max(y1, std::max(y2, y3));
   if (static_cast<uint16_t>(xmax - xmin) > 80U ||
       static_cast<uint16_t>(ymax - ymin) > 80U) {
+    ++touch_reject_jitter_count_;
     press_time_ms_ = 0U;
     return false;
   }
@@ -1176,8 +1179,10 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     sx = (width_ - 1) - sx;
   if (touch_invert_y_)
     sy = (height_ - 1) - sy;
-  if (sx < 0 || sy < 0 || sx >= width_ || sy >= height_)
+  if (sx < 0 || sy < 0 || sx >= width_ || sy >= height_) {
+    ++touch_reject_bounds_count_;
     return false;
+  }
 
   *x = static_cast<uint16_t>(ClampI32(sx, 0, width_ - 1));
   *y = static_cast<uint16_t>(ClampI32(sy, 0, height_ - 1));

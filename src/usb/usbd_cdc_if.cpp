@@ -61,9 +61,23 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t *pbuf, uint16_t length) {
 
 static int8_t CDC_Receive_FS(uint8_t *pbuf, uint32_t *Len) {
   gUsb.onReceive(pbuf, *Len);
-  (void)USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
-  (void)USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+  const bool armed =
+      USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS) == USBD_OK &&
+      USBD_CDC_ReceivePacket(&hUsbDeviceFS) == USBD_OK;
+  if (!armed)
+    gUsb.onRxRearmFailure();
   return (int8_t)USBD_OK;
+}
+
+// Retry a failed OUT endpoint arm from the cooperative main-loop service.
+// Never call physical USB detach here: endpoint repair must keep ttyACM alive.
+extern "C" bool F4Gateway_CdcTryRearmRxFromMain(void) {
+  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED ||
+      hUsbDeviceFS.pClassData == nullptr)
+    return false;
+  if (USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS) != USBD_OK)
+    return false;
+  return USBD_CDC_ReceivePacket(&hUsbDeviceFS) == USBD_OK;
 }
 
 #if !defined(BOARD_F103C8)

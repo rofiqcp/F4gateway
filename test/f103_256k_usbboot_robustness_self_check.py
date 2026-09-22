@@ -29,6 +29,10 @@ need("BOOT:STATE:active=" in boot and "BOOT_UPDATE_TIMEOUT_MS 30000UL" in boot,
      "resident protocol exposes resumable state and update timeout")
 need("BOOT_USB_LOSS_RECOVERY_MS" in boot and "boot_usb_disconnect_hold();" in boot,
      "resident USB loss has local recovery")
+need("BOOT_USB_RECOVERY_COOLDOWN_MS" in boot and
+     "BOOT_USB_MAX_RECOVERIES" in boot and
+     "usb_recovery_count < BOOT_USB_MAX_RECOVERIES" in boot,
+     "resident physical USB recovery is cooldown-limited and bounded")
 need(boot.count("section(\".RamFunc\")") >= 3,
      "flash erase/write/wait critical routines execute from SRAM")
 need("reset_usb_peripheral_while_detached" in boot_usb and

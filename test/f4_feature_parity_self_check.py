@@ -14,7 +14,7 @@ for cmd in ['UP HOME','UP 1','UP 5','UP 2','DOWN HOME','DOWN 1','DOWN 5','DOWN 2
 for cmd in ['LIMITS','LS STATUS','CONFIG RESET','WINCH PWM ','RAWTOUCH','CALIBRATE','CALSTOP','HMI RESET','TFT RESET','HMI REDRAW']:
     need(cmd in main or cmd in touch,'f4 service command '+cmd)
 need('LS TOP ACTIVE' in ui and 'LS BOTTOM ACTIVE' in ui,'HMI exposes both LS sensors')
-need('touch_x0_{580U}' in hmi and 'touch_x1_{3440U}' in hmi and 'touch_y0_{330U}' in hmi and 'touch_y1_{3310U}' in hmi and 'touch_rotate_{false}' in hmi and 'touch_invert_y_{true}' in hmi,'touch mapping matches proven F4 v1 physical-panel calibration')
+need('touch_x0_{580U}' in hmi and 'touch_x1_{2860U}' in hmi and 'touch_y0_{330U}' in hmi and 'touch_y1_{2980U}' in hmi and 'touch_rotate_{false}' in hmi and 'touch_invert_y_{true}' in hmi,'touch mapping uses proven raw endpoints converted to origin+span semantics')
 need('-DVECT_TAB_OFFSET=0x00004000U' in pio and 'cdc_boot_upload.py' in pio,'USB CDC bootloader contract preserved')
 need(not (ROOT/'include').exists() and not (ROOT/'lib').exists(),'headers/libraries consolidated under src')
 print('F4_FEATURE_PARITY_SELF_CHECK_PASS')

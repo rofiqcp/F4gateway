@@ -98,6 +98,10 @@ public:
   uint32_t spiBusConflictCount() const { return spi_bus_conflict_count_; }
   uint32_t touchReadCount() const { return touch_read_count_; }
   uint32_t touchRejectFastCount() const { return touch_reject_fast_count_; }
+  uint32_t touchRejectSecondPressureCount() const { return touch_reject_second_pressure_count_; }
+  uint32_t touchRejectRawRangeCount() const { return touch_reject_raw_range_count_; }
+  uint32_t touchRejectJitterCount() const { return touch_reject_jitter_count_; }
+  uint32_t touchRejectBoundsCount() const { return touch_reject_bounds_count_; }
   uint16_t touchCurrentZ() const { return touch_current_z_; }
   uint16_t touchLastRawX() const { return touch_last_raw_x_; }
   uint16_t touchLastRawY() const { return touch_last_raw_y_; }
@@ -165,12 +169,14 @@ private:
   uint16_t text_fg_{0xFFFFU};
   uint16_t text_bg_{0x0000U};
   uint16_t padding_{0U};
-  // Proven physical-panel calibration from F4 v1: RAW-X follows screen X,
-  // RAW-Y falls as screen Y increases.  Do not swap X/Y in landscape mode.
+  // Calibration format is {raw_origin_x, raw_span_x, raw_origin_y,
+  // raw_span_y, flags}. Historical values were min/max but setTouch() and
+  // mapping use the second/fourth values as spans. Use corrected spans here.
+  // RAW-X follows screen X; RAW-Y falls as screen Y increases.
   uint16_t touch_x0_{580U};
-  uint16_t touch_x1_{3440U};
+  uint16_t touch_x1_{2860U};  // 3440 - 580
   uint16_t touch_y0_{330U};
-  uint16_t touch_y1_{3310U};
+  uint16_t touch_y1_{2980U};  // 3310 - 330
   bool touch_rotate_{false};
   bool touch_invert_x_{false};
   bool touch_invert_y_{true};
@@ -201,6 +207,10 @@ private:
   uint32_t spi_bus_conflict_count_{0U};
   uint32_t touch_read_count_{0U};
   uint32_t touch_reject_fast_count_{0U};
+  uint32_t touch_reject_second_pressure_count_{0U};
+  uint32_t touch_reject_raw_range_count_{0U};
+  uint32_t touch_reject_jitter_count_{0U};
+  uint32_t touch_reject_bounds_count_{0U};
   uint16_t touch_current_z_{0U};
   uint16_t touch_last_raw_x_{0U};
   uint16_t touch_last_raw_y_{0U};

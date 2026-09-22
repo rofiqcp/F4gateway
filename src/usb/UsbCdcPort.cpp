@@ -11,6 +11,7 @@
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
+extern "C" bool F4Gateway_CdcTryRearmRxFromMain(void);
 
 UsbCdcPort gUsb;
 
@@ -127,6 +128,10 @@ bool UsbCdcPort::begin() {
   usb_loss_started_ms_ = 0U;
   last_rx_ms_ = 0U;
   rx_packet_count_ = 0U;
+  rx_rearm_failure_count_ = 0U;
+  rx_rearm_recovery_count_ = 0U;
+  rx_rearm_last_attempt_ms_ = 0U;
+  rx_rearm_pending_ = false;
   rx_resync_count_ = 0U;
   rx_resync_complete_count_ = 0U;
   rx_discard_until_newline_ = false;
@@ -156,6 +161,8 @@ void UsbCdcPort::end() {
 
 void UsbCdcPort::onUsbClassInit() {
   ++usb_class_init_count_;
+  rx_rearm_pending_ = false;
+  rx_rearm_last_attempt_ms_ = 0U;
   usb_seen_configured_ = true;
   usb_loss_started_ms_ = 0U;
   usb_stack_started_ms_ = 0U;
@@ -166,6 +173,8 @@ void UsbCdcPort::onUsbClassInit() {
 
 void UsbCdcPort::onUsbClassDeInit() {
   ++usb_class_deinit_count_;
+  rx_rearm_pending_ = false;
+  rx_rearm_last_attempt_ms_ = 0U;
   invalidateHostSession();
   resetSessionState(true, true);
 }
@@ -447,48 +456,32 @@ void UsbCdcPort::testSuppressTx(uint32_t duration_ms) {
 void UsbCdcPort::service() {
   const bool explicit_recovery = recovery_pending_;
   recovery_pending_ = false;
-  bool restart_requested = explicit_recovery;
 
-  // A cable/hub reset normally lets the peripheral enumerate again without
-  // intervention. If a previously configured session stays deconfigured for a
-  // full two seconds, perform one clean stack rebuild. The latch is cleared by
-  // softRestartUsb(), so a physically missing cable cannot cause a restart loop.
-  const uint32_t now = HAL_GetTick();
+  // Normal cable loss, a quiet ROS host, and slow Linux enumeration are NOT
+  // reasons to pulse F103 D+. The kernel can recover an existing CDC device
+  // without the MCU repeatedly disappearing from the bus. Physical detach is
+  // reserved for explicit USB:RECOVER and bootloader transitions.
   if (connected()) {
     usb_seen_configured_ = true;
     usb_loss_started_ms_ = 0U;
+  } else if (usb_seen_configured_ && usb_loss_started_ms_ == 0U) {
+    usb_loss_started_ms_ = HAL_GetTick();
+    invalidateHostSession();
+  }
 
-#if defined(BOARD_F103_256K)
-    // A configured device can lose only its OUT path while remaining addressed.
-    // On the production RC target, authenticated ROS/HMI traffic is periodic,
-    // so bounded RX silence recovery is safe without penalizing the 64 KiB C8.
-    if (!restart_requested && host_session_established_ && last_rx_ms_ != 0U &&
-        static_cast<uint32_t>(now - last_rx_ms_) >= kHostRxSilenceRecoveryMs) {
-      ++usb_auto_restart_count_;
-      last_recovery_reason_ = 4U;
-      restart_requested = true;
-    }
-#endif
-  } else if (!restart_requested && usb_seen_configured_) {
-    if (usb_loss_started_ms_ == 0U) {
-      usb_loss_started_ms_ = now;
-    } else if (static_cast<uint32_t>(now - usb_loss_started_ms_) >=
-               kUsbLossRecoveryMs) {
-      ++usb_auto_restart_count_;
-      last_recovery_reason_ = 3U;
-      restart_requested = true;
+  // A CDC OUT re-arm failure is repaired in main-loop context without tearing
+  // down the USB device. This handles a temporarily wedged OUT endpoint while
+  // keeping /dev/ttyACM stable on the Jetson.
+  const uint32_t now = HAL_GetTick();
+  if (rx_rearm_pending_ && connected() &&
+      (rx_rearm_last_attempt_ms_ == 0U ||
+       static_cast<uint32_t>(now - rx_rearm_last_attempt_ms_) >= kRxRearmRetryMs)) {
+    rx_rearm_last_attempt_ms_ = now;
+    if (F4Gateway_CdcTryRearmRxFromMain()) {
+      rx_rearm_pending_ = false;
+      ++rx_rearm_recovery_count_;
     }
   }
-#if defined(BOARD_F103_256K)
-  else if (!restart_requested && !usb_seen_configured_ &&
-           usb_stack_started_ms_ != 0U &&
-           static_cast<uint32_t>(now - usb_stack_started_ms_) >=
-               kInitialEnumerationRecoveryMs) {
-    ++usb_auto_restart_count_;
-    last_recovery_reason_ = 5U;
-    restart_requested = true;
-  }
-#endif
 
   // TX-complete runs in USB IRQ context. Revalidate wrapper + ST class state
   // atomically; otherwise the ISR can complete between the first tx_busy read
@@ -520,7 +513,7 @@ void UsbCdcPort::service() {
   if (primask == 0U)
     __enable_irq();
 
-  if (restart_requested)
+  if (explicit_recovery)
     (void)softRestartUsb();
   // TX completion IRQ only updates ring state and raises this event. All calls
   // into the ST USB transmit stack occur here in thread/main-loop context.
@@ -647,6 +640,11 @@ void UsbCdcPort::onReceive(const uint8_t *data, uint32_t length) {
     rx_head_ = next;
   }
   { const uint16_t used = RingUsed(rx_head_, rx_tail_, kRxSize); if (used > rx_high_water_) rx_high_water_ = used; }
+}
+
+void UsbCdcPort::onRxRearmFailure() {
+  ++rx_rearm_failure_count_;
+  rx_rearm_pending_ = true;
 }
 
 void UsbCdcPort::onTransmitComplete() {

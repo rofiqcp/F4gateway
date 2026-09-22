@@ -35,6 +35,7 @@ class UsbCdcPort {
 
   void onReceive(const uint8_t *data, uint32_t length);
   void onTransmitComplete();
+  void onRxRearmFailure();
   void onUsbClassInit();
   void onUsbClassDeInit();
   // Increments whenever queued transport state is destructively reset. Safety
@@ -50,6 +51,9 @@ class UsbCdcPort {
   uint32_t softRestartCount() const { return usb_soft_restart_count_; }
   uint32_t autoRestartCount() const { return usb_auto_restart_count_; }
   uint32_t rxPacketCount() const { return rx_packet_count_; }
+  uint32_t rxRearmFailureCount() const { return rx_rearm_failure_count_; }
+  uint32_t rxRearmRecoveryCount() const { return rx_rearm_recovery_count_; }
+  bool rxRearmPending() const { return rx_rearm_pending_; }
   uint32_t rxResyncCount() const { return rx_resync_count_; }
   uint32_t rxResyncCompleteCount() const { return rx_resync_complete_count_; }
   bool rxDiscardingUntilNewline() const { return rx_discard_until_newline_; }
@@ -78,16 +82,10 @@ class UsbCdcPort {
 #endif
  private:
   static constexpr uint32_t kTxStallRepairMs = 250U;
-  static constexpr uint32_t kUsbLossRecoveryMs = 2000U;
-#if defined(BOARD_F103_256K)
-  // Production F103RC: an authenticated ROS/HMI session is expected to remain
-  // chatty, so prolonged OUT silence can recover a wedged receive endpoint.
-  static constexpr uint32_t kHostRxSilenceRecoveryMs = 4000U;
-  // If the USB stack starts but never reaches CONFIGURED, retry only the CDC
-  // transport. This preserves local HMI/winch operation while recovering from
-  // a host/hub that missed the first physical attach after reset or flash.
-  static constexpr uint32_t kInitialEnumerationRecoveryMs = 8000U;
-#endif
+  static constexpr uint32_t kRxRearmRetryMs = 10U;
+  // IMPORTANT: normal host/session silence must never physically detach USB.
+  // F103 D+ pulsing is reserved for explicit operator recovery and bootloader
+  // transitions. This prevents host/hub timing from creating an enumerate loop.
 #if defined(BOARD_F103C8)
   static constexpr uint16_t kRxSize = 1024U;
   static constexpr uint16_t kTxSize = 1024U;
@@ -134,11 +132,15 @@ class UsbCdcPort {
   volatile uint32_t usb_stack_started_ms_{0U};
   volatile uint32_t last_rx_ms_{0U};
   volatile uint32_t rx_packet_count_{0U};
+  volatile uint32_t rx_rearm_failure_count_{0U};
+  volatile uint32_t rx_rearm_recovery_count_{0U};
+  volatile uint32_t rx_rearm_last_attempt_ms_{0U};
+  volatile bool rx_rearm_pending_{false};
   volatile uint32_t rx_resync_count_{0U};
   volatile uint32_t rx_resync_complete_count_{0U};
   volatile bool rx_discard_until_newline_{false};
   volatile uint32_t tx_progress_stall_count_{0U};
-  volatile uint32_t last_recovery_reason_{0U}; // 0 none, 1 explicit, 2 wrapper/ST mismatch, 3 link loss, 4 RX silence, 5 initial enum
+  volatile uint32_t last_recovery_reason_{0U}; // 0 none, 1 explicit physical recovery, 2 wrapper/ST mismatch
   volatile uint32_t last_repair_age_ms_{0U};
   volatile uint16_t last_repair_pending_{0U};
   volatile uint32_t last_repair_ep_length_{0U};

@@ -38,6 +38,19 @@ def wait_one(pattern,seconds):
         time.sleep(.05)
     return None
 
+def wait_runtime_or_boot(seconds):
+    """Catch either CDC identity so a short runtime enumeration is not missed."""
+    end=time.monotonic()+seconds
+    while time.monotonic()<end:
+        boot=find_one(BOOT_GLOB)
+        if boot:
+            return None,boot
+        runtime=find_one(RUNTIME_GLOB)
+        if runtime:
+            return runtime,None
+        time.sleep(.05)
+    return None,None
+
 def rom_dfu_active():
     return subprocess.run(['lsusb','-d','0483:df11'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 
@@ -404,12 +417,14 @@ def main():
         elif args.target != 'f103' and rom_dfu_active():
             fallback_rom(Path(args.image)); return 0
         else:
-            print('[BOOT-CDC] no runtime/boot CDC; waiting for resident boot CDC or ROM DFU via USB')
-            end=time.monotonic()+args.boot_wait
-            while time.monotonic()<end and not boot:
-                boot=find_one(BOOT_GLOB)
-                if not boot and args.target != 'f103' and rom_dfu_active(): fallback_rom(Path(args.image)); return 0
-                time.sleep(.1)
+            print('[BOOT-CDC] no runtime/boot CDC; waiting for either identity')
+            runtime,boot=wait_runtime_or_boot(args.boot_wait)
+            if runtime:
+                print('[BOOT-CDC] runtime CDC appeared; claiming the short enumeration window')
+                trigger_resident(runtime)
+                boot=wait_one(BOOT_GLOB,args.boot_wait)
+            elif not boot and args.target != 'f103' and rom_dfu_active():
+                fallback_rom(Path(args.image)); return 0
     if not boot: raise RuntimeError('resident boot CDC did not appear; USB/NRST/power path unavailable')
     print('[BOOT-CDC] resident port',boot); release_port(boot); upload_boot(boot,data)
     runtime=wait_one(RUNTIME_GLOB,45)

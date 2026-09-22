@@ -11,10 +11,12 @@ extern HmiDisplay tft;
 namespace {
 using HmiTouchService::Mode;
 HmiTouchService::EmitFn gEmit = nullptr;
+HmiTouchService::PersistFn gPersist = nullptr;
 Mode gMode = Mode::NORMAL;
 bool gWasDown = false;
 bool gRedraw = false;
 uint32_t gLastRawReportMs = 0U;
+uint32_t gModeStartedMs = 0U;
 uint8_t gStep = 0U;
 uint16_t gRawX[5]{};
 uint16_t gRawY[5]{};
@@ -22,6 +24,8 @@ constexpr int16_t kTargetX[5] = {20, 299, 20, 299, 160};
 constexpr int16_t kTargetY[5] = {20, 20, 219, 219, 120};
 constexpr uint16_t kMargin = 20U;
 constexpr uint16_t kMinSpan = 500U;
+constexpr uint32_t kRawModeTimeoutMs = 60000U;
+constexpr uint32_t kCalibrationTimeoutMs = 120000U;
 
 void emit(const char *line) { if (gEmit != nullptr && line != nullptr) gEmit(line); }
 void drawTarget() {
@@ -65,29 +69,36 @@ void finishCalibration() {
   const uint16_t p[5] = {rotate?minY:minX, rotate?spanY:spanX,
                          rotate?minX:minY, rotate?spanX:spanY, flags};
   tft.setTouch(p);
-  char line[128];
-  std::snprintf(line,sizeof(line),"ACK:TOUCH:CAL:XRAW=%u-%u:YRAW=%u-%u:CENTER=%u,%u",
+  const bool persisted = gPersist == nullptr || gPersist(p);
+  if (!persisted)
+    emit("WARN:TOUCH:CAL:NOT_PERSISTED");
+  char line[150];
+  std::snprintf(line,sizeof(line),"ACK:TOUCH:CAL:XRAW=%u-%u:YRAW=%u-%u:CENTER=%u,%u:PERSIST=%u",
                 unsigned(minX),unsigned(maxX),unsigned(minY),unsigned(maxY),
-                unsigned(gRawX[4]),unsigned(gRawY[4]));
-  emit(line); gMode=Mode::NORMAL; gRedraw=true;
+                unsigned(gRawX[4]),unsigned(gRawY[4]),persisted?1U:0U);
+  emit(line); gMode=Mode::NORMAL; gModeStartedMs=0U; gRedraw=true;
 }
 } // namespace
 
 namespace HmiTouchService {
-void begin(EmitFn emitFn) { gEmit=emitFn; gMode=Mode::NORMAL; gWasDown=false; gRedraw=false; }
+void begin(EmitFn emitFn, PersistFn persistFn) {
+  gEmit=emitFn; gPersist=persistFn; gMode=Mode::NORMAL; gWasDown=false;
+  gRedraw=false; gModeStartedMs=0U;
+}
 bool handleCommand(const char *command) {
   if (command == nullptr) return false;
   if (!std::strcmp(command,"RAWTOUCH") || !std::strcmp(command,"TOUCHTEST") ||
       !std::strcmp(command,"WINCH TOUCHTEST")) {
     if (gMode == Mode::CALIBRATION) { emit("ERR:TOUCH:RAW:CAL_ACTIVE"); return true; }
     gMode = gMode == Mode::RAW ? Mode::NORMAL : Mode::RAW;
+    gModeStartedMs = gMode == Mode::NORMAL ? 0U : HAL_GetTick();
     gWasDown=false; gRedraw = gMode == Mode::NORMAL;
     emit(gMode == Mode::RAW ? "ACK:TOUCH:RAW:START" : "ACK:TOUCH:RAW:STOP");
     return true;
   }
   if (!std::strcmp(command,"CALIBRATE") || !std::strcmp(command,"TOUCHCAL")) {
     if (gMode == Mode::RAW) { emit("ERR:TOUCH:CAL:RAW_ACTIVE"); return true; }
-    gMode=Mode::CALIBRATION; gWasDown=false; gStep=0U; drawTarget();
+    gMode=Mode::CALIBRATION; gModeStartedMs=HAL_GetTick(); gWasDown=false; gStep=0U; drawTarget();
     emit("ACK:TOUCH:CAL:START"); return true;
   }
   if (!std::strcmp(command,"CALSTOP")) {
@@ -97,8 +108,14 @@ bool handleCommand(const char *command) {
 }
 void service() {
   if (gMode == Mode::NORMAL) return;
-  uint16_t x=0U,y=0U; const bool down=tft.getTouch(&x,&y,TOUCH_THRESHOLD);
   const uint32_t now=HAL_GetTick();
+  const uint32_t limit = gMode == Mode::RAW ? kRawModeTimeoutMs : kCalibrationTimeoutMs;
+  if (gModeStartedMs != 0U && static_cast<uint32_t>(now-gModeStartedMs) >= limit) {
+    emit(gMode == Mode::RAW ? "WARN:TOUCH:RAW:TIMEOUT" : "WARN:TOUCH:CAL:TIMEOUT");
+    cancel();
+    return;
+  }
+  uint16_t x=0U,y=0U; const bool down=tft.getTouch(&x,&y,TOUCH_THRESHOLD);
   if (gMode == Mode::RAW) {
     if (down && static_cast<uint32_t>(now-gLastRawReportMs)>=100U) {
       gLastRawReportMs=now; char line[120];
@@ -116,7 +133,7 @@ void service() {
     drawTarget();
   }
 }
-void cancel() { gMode=Mode::NORMAL; gWasDown=false; gRedraw=true; }
+void cancel() { gMode=Mode::NORMAL; gModeStartedMs=0U; gWasDown=false; gRedraw=true; }
 bool active() { return gMode != Mode::NORMAL; }
 bool consumeRedrawRequest() { const bool v=gRedraw; gRedraw=false; return v; }
 const char *modeName() { return gMode==Mode::RAW?"RAW":(gMode==Mode::CALIBRATION?"CAL":"NORMAL"); }
