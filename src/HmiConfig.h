@@ -97,7 +97,6 @@ enum SystemStatus : uint8_t {
 
 enum VehicleMode : uint8_t { MODE_AUTO = 0, MODE_MANUAL };
 enum VehicleState : uint8_t { STATE_STANDBY = 0, STATE_RUNNING, STATE_STOPPED, STATE_FAULT };
-enum GpsFixState : uint8_t { GPS_LOST = 0, GPS_NO_FIX, GPS_2D_FIX, GPS_3D_FIX, GPS_DEGRADED };
 enum NavigationStatus : uint8_t {
   NAV_IDLE = 0,
   NAV_SELECTED,

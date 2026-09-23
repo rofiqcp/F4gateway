@@ -1,36 +1,40 @@
+#if defined(F103_BUILD_BOOTLOADER)
 #include "stm32f1xx_hal.h"
 #include "boot_usb.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
-#define APP_BASE 0x08004000UL
-#define APP_LIMIT 0x0803E000UL
-#define MANIFEST_BASE 0x0803E000UL
-#define MANIFEST_LIMIT 0x0803E800UL
-#define GATEWAY_BOARD_ID 0xF1030101UL
-#define BOOT_PROTOCOL_VERSION 3UL
-#define BOOT_LAYOUT_STRING "AGVBL3-04000-3E000"
+#define APP_BASE 0x08002000UL
+#define APP_LIMIT 0x0800F7F0UL
+#define APP_META_BASE 0x0800F7F0UL
+#define PERSIST_BASE 0x0800F800UL
+#define GATEWAY_BOARD_ID 0xF103C801UL
+#define BOOT_PROTOCOL_VERSION 4UL
+#define BOOT_LAYOUT_STRING "AGVBL4-C8-02000-F7F0"
 #define SRAM_BASE_ADDR 0x20000000UL
 #define SRAM_END_ADDR 0x20005000UL
-#define FLASH_PAGE_BYTES 0x800UL
+#define FLASH_PAGE_C8_BYTES 0x400UL
+#define FLASH_PAGE_CLONE_414_BYTES 0x800UL
 #define BOOT_REQ_LO 0x5544U
 #define BOOT_REQ_HI 0x4246U
-#define MANIFEST_MAGIC 0x31564741UL
-#define MANIFEST_FORMAT 2UL
+#define APP_META_MAGIC 0x34475641UL
 #define BOOT_IDLE_TIMEOUT_MS 20000UL
 #define BOOT_WATCHDOG_TIMEOUT_MS 10000UL
 #define BOOT_UPDATE_TIMEOUT_MS 30000UL
 #define BOOT_USB_LOSS_RECOVERY_MS 5000UL
-#define BOOT_USB_RECOVERY_COOLDOWN_MS 15000UL
+#define BOOT_USB_INITIAL_RECOVERY_MS 2500UL
+#define BOOT_USB_RECOVERY_COOLDOWN_MS 3000UL
 #define BOOT_USB_MAX_RECOVERIES 3U
 #define BOOT_LINE_MAX 600U
 #define BOOT_DATA_MAX 240U
 
 typedef struct {
-  uint32_t magic, format, app_base, app_size;
-  uint32_t app_crc32, header_crc32, generation, reserved;
-} app_manifest_t;
+  uint32_t magic;
+  uint32_t app_size;
+  uint32_t app_crc32;
+  uint32_t header_crc32;
+} app_metadata_t;
 static char line_buf[BOOT_LINE_MAX];
 static uint32_t line_len;
 static bool line_discard_until_newline;
@@ -39,7 +43,6 @@ static bool update_started;
 static uint32_t expected_size, expected_crc, write_offset;
 static uint32_t update_last_activity_ms;
 static uint32_t boot_started_ms;
-static uint32_t begin_fail_reason, begin_fail_addr, begin_fail_sr, begin_fail_cr, begin_fail_aux;
 static bool boot_usb_started;
 static volatile bool watchdog_armed;
 static volatile uint32_t watchdog_last_pat_ms;
@@ -70,6 +73,29 @@ static void early_usb_detach_release(void) {
   crh |=  (0x4UL << 16U);     /* Reset-equivalent floating input: release D+. */
   GPIOA->CRH = crh;
   __DSB();
+}
+
+/*
+ * Some F103-compatible clone silicon can preserve more core/peripheral state
+ * across SYSRESETREQ than the resident boot path should rely on. Make the
+ * bootloader vector/IRQ/USB reset state explicit before HAL enables SysTick.
+ */
+static void early_reset_sanitize(void) {
+  __disable_irq();
+  SCB->VTOR = 0x08000000UL;
+  SysTick->CTRL = 0U;
+  SysTick->LOAD = 0U;
+  SysTick->VAL = 0U;
+  for (uint32_t i = 0U; i < 8U; ++i) {
+    NVIC->ICER[i] = 0xFFFFFFFFUL;
+    NVIC->ICPR[i] = 0xFFFFFFFFUL;
+  }
+  RCC->APB1RSTR |= RCC_APB1RSTR_USBRST;
+  __DSB();
+  RCC->APB1RSTR &= ~RCC_APB1RSTR_USBRST;
+  __DSB();
+  __ISB();
+  __enable_irq();
 }
 
 static void fatal_reset(void) { NVIC_SystemReset(); while (1) {} }
@@ -140,42 +166,15 @@ static bool vector_valid(uint32_t base, uint32_t limit) {
   return pc >= base && pc < limit;
 }
 
-static bool manifest_erased(const app_manifest_t *m) {
-  const uint32_t *w = (const uint32_t *)m;
-  for (uint32_t i = 0U; i < sizeof(*m) / sizeof(*w); ++i)
-    if (w[i] != 0xFFFFFFFFUL) return false;
-  return true;
-}
-
-static bool manifest_record_valid(const app_manifest_t *m) {
-  if (m->magic != MANIFEST_MAGIC || m->format != MANIFEST_FORMAT) return false;
-  if (m->reserved != GATEWAY_BOARD_ID || m->app_base != APP_BASE) return false;
+static bool metadata_valid(const app_metadata_t *m) {
+  if (m->magic != APP_META_MAGIC) return false;
   if (m->app_size < 8U || m->app_size > (APP_LIMIT - APP_BASE)) return false;
-  return crc32_bytes((const uint8_t *)m, 20U) == m->header_crc32;
-}
-static const app_manifest_t *latest_manifest(void) {
-  const app_manifest_t *latest = NULL;
-  for (uint32_t a = MANIFEST_BASE;
-       a + sizeof(app_manifest_t) <= MANIFEST_LIMIT;
-       a += sizeof(app_manifest_t)) {
-    const app_manifest_t *m = (const app_manifest_t *)a;
-    if (manifest_erased(m)) break;
-    if (manifest_record_valid(m)) latest = m;
-  }
-  return latest;
-}
-
-static uint32_t manifest_next_address(void) {
-  for (uint32_t a = MANIFEST_BASE;
-       a + sizeof(app_manifest_t) <= MANIFEST_LIMIT;
-       a += sizeof(app_manifest_t))
-    if (manifest_erased((const app_manifest_t *)a)) return a;
-  return 0U;
+  return crc32_bytes((const uint8_t *)m, 12U) == m->header_crc32;
 }
 
 static bool application_valid(void) {
-  const app_manifest_t *m = latest_manifest();
-  if (m == NULL) return false;
+  const app_metadata_t *m = (const app_metadata_t *)APP_META_BASE;
+  if (!metadata_valid(m)) return false;
   if (!vector_valid(APP_BASE, APP_BASE + m->app_size)) return false;
   return crc32_bytes((const uint8_t *)APP_BASE, m->app_size) == m->app_crc32;
 }
@@ -235,10 +234,16 @@ __attribute__((noreturn)) static void jump_app(void) {
   while (1) {}
 }
 
+static uint32_t flash_page_bytes(void) {
+  const uint32_t dev = DBGMCU->IDCODE & 0xFFFU;
+  return dev == 0x414U ? FLASH_PAGE_CLONE_414_BYTES : FLASH_PAGE_C8_BYTES;
+}
+
 __attribute__((section(".RamFunc"), noinline, used))
 static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
-  if ((start & (FLASH_PAGE_BYTES - 1U)) != 0U || end <= start ||
-      end > MANIFEST_LIMIT)
+  const uint32_t page_bytes = flash_page_bytes();
+  if ((start & (page_bytes - 1U)) != 0U || (end & (page_bytes - 1U)) != 0U ||
+      end <= start || end > PERSIST_BASE)
     return false;
 
   const uint32_t primask = __get_PRIMASK();
@@ -249,20 +254,12 @@ static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
     FLASH->KEYR = FLASH_KEY2;
   }
   if ((FLASH->CR & FLASH_CR_LOCK) != 0U) {
-    begin_fail_reason = 3U;
-    begin_fail_sr = FLASH->SR;
-    begin_fail_cr = FLASH->CR;
     if (primask == 0U) __enable_irq();
     return false;
   }
 
   for (uint32_t guard = 0U; (FLASH->SR & FLASH_SR_BSY) != 0U; ++guard) {
     if (guard >= 8000000U) {
-      begin_fail_reason = 4U;
-      begin_fail_addr = start;
-      begin_fail_sr = FLASH->SR;
-      begin_fail_cr = FLASH->CR;
-      begin_fail_aux = 1U;
       FLASH->CR = FLASH_CR_LOCK;
       if (primask == 0U) __enable_irq();
       return false;
@@ -271,7 +268,7 @@ static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
 
   FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPRTERR;
 
-  for (uint32_t address = start; address < end; address += FLASH_PAGE_BYTES) {
+  for (uint32_t address = start; address < end; address += page_bytes) {
     FLASH->CR = FLASH_CR_PER;
     FLASH->AR = address;
     FLASH->CR = FLASH_CR_PER | FLASH_CR_STRT;
@@ -283,11 +280,6 @@ static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
     const uint32_t sr = FLASH->SR;
     if (guard >= 8000000U ||
         (sr & (FLASH_SR_PGERR | FLASH_SR_WRPRTERR)) != 0U) {
-      begin_fail_reason = 4U;
-      begin_fail_addr = address;
-      begin_fail_sr = sr;
-      begin_fail_cr = FLASH->CR;
-      begin_fail_aux = guard >= 8000000U ? 2U : 3U;
       FLASH->CR = FLASH_CR_LOCK;
       if (primask == 0U) __enable_irq();
       return false;
@@ -303,28 +295,18 @@ static bool erase_flash_pages_ram(uint32_t start, uint32_t end) {
 }
 
 static bool begin_update(uint32_t size, uint32_t crc) {
-  begin_fail_reason = begin_fail_addr = begin_fail_sr = begin_fail_cr = begin_fail_aux = 0U;
   if (size < 8U || size > (APP_LIMIT - APP_BASE)) {
-    begin_fail_reason = 1U;
     return false;
-  }
-  /*
-   * The manifest occupies one dedicated flash page. When all record slots are
-   * consumed, recycle only that page. A power loss after this point is still
-   * recoverable because the resident bootloader remains intact and the app
-   * update protocol can be restarted from BEGIN.
-   */
-  if (manifest_next_address() == 0U) {
-    if (!erase_flash_pages_ram(MANIFEST_BASE, MANIFEST_LIMIT)) {
-      begin_fail_reason = 2U;
-      return false;
-    }
   }
 
-  const uint32_t erase_end =
-      APP_BASE + ((size + FLASH_PAGE_BYTES - 1U) & ~(FLASH_PAGE_BYTES - 1U));
-  if (!erase_flash_pages_ram(APP_BASE, erase_end))
+  /*
+   * Invalidate the old image first by erasing the complete application area,
+   * including the fixed metadata footer. Persistent configuration starts at
+   * PERSIST_BASE and is never touched by the bootloader update path.
+   */
+  if (!erase_flash_pages_ram(APP_BASE, PERSIST_BASE)) {
     return false;
+  }
 
   expected_size = size;
   expected_crc = crc;
@@ -406,25 +388,19 @@ static bool program_bytes_stream(uint32_t address, const void *src, uint32_t len
   return program_halfword_stream(address, (const uint8_t *)src, len);
 }
 
-static bool commit_manifest(void) {
+static bool commit_metadata(void) {
   if (!update_started || write_offset != expected_size) return false;
   if (crc32_bytes((const uint8_t *)APP_BASE, expected_size) != expected_crc)
     return false;
   if (!vector_valid(APP_BASE, APP_BASE + expected_size)) return false;
-  const uint32_t target = manifest_next_address();
-  if (target == 0U) return false;
-  const app_manifest_t *previous = latest_manifest();
-  app_manifest_t m;
+
+  app_metadata_t m;
   memset(&m, 0, sizeof(m));
-  m.magic = MANIFEST_MAGIC;
-  m.format = MANIFEST_FORMAT;
-  m.app_base = APP_BASE;
+  m.magic = APP_META_MAGIC;
   m.app_size = expected_size;
   m.app_crc32 = expected_crc;
-  m.header_crc32 = crc32_bytes((const uint8_t *)&m, 20U);
-  m.generation = previous == NULL ? 1U : previous->generation + 1U;
-  m.reserved = GATEWAY_BOARD_ID;
-  return program_bytes_stream(target, &m, sizeof(m)) && application_valid();
+  m.header_crc32 = crc32_bytes((const uint8_t *)&m, 12U);
+  return program_bytes_stream(APP_META_BASE, &m, sizeof(m)) && application_valid();
 }
 
 static int hex_nibble(char c) {
@@ -493,21 +469,6 @@ static void reply_info(void) {
   (void)boot_usb_write_line(out, 250U);
 }
 
-static void reply_state(void) {
-  char out[160];
-  char *p = out, *end = out + sizeof(out) - 1U;
-  p = append_text(p, end, "BOOT:STATE:active=");
-  p = append_dec(p, end, update_started ? 1U : 0U);
-  p = append_text(p, end, ":offset=");
-  p = append_dec(p, end, write_offset);
-  p = append_text(p, end, ":size=");
-  p = append_dec(p, end, expected_size);
-  p = append_text(p, end, ":crc=");
-  p = append_hex8(p, end, expected_crc);
-  *p = '\0';
-  (void)boot_usb_write_line(out, 250U);
-}
-
 static void handle_line(char *line) {
   if (!strcmp(line, "PING")) {
     (void)boot_usb_write_line("BOOT:PONG", 250U);
@@ -515,10 +476,6 @@ static void handle_line(char *line) {
   }
   if (!strcmp(line, "INFO")) {
     reply_info();
-    return;
-  }
-  if (!strcmp(line, "STATE")) {
-    reply_state();
     return;
   }
   if (!strncmp(line, "BEGIN:", 6U)) {
@@ -537,15 +494,7 @@ static void handle_line(char *line) {
     (void)boot_usb_write_line("BOOT:ERASING", 250U);
     boot_usb_flush(250U);
     if (!begin_update(size, crc)) {
-      char out[112], *p = out, *end = out + sizeof(out) - 1U;
-      p = append_text(p,end,"ERR:BEGIN:FLASH:");
-      p = append_dec(p,end,begin_fail_reason);
-      p = append_text(p,end,":A="); p = append_hex8(p,end,begin_fail_addr);
-      p = append_text(p,end,":SR="); p = append_hex8(p,end,begin_fail_sr);
-      p = append_text(p,end,":CR="); p = append_hex8(p,end,begin_fail_cr);
-      p = append_text(p,end,":X="); p = append_hex8(p,end,begin_fail_aux);
-      *p='\0';
-      (void)boot_usb_write_line(out, 250U);
+      (void)boot_usb_write_line("ERR:BEGIN", 250U);
       return;
     }
     (void)boot_usb_write_line("ACK:BEGIN:0", 250U);
@@ -587,7 +536,7 @@ static void handle_line(char *line) {
     return;
   }
   if (!strcmp(line, "END")) {
-    if (!commit_manifest()) {
+    if (!commit_metadata()) {
       (void)boot_usb_write_line("ERR:END:VERIFY",250U);
       return;
     }
@@ -616,6 +565,7 @@ static void maintenance_loop(bool allow_timeout) {
   boot_usb_started = true;
   rx_drop_seen = boot_usb_rx_dropped();
   boot_started_ms = HAL_GetTick();
+  const uint32_t maintenance_started_ms = boot_started_ms;
   bool usb_was_configured = false;
   uint32_t usb_loss_started_ms = 0U;
   uint32_t usb_last_recovery_ms = 0U;
@@ -670,24 +620,32 @@ static void maintenance_loop(bool allow_timeout) {
     if (boot_usb_connected()) {
       usb_was_configured = true;
       usb_loss_started_ms = 0U;
-    } else if (usb_was_configured) {
-      if (usb_loss_started_ms == 0U) {
-        usb_loss_started_ms = now;
-      } else if ((uint32_t)(now - usb_loss_started_ms) >=
-                     BOOT_USB_LOSS_RECOVERY_MS &&
-                 usb_recovery_count < BOOT_USB_MAX_RECOVERIES &&
-                 (usb_last_recovery_ms == 0U ||
-                  (uint32_t)(now - usb_last_recovery_ms) >=
-                      BOOT_USB_RECOVERY_COOLDOWN_MS)) {
+    } else {
+      bool recover_usb = false;
+      if (usb_was_configured) {
+        if (usb_loss_started_ms == 0U)
+          usb_loss_started_ms = now;
+        else if ((uint32_t)(now - usb_loss_started_ms) >=
+                 BOOT_USB_LOSS_RECOVERY_MS)
+          recover_usb = true;
+      } else if ((uint32_t)(now - boot_started_ms) >=
+                 BOOT_USB_INITIAL_RECOVERY_MS) {
+        recover_usb = true;
+      }
+
+      if (recover_usb && usb_recovery_count < BOOT_USB_MAX_RECOVERIES &&
+          (usb_last_recovery_ms == 0U ||
+           (uint32_t)(now - usb_last_recovery_ms) >=
+               BOOT_USB_RECOVERY_COOLDOWN_MS)) {
         /*
-         * F103 needs a physical D+ detach to make a dead boot CDC visible again,
-         * but never pulse it in a rapid loop. The resumable protocol lets the
-         * host reconnect at write_offset after this bounded recovery.
+         * Recover both a lost configured link and a first-enumeration stall.
+         * DATA2 remains resumable at write_offset if this occurs mid-update.
          */
         ++usb_recovery_count;
         usb_last_recovery_ms = now;
         boot_usb_disconnect_hold();
         boot_usb_started = false;
+        HAL_Delay(2000U);
         if (!boot_usb_begin()) fatal_reset();
         boot_usb_started = true;
         usb_was_configured = false;
@@ -711,7 +669,7 @@ static void maintenance_loop(bool allow_timeout) {
     }
 
     if (allow_timeout && !update_started &&
-        (uint32_t)(now - boot_started_ms) >= BOOT_IDLE_TIMEOUT_MS &&
+        (uint32_t)(now - maintenance_started_ms) >= BOOT_IDLE_TIMEOUT_MS &&
         application_valid()) {
       jump_app();
     }
@@ -720,6 +678,7 @@ static void maintenance_loop(bool allow_timeout) {
 
 int main(void) {
   early_usb_detach_hold();
+  early_reset_sanitize();
   HAL_Init();
   system_clock_config();
   backup_access_enable();
@@ -727,7 +686,11 @@ int main(void) {
   watchdog_armed = true;
   const bool request = read_boot_request();
   const bool valid = application_valid();
-  if (request) maintenance_loop(valid);
+  if (request) {
+    /* One-shot maintenance request: never trap a valid application across resets. */
+    clear_boot_request();
+    maintenance_loop(valid);
+  }
   if (valid) jump_app();
   maintenance_loop(false);
 }
@@ -743,3 +706,5 @@ void SysTick_Handler(void) {
 }
 
 void Error_Handler(void) { fatal_reset(); }
+
+#endif

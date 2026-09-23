@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "Bts7960Winch.h"
 #include "BoardSupport.h"
 #include "PersistentConfigStore.h"
@@ -8,6 +9,8 @@ constexpr uint16_t kPersistKey = 0x0201U;
 constexpr uint32_t kReverseDeadtimeMs = 50U;
 constexpr uint32_t kHomeWatchdogMs = 30000U;
 constexpr uint32_t kLimitConfirmMs = 30U;
+constexpr uint32_t kLimitHardStopMs = 2U;
+constexpr uint32_t kLocalUpKickMs = 150U;
 
 PersistentConfigStore *gStore = nullptr;
 bool gInitialized = false;
@@ -37,11 +40,17 @@ bool gPendingRequiresHost = true;
 Bts7960Winch::SafetyInputs gSafety{};
 
 bool baseSafetyValid(bool requireHost = true) {
-  const bool common = !gSafety.emergencyStop && gSafety.physicalSafetyValid &&
-                      !gSafety.systemFault && gSafety.vehicleSafe &&
-                      !gLimitFaultLatched;
-  return common && (!requireHost ||
-         (gSafety.hostSessionValid && gSafety.commandSessionValid));
+  // Physical/local safety is authoritative for the on-panel operator controls.
+  // A ROS/global health fault must not disable a stationary local fork service
+  // action; remote commands still require the full system/host health gate.
+  const bool physical = !gSafety.emergencyStop &&
+                        gSafety.physicalSafetyValid &&
+                        gSafety.vehicleSafe;
+  if (!physical) return false;
+  if (!requireHost) return true;
+  return !gSafety.systemFault &&
+         gSafety.hostSessionValid &&
+         gSafety.commandSessionValid;
 }
 
 void drivePwm(uint16_t rpwm, uint16_t lpwm) {
@@ -76,6 +85,19 @@ void updateConfirmWindow(bool rawActive, bool &tracking, uint32_t &since,
   }
 }
 
+bool fastLimitActive(bool rawActive, bool tracking, uint32_t since, uint32_t now) {
+  return rawActive && tracking &&
+         static_cast<uint32_t>(now - since) >= kLimitHardStopMs;
+}
+
+bool topHardStopActive(uint32_t now) {
+  return fastLimitActive(readTopRaw(), gTopTracking, gTopSinceMs, now);
+}
+
+bool bottomHardStopActive(uint32_t now) {
+  return fastLimitActive(readBottomRaw(), gBottomTracking, gBottomSinceMs, now);
+}
+
 void rawStop() {
   drivePwm(0U, 0U);
   gAppliedPwm = 0U;
@@ -102,14 +124,14 @@ void hardStop(Bts7960WinchState state) {
 
 bool applyDirection(int8_t direction, uint16_t pwm) {
   if (direction > 0) {
-    if (gTopConfirmed) return false;
+    if (topHardStopActive(HAL_GetTick())) return false;
     drivePwm(pwm, 0U);
     gAppliedPwm = pwm;
     gDirection = 1;
     return true;
   }
   if (direction < 0) {
-    if (gBottomConfirmed) return false;
+    if (bottomHardStopActive(HAL_GetTick())) return false;
     drivePwm(0U, pwm);
     gAppliedPwm = pwm;
     gDirection = -1;
@@ -128,15 +150,21 @@ bool startMotionNow(int8_t direction, Bts7960WinchState state, uint32_t duration
     hardStop(Bts7960WinchState::STOPPED);
     return false;
   }
-  if (direction > 0 && gTopConfirmed) {
+  if (direction > 0 && topHardStopActive(HAL_GetTick())) {
     hardStop(Bts7960WinchState::TOP_LIMIT);
     return false;
   }
-  if (direction < 0 && gBottomConfirmed) {
+  if (direction < 0 && bottomHardStopActive(HAL_GetTick())) {
     hardStop(Bts7960WinchState::BOTTOM_LIMIT);
     return false;
   }
-  if (!applyDirection(direction, gConfiguredPwm)) return false;
+  // Native-hardware PWM start policy. DOWN follows the v2 behavior and starts
+  // immediately at the configured PWM. Local UP keeps its short full-duty kick
+  // because that is already proven useful for loaded-fork breakaway.
+  uint16_t startPwm = gConfiguredPwm;
+  if (!requireHost && direction > 0)
+    startPwm = Bts7960Winch::PWM_MAX;
+  if (!applyDirection(direction, startPwm)) return false;
 
   gMotionStartedMs = HAL_GetTick();
   gTimedDurationMs = durationMs;
@@ -154,11 +182,11 @@ void requestMotion(int8_t direction, Bts7960WinchState state, uint32_t durationM
     hardStop(Bts7960WinchState::STOPPED);
     return;
   }
-  if (direction > 0 && gTopConfirmed) {
+  if (direction > 0 && topHardStopActive(HAL_GetTick())) {
     hardStop(Bts7960WinchState::TOP_LIMIT);
     return;
   }
-  if (direction < 0 && gBottomConfirmed) {
+  if (direction < 0 && bottomHardStopActive(HAL_GetTick())) {
     hardStop(Bts7960WinchState::BOTTOM_LIMIT);
     return;
   }
@@ -238,16 +266,43 @@ void update() {
 #if BTS_WINCH_ENABLED
   if (!gInitialized) return;
   const uint32_t now = HAL_GetTick();
-  updateConfirmWindow(readTopRaw(), gTopTracking, gTopSinceMs, gTopConfirmed, now);
-  updateConfirmWindow(readBottomRaw(), gBottomTracking, gBottomSinceMs,
+  const bool topRaw = readTopRaw();
+  const bool bottomRaw = readBottomRaw();
+  updateConfirmWindow(topRaw, gTopTracking, gTopSinceMs, gTopConfirmed, now);
+  updateConfirmWindow(bottomRaw, gBottomTracking, gBottomSinceMs,
                       gBottomConfirmed, now);
 
+  // Directional safety uses a 2 ms fast-confirm window. This is much faster
+  // than the 30 ms status/fault debounce, but rejects single-sample EMI/bounce
+  // that would otherwise falsely stop motion. The opposite direction remains
+  // available for recovery from an active end-stop.
+  const bool topFast = fastLimitActive(topRaw, gTopTracking, gTopSinceMs, now);
+  const bool bottomFast = fastLimitActive(bottomRaw, gBottomTracking, gBottomSinceMs, now);
+  const bool rawTopHit = (gDirection > 0 && topFast) ||
+                         (gPendingMotion && gPendingDirection > 0 && topFast);
+  const bool rawBottomHit = (gDirection < 0 && bottomFast) ||
+                            (gPendingMotion && gPendingDirection < 0 && bottomFast);
+  if (rawTopHit)
+    hardStop(Bts7960WinchState::TOP_LIMIT);
+  else if (rawBottomHit)
+    hardStop(Bts7960WinchState::BOTTOM_LIMIT);
+
+  // Only a persistent contradictory TOP+BOTTOM state is a fault. A normal
+  // single active end-stop must never lock out motion away from that end-stop.
   if (gTopConfirmed && gBottomConfirmed) {
     gLimitFaultLatched = true;
     if (gState != Bts7960WinchState::FAULT || gDirection != 0 || gPendingMotion)
       hardStop(Bts7960WinchState::FAULT);
     return;
   }
+  if (gLimitFaultLatched && !(topRaw && bottomRaw) &&
+      gDirection == 0 && !gPendingMotion) {
+    gLimitFaultLatched = false;
+    if (gState == Bts7960WinchState::FAULT)
+      setState(Bts7960WinchState::STOPPED);
+  }
+  if (rawTopHit || rawBottomHit)
+    return;
   const bool requireHost = gDirection != 0 ? gMotionRequiresHost :
                            (gPendingMotion ? gPendingRequiresHost : true);
   if (!baseSafetyValid(requireHost)) {
@@ -255,15 +310,6 @@ void update() {
       hardStop(Bts7960WinchState::STOPPED);
     return;
   }
-  if (gDirection > 0 && gTopConfirmed) {
-    hardStop(Bts7960WinchState::TOP_LIMIT);
-    return;
-  }
-  if (gDirection < 0 && gBottomConfirmed) {
-    hardStop(Bts7960WinchState::BOTTOM_LIMIT);
-    return;
-  }
-
   if (gPendingMotion && static_cast<uint32_t>(now - gPendingSinceMs) >= kReverseDeadtimeMs) {
     const int8_t direction = gPendingDirection;
     const Bts7960WinchState state = gPendingState;
@@ -283,20 +329,25 @@ void update() {
                     gState == Bts7960WinchState::DOWN_HOME;
   if (gDirection != 0 && home &&
       static_cast<uint32_t>(now - gMotionStartedMs) >= kHomeWatchdogMs) {
-    // Match /forclift/f4: HOME timeout cuts power and returns to STOPPED.
+    // HOME timeout cuts power and returns to STOPPED.
     // Keep a diagnostic latch, but do not turn a recoverable timeout into a
     // permanent actuator fault.
     gMovementTimeoutLatched = true;
     hardStop(Bts7960WinchState::STOPPED);
     return;
   }
-  if (!gPendingMotion && gConfiguredPwm != 0U) {
-    if (isUpState() && gDirection > 0 && gAppliedPwm != gConfiguredPwm) {
-      drivePwm(gConfiguredPwm, 0U);
-      gAppliedPwm = gConfiguredPwm;
-    } else if (isDownState() && gDirection < 0 && gAppliedPwm != gConfiguredPwm) {
-      drivePwm(0U, gConfiguredPwm);
-      gAppliedPwm = gConfiguredPwm;
+  if (!gPendingMotion && gConfiguredPwm != 0U && gDirection != 0) {
+    uint16_t desiredPwm = gConfiguredPwm;
+    if (!gMotionRequiresHost && isUpState() && gDirection > 0) {
+      const uint32_t elapsed = static_cast<uint32_t>(now - gMotionStartedMs);
+      desiredPwm = elapsed < kLocalUpKickMs ? PWM_MAX : gConfiguredPwm;
+    }
+    if (isUpState() && gDirection > 0 && gAppliedPwm != desiredPwm) {
+      drivePwm(desiredPwm, 0U);
+      gAppliedPwm = desiredPwm;
+    } else if (isDownState() && gDirection < 0 && gAppliedPwm != desiredPwm) {
+      drivePwm(0U, desiredPwm);
+      gAppliedPwm = desiredPwm;
     }
   }
 #endif
@@ -322,6 +373,13 @@ void upTimed1Local() { requestMotion(+1, Bts7960WinchState::UP_TIMED_1, 1000U, f
 void upTimed2Local() { requestMotion(+1, Bts7960WinchState::UP_TIMED_2, 5000U, false); }
 void downTimed1Local() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_1, 1000U, false); }
 void downTimed2Local() { requestMotion(-1, Bts7960WinchState::DOWN_TIMED_2, 5000U, false); }
+void timedLocal(int8_t direction, uint32_t durationMs) {
+  if (durationMs < 1000U || durationMs > 30000U) return;
+  if (direction > 0)
+    requestMotion(+1, Bts7960WinchState::UP_TIMED_1, durationMs, false);
+  else if (direction < 0)
+    requestMotion(-1, Bts7960WinchState::DOWN_TIMED_1, durationMs, false);
+}
 
 bool processCommand(const char *command) {
   if (command == nullptr) return false;
@@ -393,14 +451,22 @@ bool limitsReady() {
 bool initialized() { return gInitialized; }
 bool motionAllowed(int8_t direction) {
   if (!gInitialized || !baseSafetyValid()) return false;
-  if (direction > 0 && gTopConfirmed) return false;
-  if (direction < 0 && gBottomConfirmed) return false;
+  if (direction > 0 && topHardStopActive(HAL_GetTick())) return false;
+  if (direction < 0 && bottomHardStopActive(HAL_GetTick())) return false;
   return direction >= -1 && direction <= 1;
 }
 bool clearFault() {
+  // Clear only a recovered/stale actuator fault. One legitimate end-stop may
+  // remain active (for example BOTTOM while the fork is parked); the unsafe
+  // condition is the contradictory TOP+BOTTOM state, which
+  // limitInputsPlausible() rejects.
+  //
+  // Local HMI operation intentionally does not depend on ROS/global system
+  // health, but it must still be stationary and free of E-stop before a winch
+  // fault can be cleared.
   if (!gInitialized || gDirection != 0 || gPendingMotion ||
-      !limitInputsPlausible() || gTopConfirmed || gBottomConfirmed ||
-      gSafety.emergencyStop || gSafety.systemFault)
+      !limitInputsPlausible() || gSafety.emergencyStop ||
+      !gSafety.vehicleSafe)
     return false;
   gLimitFaultLatched = false;
   gMovementTimeoutLatched = false;
@@ -430,3 +496,5 @@ const char *stateName() {
   return "FAULT";
 }
 } // namespace Bts7960Winch
+
+#endif

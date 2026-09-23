@@ -18,19 +18,23 @@ from pathlib import Path
 import serial
 
 STATUS_RE = re.compile(
-    r"TOUCH:STATUS:READ=(?P<read>\d+):REJECT=(?P<reject>\d+):Z=(?P<z>\d+)"
-    r":RAW=(?P<raw_x>\d+),(?P<raw_y>\d+):XY=(?P<x>\d+),(?P<y>\d+)"
-    r":CS=(?P<cs>\d+):BUS=(?P<bus>\d+):PAGE=(?P<page>[^\r\n]+)"
+    r"TOUCH:STATUS:READ=(?P<read>\d+):PRESS_REJECT=(?P<press_reject>\d+)"
+    r":P2_REJECT=(?P<p2_reject>\d+):RAW_REJECT=(?P<raw_reject>\d+)"
+    r":JITTER_REJECT=(?P<jitter_reject>\d+):BOUNDS_REJECT=(?P<bounds_reject>\d+)"
+    r":Z=(?P<z>\d+):RAW=(?P<raw_x>\d+),(?P<raw_y>\d+)"
+    r":XY=(?P<x>\d+),(?P<y>\d+):CS=(?P<cs>\d+):BUS=(?P<bus>\d+)"
+    r":MODE=(?P<mode>[^:]+):PAGE=(?P<page>[^\r\n]+)"
 )
 def auto_device():
     pats = [
-        "/dev/serial/by-id/*BLACKPILL_F411CE_CDC*",
+        "/dev/f4gateway",
+        "/dev/serial/by-id/*BLUEPILL_F103_CDC_in_FS_Mode*",
     ]
     for pat in pats:
         found = sorted(glob.glob(pat))
         if found:
             return found[0]
-    raise FileNotFoundError("F411 CDC port not found")
+    raise FileNotFoundError("STM32F103C8 runtime CDC port not found")
 
 
 def verified_bridge_pids(device):
@@ -47,7 +51,7 @@ def verified_bridge_pids(device):
             cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
         except OSError:
             continue
-        if "stmf4_hmi_bridge" in cmd:
+        if "stmf4_hmi_bridge" in cmd or "f4gateway_node" in cmd:
             pids.append(pid)
     return pids
 def take_port(device):
@@ -73,7 +77,9 @@ def read_status(ser):
         match = STATUS_RE.search(raw)
         if match:
             row = match.groupdict()
-            for key in ("read", "reject", "z", "raw_x", "raw_y", "x", "y", "cs", "bus"):
+            for key in ("read", "press_reject", "p2_reject", "raw_reject",
+                        "jitter_reject", "bounds_reject", "z", "raw_x", "raw_y",
+                        "x", "y", "cs", "bus"):
                 row[key] = int(row[key])
             return row
     return None
@@ -98,7 +104,9 @@ def main():
     stamp = time.strftime("%Y%m%d_%H%M%S")
     output = Path(args.output or f"tools/records/touch_probe_{stamp}.csv")
     output.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["t_s", "read", "reject", "z", "raw_x", "raw_y", "x", "y", "cs", "bus", "page", "accepted"]
+    fields = ["t_s", "read", "press_reject", "p2_reject", "raw_reject",
+              "jitter_reject", "bounds_reject", "z", "raw_x", "raw_y", "x", "y",
+              "cs", "bus", "mode", "page", "accepted"]
     accepted_points = []
     total = 0
     misses = 0

@@ -50,6 +50,7 @@ void upTimed1Local();
 void upTimed2Local();
 void downTimed1Local();
 void downTimed2Local();
+void timedLocal(int8_t direction, uint32_t durationMs);
 bool processCommand(const char *command);
 
 bool setPwm(uint16_t pwm, bool persist = true);

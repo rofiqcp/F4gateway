@@ -86,15 +86,9 @@ class UsbCdcPort {
   // IMPORTANT: normal host/session silence must never physically detach USB.
   // F103 D+ pulsing is reserved for explicit operator recovery and bootloader
   // transitions. This prevents host/hub timing from creating an enumerate loop.
-#if defined(BOARD_F103C8)
   static constexpr uint16_t kRxSize = 1024U;
   static constexpr uint16_t kTxSize = 1024U;
   static constexpr uint16_t kHighTxSize = 1024U;
-#else
-  static constexpr uint16_t kRxSize = 4096U;
-  static constexpr uint16_t kTxSize = 4096U;
-  static constexpr uint16_t kHighTxSize = 4096U;
-#endif
   uint8_t rx_[kRxSize]{};
   uint8_t tx_[kTxSize]{};
   uint8_t tx_high_[kHighTxSize]{};

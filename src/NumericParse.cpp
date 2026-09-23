@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "NumericParse.h"
 #include <cstdint>
 
@@ -115,3 +116,5 @@ bool realf(const char *s, float &out) {
   return true;
 }
 } // namespace CompactParse
+
+#endif

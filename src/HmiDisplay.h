@@ -126,11 +126,7 @@ private:
   static constexpr uint32_t kTftFastPrescaler = SPI_BAUDRATEPRESCALER_8;
   static constexpr uint32_t kTftUltraFastPrescaler = SPI_BAUDRATEPRESCALER_4;
   static constexpr uint32_t kTouchPrescaler = SPI_BAUDRATEPRESCALER_64;
-#if defined(BOARD_F103C8)
   static constexpr uint8_t kTextTileRows = 4U;
-#else
-  static constexpr uint8_t kTextTileRows = 8U;
-#endif
 
   bool waitSpiIdle(uint32_t timeoutUs = kSpiWaitTimeoutUs);
   void drainSpiRx();
@@ -169,14 +165,14 @@ private:
   uint16_t text_fg_{0xFFFFU};
   uint16_t text_bg_{0x0000U};
   uint16_t padding_{0U};
-  // Calibration format is {raw_origin_x, raw_span_x, raw_origin_y,
-  // raw_span_y, flags}. Historical values were min/max but setTouch() and
-  // mapping use the second/fourth values as spans. Use corrected spans here.
-  // RAW-X follows screen X; RAW-Y falls as screen Y increases.
+  // Proven installed-panel mapping from branch v2. These values are kept as
+  // the effective divisors used by getTouch(); changing them to (max-origin)
+  // compressed the mapped Y range and shifted real FORK button touches into
+  // the top header. RAW-X follows screen X; RAW-Y falls as screen Y increases.
   uint16_t touch_x0_{580U};
-  uint16_t touch_x1_{2860U};  // 3440 - 580
+  uint16_t touch_x1_{3440U};
   uint16_t touch_y0_{330U};
-  uint16_t touch_y1_{2980U};  // 3310 - 330
+  uint16_t touch_y1_{3310U};
   bool touch_rotate_{false};
   bool touch_invert_x_{false};
   bool touch_invert_y_{true};

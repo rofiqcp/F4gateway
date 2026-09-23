@@ -14,20 +14,20 @@ checks={
  'progress counter':'tx_progress_stall_count_',
  'middleware state':'hcdc->TxState == 0U',
  'explicit physical recovery':'const bool explicit_recovery = recovery_pending_',
- 'main-context RX rearm':'F4Gateway_CdcTryRearmRxFromMain',
+ 'main-context RX rearm':'F103Gateway_CdcTryRearmRxFromMain',
  'RX rearm failure counter':'rx_rearm_failure_count_',
  'RX rearm recovery counter':'rx_rearm_recovery_count_',
- 'RX rearm status':'rearm_pending=%u',
- 'reset cause':'reset_csr=%08lX',
 }
 forbidden={
  'autonomous link-loss restart':'kUsbLossRecoveryMs',
  'autonomous RX-silence restart':'kHostRxSilenceRecoveryMs',
- 'autonomous initial-enum restart':'kInitialEnumerationRecoveryMs',
  'legacy RX-silence reason':'last_recovery_reason_ = 4U',
  'legacy initial-enum reason':'last_recovery_reason_ = 5U',
  'tx-stall timed soft restart':'kTxStallSoftRestartMs',
 }
+assert 'kInitialEnumerationRecoveryMs = 2500U' in s, 'missing bounded initial enumeration recovery'
+assert 'kMaxInitialEnumerationRecoveries = 3U' in s, 'initial enumeration recovery must be bounded'
+assert 'usb_auto_restart_count_ < kMaxInitialEnumerationRecoveries' in s, 'initial enumeration retry cap not enforced'
 for name,tok in checks.items():
     assert tok in s, f'missing {name}'
 for name,tok in forbidden.items():

@@ -1,0 +1,15 @@
+# STM32F103C8 gateway and ST-Link access.
+# Runtime/boot rules are scoped by the USB product string emitted by this
+# firmware, so genuine C8 boards and C8 clones with different UID serials work.
+
+# ST-Link programmer/debugger.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="3748", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="374b", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
+# F103C8 runtime CDC.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5740", ATTR{product}=="BLUEPILL_F103 CDC in FS Mode", TEST=="power/control", ATTR{power/control}="on", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{product}=="BLUEPILL_F103 CDC in FS Mode", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", GROUP="dialout", TAG+="uaccess", SYMLINK+="f4gateway"
+
+# F103C8 resident boot CDC.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5741", ATTR{product}=="BLUEPILL_F103 BOOT CDC", TEST=="power/control", ATTR{power/control}="on", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5741", ATTRS{product}=="BLUEPILL_F103 BOOT CDC", ENV{ID_MM_DEVICE_IGNORE}="1", MODE="0660", GROUP="dialout", TAG+="uaccess", SYMLINK+="f4gateway-boot"

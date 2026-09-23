@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "BoardSupport.h"
 
 #include <algorithm>
@@ -5,11 +6,7 @@
 
 SPI_HandleTypeDef hspi1{};
 TIM_HandleTypeDef htim1{};
-#if defined(BOARD_F103C8)
 TIM_HandleTypeDef htim3{};
-#else
-TIM_HandleTypeDef htim11{};
-#endif
 #if BTS_WINCH_ENABLED
 TIM_HandleTypeDef htim2{};
 TIM_HandleTypeDef htim4{};
@@ -20,11 +17,7 @@ extern "C" uint8_t _end;
 extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason);
 
 namespace {
-#if defined(BOARD_F103C8)
 constexpr uint16_t kTftResetPin = GPIO_PIN_10;
-#else
-constexpr uint16_t kTftResetPin = GPIO_PIN_2;
-#endif
 
 void (*g_watchdog_callback)() = nullptr;
 void (*g_realtime_service_callback)() = nullptr;
@@ -48,6 +41,97 @@ BoardSpiOwner g_spi_owner = BoardSpiOwner::NONE;
 uint32_t g_spi_contention_count = 0U;
 uint32_t g_spi_recovery_count = 0U;
 
+#if BTS_WINCH_ENABLED
+volatile uint16_t g_bts_pwm_ticks = 0U;
+volatile int8_t g_bts_pwm_direction = 0;
+
+// Hardware-timer PWM with DMA-driven GPIO edges. This keeps pulse generation
+// out of CPU/ISR code while avoiding the unreliable native AF output observed
+// on this installed F103-compatible device.
+//   DOWN: TIM2 period + CH4 events -> DMA -> PA3 (LPWM)
+//   UP:   TIM4 period + CH3 events -> DMA -> PB8 (RPWM)
+static uint32_t g_dma_pa3_mask = GPIO_PIN_3;
+static uint32_t g_dma_pb8_mask = GPIO_PIN_8;
+
+inline void BtsPinsConfigureOutput() {
+  GPIO_InitTypeDef gpio{};
+  gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
+  gpio.Pin = GPIO_PIN_3;
+  HAL_GPIO_Init(GPIOA, &gpio);
+  gpio.Pin = GPIO_PIN_8;
+  HAL_GPIO_Init(GPIOB, &gpio);
+}
+
+inline void BtsPinsLowRaw() {
+  GPIOA->BRR = GPIO_PIN_3;
+  GPIOB->BRR = GPIO_PIN_8;
+}
+
+inline void BtsPinsForceLow() {
+  BtsPinsConfigureOutput();
+  BtsPinsLowRaw();
+}
+
+inline void DmaChannelDisable(DMA_Channel_TypeDef *ch) {
+  ch->CCR &= ~DMA_CCR_EN;
+  while ((ch->CCR & DMA_CCR_EN) != 0U) {}
+}
+
+inline void ConfigureDmaWrite(DMA_Channel_TypeDef *ch,
+                              volatile uint32_t *peripheral,
+                              uint32_t *memory) {
+  DmaChannelDisable(ch);
+  ch->CCR = 0U;
+  ch->CNDTR = 1U;
+  ch->CPAR = reinterpret_cast<uint32_t>(peripheral);
+  ch->CMAR = reinterpret_cast<uint32_t>(memory);
+  ch->CCR = DMA_CCR_DIR | DMA_CCR_CIRC |
+            DMA_CCR_PSIZE_1 | DMA_CCR_MSIZE_1 |
+            DMA_CCR_PL_1;
+  ch->CCR |= DMA_CCR_EN;
+}
+
+inline void StopBtsDmaHardware() {
+  TIM2->DIER &= ~(TIM_DIER_UDE | TIM_DIER_CC4DE);
+  TIM4->DIER &= ~(TIM_DIER_UDE | TIM_DIER_CC3DE);
+  // F103 DMA1 routing used here:
+  // TIM2_UP=Ch2, TIM2_CH4=Ch7, TIM4_CH3=Ch5, TIM4_UP=Ch7.
+  DmaChannelDisable(DMA1_Channel2);
+  DmaChannelDisable(DMA1_Channel5);
+  DmaChannelDisable(DMA1_Channel7);
+}
+
+inline void StartDownDmaPwm(uint16_t ticks) {
+  StopBtsDmaHardware();
+  BtsPinsConfigureOutput();
+  BtsPinsLowRaw();
+  TIM2->CCR4 = ticks;
+  TIM2->CNT = 0U;
+  TIM2->SR = 0U;
+  ConfigureDmaWrite(DMA1_Channel2, &GPIOA->BSRR, &g_dma_pa3_mask); // period HIGH
+  ConfigureDmaWrite(DMA1_Channel7, &GPIOA->BRR,  &g_dma_pa3_mask); // compare LOW
+  GPIOA->BSRR = GPIO_PIN_3; // seed first period
+  TIM2->DIER = TIM_DIER_UDE | TIM_DIER_CC4DE;
+  TIM2->CR1 |= TIM_CR1_CEN;
+}
+
+inline void StartUpDmaPwm(uint16_t ticks) {
+  StopBtsDmaHardware();
+  BtsPinsConfigureOutput();
+  BtsPinsLowRaw();
+  TIM4->CCR3 = ticks;
+  TIM4->CNT = 0U;
+  TIM4->SR = 0U;
+  ConfigureDmaWrite(DMA1_Channel7, &GPIOB->BSRR, &g_dma_pb8_mask); // period HIGH
+  ConfigureDmaWrite(DMA1_Channel5, &GPIOB->BRR,  &g_dma_pb8_mask); // compare LOW
+  GPIOB->BSRR = GPIO_PIN_8; // seed first period
+  TIM4->DIER = TIM_DIER_UDE | TIM_DIER_CC3DE;
+  TIM4->CR1 |= TIM_CR1_CEN;
+}
+#endif
+
 static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with recovery bootloader
 
 [[noreturn]] void FatalError() {
@@ -58,8 +142,6 @@ static constexpr uint32_t kAppCrashMagic = 0x48535243UL; // CRSH, shared with re
 
 void SystemClock_Config() {
   RCC_OscInitTypeDef osc{};
-#if defined(BOARD_F103C8)
-  // STM32F103C8 BluePill/BlackPill reference clock: 8 MHz HSE -> 72 MHz SYSCLK.
   osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   osc.HSEState = RCC_HSE_ON;
   osc.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -84,40 +166,6 @@ void SystemClock_Config() {
   periph.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;
   if (HAL_RCCEx_PeriphCLKConfig(&periph) != HAL_OK)
     FatalError();
-#else
-  // BlackPill uses a 25 MHz HSE. Keep USB exactly at 48 MHz.
-  osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  osc.HSEState = RCC_HSE_ON;
-  osc.PLL.PLLState = RCC_PLL_ON;
-  osc.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  osc.PLL.PLLM = 25U;
-#if defined(BOARD_F401CD)
-  osc.PLL.PLLN = 336U;
-  osc.PLL.PLLP = RCC_PLLP_DIV4;
-  osc.PLL.PLLQ = 7U;
-#else
-  osc.PLL.PLLN = 192U;
-  osc.PLL.PLLP = RCC_PLLP_DIV2;
-  osc.PLL.PLLQ = 4U;
-#endif
-  if (HAL_RCC_OscConfig(&osc) != HAL_OK)
-    FatalError();
-
-  RCC_ClkInitTypeDef clk{};
-  clk.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-  clk.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  clk.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  clk.APB1CLKDivider = RCC_HCLK_DIV2;
-  clk.APB2CLKDivider = RCC_HCLK_DIV1;
-#if defined(BOARD_F401CD)
-  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK)
-    FatalError();
-#else
-  if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_3) != HAL_OK)
-    FatalError();
-#endif
-#endif
 }
 
 void Gpio_Init() {
@@ -131,7 +179,7 @@ void Gpio_Init() {
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 #if BTS_WINCH_ENABLED
   // BTS7960 outputs must be LOW before timers take ownership.
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
 #endif
 
@@ -146,7 +194,7 @@ void Gpio_Init() {
   HAL_GPIO_Init(GPIOA, &gpio);
 
 #if BTS_WINCH_ENABLED
-  // Same electrical contract as /forclift/f4: active-low limit switches.
+  // Limit switches use the active-low electrical contract.
   gpio.Pin = GPIO_PIN_6 | GPIO_PIN_7;
   gpio.Mode = GPIO_MODE_INPUT;
   gpio.Pull = GPIO_PULLUP;
@@ -172,7 +220,6 @@ bool Spi1_Configure() {
 #endif
   __HAL_RCC_SPI1_CLK_ENABLE();
   GPIO_InitTypeDef gpio{};
-#if defined(BOARD_F103C8)
   // F1 SPI1: SCK/MOSI are AF push-pull; MISO is floating input.
   gpio.Pin = GPIO_PIN_5 | GPIO_PIN_7;
   gpio.Mode = GPIO_MODE_AF_PP;
@@ -183,14 +230,6 @@ bool Spi1_Configure() {
   gpio.Mode = GPIO_MODE_INPUT;
   gpio.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &gpio);
-#else
-  gpio.Pin = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
-  gpio.Mode = GPIO_MODE_AF_PP;
-  gpio.Pull = GPIO_NOPULL;
-  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  gpio.Alternate = GPIO_AF5_SPI1;
-  HAL_GPIO_Init(GPIOA, &gpio);
-#endif
 
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
@@ -223,22 +262,10 @@ void Spi1_InitBootBestEffort() {
 
 
 void Timers_Init() {
-#if defined(BOARD_F103C8)
   constexpr uint32_t kTimer1MHzPrescaler = 71U;
   constexpr uint32_t kWatchdogPrescaler = 7199U;
-#elif defined(BOARD_F401CD)
-  constexpr uint32_t kTimer1MHzPrescaler = 83U;
-  constexpr uint32_t kWatchdogPrescaler = 8399U;
-#else
-  constexpr uint32_t kTimer1MHzPrescaler = 95U;
-  constexpr uint32_t kWatchdogPrescaler = 9599U;
-#endif
   __HAL_RCC_TIM1_CLK_ENABLE();
-#if defined(BOARD_F103C8)
   __HAL_RCC_TIM3_CLK_ENABLE();
-#else
-  __HAL_RCC_TIM11_CLK_ENABLE();
-#endif
 
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = kTimer1MHzPrescaler;
@@ -265,72 +292,66 @@ void Timers_Init() {
   gpio.Mode = GPIO_MODE_AF_PP;
   gpio.Pull = GPIO_NOPULL;
   gpio.Speed = GPIO_SPEED_FREQ_LOW;
-#if !defined(BOARD_F103C8)
-  gpio.Alternate = GPIO_AF1_TIM1;
-#endif
   HAL_GPIO_Init(GPIOA, &gpio);
 
 #if BTS_WINCH_ENABLED
-  // BTS7960: PB8=TIM4_CH3 RPWM, PA2=TIM2_CH3 LPWM.
-  // Internal PWM contract remains 0..1023; ARR=999 gives exact 1 kHz at 96 MHz.
+  // Hardware-only winch PWM: timer timing + DMA GPIO edges.
+  // PA3=LPWM/DOWN uses TIM2 period+CH4 events.
+  // PB8=RPWM/UP uses TIM4 period+CH3 events.
+  __HAL_RCC_DMA1_CLK_ENABLE();
   __HAL_RCC_TIM2_CLK_ENABLE();
   __HAL_RCC_TIM4_CLK_ENABLE();
+  BtsPinsForceLow();
+
   TIM_OC_InitTypeDef btsOc{};
-  btsOc.OCMode = TIM_OCMODE_PWM1;
+  btsOc.OCMode = TIM_OCMODE_TIMING;
   btsOc.Pulse = 0U;
   btsOc.OCPolarity = TIM_OCPOLARITY_HIGH;
   btsOc.OCFastMode = TIM_OCFAST_DISABLE;
-  for (TIM_HandleTypeDef *timer : {&htim2, &htim4}) {
-    timer->Instance = timer == &htim2 ? TIM2 : TIM4;
-    timer->Init.Prescaler = kTimer1MHzPrescaler;
-    timer->Init.CounterMode = TIM_COUNTERMODE_UP;
-    timer->Init.Period = 999U;
-    timer->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    timer->Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-    if (HAL_TIM_PWM_Init(timer) != HAL_OK ||
-        HAL_TIM_PWM_ConfigChannel(timer, &btsOc, TIM_CHANNEL_3) != HAL_OK) FatalError();
-  }
-  GPIO_InitTypeDef btsGpio{};
-  btsGpio.Mode = GPIO_MODE_AF_PP; btsGpio.Pull = GPIO_NOPULL; btsGpio.Speed = GPIO_SPEED_FREQ_LOW;
-  btsGpio.Pin = GPIO_PIN_2;
-#if !defined(BOARD_F103C8)
-  btsGpio.Alternate = GPIO_AF1_TIM2;
-#endif
-  HAL_GPIO_Init(GPIOA, &btsGpio);
-  btsGpio.Pin = GPIO_PIN_8;
-#if !defined(BOARD_F103C8)
-  btsGpio.Alternate = GPIO_AF2_TIM4;
-#endif
-  HAL_GPIO_Init(GPIOB, &btsGpio);
-  (void)HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-  (void)HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = kTimer1MHzPrescaler;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 999U;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_OC_Init(&htim2) != HAL_OK ||
+      HAL_TIM_OC_ConfigChannel(&htim2, &btsOc, TIM_CHANNEL_4) != HAL_OK)
+    FatalError();
+
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = kTimer1MHzPrescaler;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 999U;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_OC_Init(&htim4) != HAL_OK ||
+      HAL_TIM_OC_ConfigChannel(&htim4, &btsOc, TIM_CHANNEL_3) != HAL_OK)
+    FatalError();
+
+  TIM2->CCR4 = 0U;
+  TIM4->CCR3 = 0U;
+  TIM2->DIER = 0U;
+  TIM4->DIER = 0U;
+  TIM2->CR1 |= TIM_CR1_CEN;
+  TIM4->CR1 |= TIM_CR1_CEN;
 #endif
 
-#if defined(BOARD_F103C8)
   htim3.Instance = TIM3;
-#else
-  htim11.Instance = TIM11;
-#endif
-  htim11.Init.Prescaler = kWatchdogPrescaler;
-  htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim11.Init.Period = 999U;
-  htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
+  htim3.Init.Prescaler = kWatchdogPrescaler;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 999U;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
     FatalError();
-#if defined(BOARD_F103C8)
   HAL_NVIC_SetPriority(TIM3_IRQn, 1U, 0U);
   HAL_NVIC_EnableIRQ(TIM3_IRQn);
-#else
-  HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, 1U, 0U);
-  HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn);
-#endif
 }
 
 } // namespace
 
 void Board_BackupWrite(uint8_t slot, uint32_t value) {
-#if defined(BOARD_F103C8)
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_RCC_BKP_CLK_ENABLE();
   HAL_PWR_EnableBkUpAccess();
@@ -346,13 +367,9 @@ void Board_BackupWrite(uint8_t slot, uint32_t value) {
     default: break;
   }
   if (reg != nullptr) *reg = value & 0xFFFFU;
-#else
-  if (slot <= 9U) (&RTC->BKP0R)[slot] = value;
-#endif
 }
 
 uint32_t Board_BackupRead(uint8_t slot) {
-#if defined(BOARD_F103C8)
   volatile uint32_t *reg = nullptr;
   switch (slot) {
     case 0: reg = &BKP->DR1; break; case 1: reg = &BKP->DR2; break;
@@ -363,18 +380,17 @@ uint32_t Board_BackupRead(uint8_t slot) {
     default: break;
   }
   return reg != nullptr ? (*reg & 0xFFFFU) : 0U;
-#else
-  return slot <= 9U ? (&RTC->BKP0R)[slot] : 0U;
-#endif
 }
 
 extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Board_FaultReset(uint32_t *stack, uint32_t reason) {
   __disable_irq();
 #if BTS_WINCH_ENABLED
-  // Fault handlers bypass the normal winch state machine; cut both bridge
-  // directions at the timer registers before touching diagnostics/reset state.
-  TIM2->CCR3 = 0U;
+  g_bts_pwm_ticks = 0U;
+  g_bts_pwm_direction = 0;
+  StopBtsDmaHardware();
+  TIM2->CCR4 = 0U;
   TIM4->CCR3 = 0U;
+  BtsPinsForceLow();
   __DSB();
 #endif
   Board_BackupWrite(1U, kAppCrashMagic);
@@ -393,9 +409,6 @@ extern "C" __attribute__((used, noinline, externally_visible, noreturn)) void Bo
 void Board_Init() {
   HAL_Init();
   __HAL_RCC_PWR_CLK_ENABLE();
-#if !defined(BOARD_F103C8)
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-#endif
   SystemClock_Config();
   Gpio_Init();
   Spi1_InitBootBestEffort();
@@ -600,22 +613,61 @@ void Board_SetWatchdogCallback(void (*callback)()) {
   g_watchdog_callback = callback;
 }
 void Board_WatchdogStart() {
-  __HAL_TIM_SET_COUNTER(&htim11, 0U);
-  (void)HAL_TIM_Base_Start_IT(&htim11);
+  __HAL_TIM_SET_COUNTER(&htim3, 0U);
+  (void)HAL_TIM_Base_Start_IT(&htim3);
 }
-void Board_WatchdogStop() { (void)HAL_TIM_Base_Stop_IT(&htim11); }
+void Board_WatchdogStop() { (void)HAL_TIM_Base_Stop_IT(&htim3); }
 
 #if BTS_WINCH_ENABLED
+void Board_BtsEmergencyCut() {
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  g_bts_pwm_ticks = 0U;
+  g_bts_pwm_direction = 0;
+  StopBtsDmaHardware();
+  TIM2->CCR4 = 0U;
+  TIM4->CCR3 = 0U;
+  BtsPinsForceLow();
+  __DSB();
+  if (primask == 0U) __enable_irq();
+}
+
 void Board_BtsSetPwm(uint16_t rpwm, uint16_t lpwm) {
   rpwm = std::min<uint16_t>(rpwm, 1023U);
   lpwm = std::min<uint16_t>(lpwm, 1023U);
-  // Never energize both half-bridge directions at once.
-  if (rpwm != 0U && lpwm != 0U) { rpwm = 0U; lpwm = 0U; }
-  const uint32_t r = (static_cast<uint32_t>(rpwm) * 999U + 511U) / 1023U;
-  const uint32_t l = (static_cast<uint32_t>(lpwm) * 999U + 511U) / 1023U;
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, r);
-  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, l);
+  if (rpwm != 0U && lpwm != 0U) {
+    Board_BtsEmergencyCut();
+    return;
+  }
+  if (rpwm == 0U && lpwm == 0U) {
+    Board_BtsEmergencyCut();
+    return;
+  }
+
+  const uint16_t rTicks = rpwm >= 1023U ? 1000U : static_cast<uint16_t>(
+      (static_cast<uint32_t>(rpwm) * 999U + 511U) / 1023U);
+  const uint16_t lTicks = lpwm >= 1023U ? 1000U : static_cast<uint16_t>(
+      (static_cast<uint32_t>(lpwm) * 999U + 511U) / 1023U);
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (rpwm != 0U) {
+    TIM2->CCR4 = 0U;
+    StartUpDmaPwm(rTicks);
+    g_bts_pwm_ticks = rTicks;
+    g_bts_pwm_direction = 1;
+  } else {
+    TIM4->CCR3 = 0U;
+    StartDownDmaPwm(lTicks);
+    g_bts_pwm_ticks = lTicks;
+    g_bts_pwm_direction = -1;
+  }
+  __DSB();
+  if (primask == 0U) __enable_irq();
 }
+
+uint16_t Board_BtsDutyTicks() { return g_bts_pwm_ticks; }
+int8_t Board_BtsDirection() { return g_bts_pwm_direction; }
 #endif
 
 void Board_BuzzerStart(uint16_t frequency_hz, uint16_t duration_ms) {
@@ -648,16 +700,14 @@ extern "C" void SysTick_Handler() {
   HAL_SYSTICK_IRQHandler();
 }
 
-#if defined(BOARD_F103C8)
-extern "C" void TIM3_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
-#else
-extern "C" void TIM1_TRG_COM_TIM11_IRQHandler() { HAL_TIM_IRQHandler(&htim11); }
-#endif
+
+
+extern "C" void TIM3_IRQHandler() { HAL_TIM_IRQHandler(&htim3); }
 
 // cppcheck-suppress constParameter -- STM32 HAL callback ABI requires mutable
 // handle pointer.
 extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-  if (htim == &htim11 && g_watchdog_callback != nullptr)
+  if (htim == &htim3 && g_watchdog_callback != nullptr)
     g_watchdog_callback();
 }
 
@@ -676,3 +726,5 @@ extern "C" __attribute__((naked)) void UsageFault_Handler() {
   __asm volatile("tst lr,#4\n ite eq\n mrseq r0,msp\n mrsne r0,psp\n movs r1,#4\n b Board_FaultReset");
 }
 extern "C" void Error_Handler() { FatalError(); }
+
+#endif

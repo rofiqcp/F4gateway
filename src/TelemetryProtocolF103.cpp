@@ -1,7 +1,7 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "TelemetryProtocol.h"
 #include "NumericParse.h"
 
-#if defined(BOARD_F103C8)
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -240,4 +240,5 @@ ExtendedTelemetryParseResult parseExtendedTelemetryLine(
   result.sessionChanged=ok && changed;
   return result;
 }
-#endif // BOARD_F103C8
+
+#endif

@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "UsbCdcPort.h"
 #include "BoardSupport.h"
 
@@ -11,15 +12,25 @@
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 extern USBD_CDC_ItfTypeDef USBD_Interface_fops_FS;
-extern "C" bool F4Gateway_CdcTryRearmRxFromMain(void);
+extern "C" bool F103Gateway_CdcTryRearmRxFromMain(void);
 
 UsbCdcPort gUsb;
 
 namespace {
-#if defined(BOARD_F103C8)
+constexpr uint32_t kInitialEnumerationRecoveryMs = 2500U;
+constexpr uint32_t kMaxInitialEnumerationRecoveries = 3U;
+
 void ResetUsbPeripheralWhileDetached() {
   HAL_NVIC_DisableIRQ(USB_LP_CAN1_RX0_IRQn);
   HAL_NVIC_ClearPendingIRQ(USB_LP_CAN1_RX0_IRQn);
+
+  // Power-cycle the F1 USB transceiver itself while D+ is physically LOW.
+  // This clears clone/hub suspend states that survive a plain RCC reset.
+  __HAL_RCC_USB_CLK_ENABLE();
+  USB->CNTR = static_cast<uint16_t>(USB_CNTR_FRES | USB_CNTR_PDWN);
+  __DSB();
+  HAL_Delay(20U);
+
   __HAL_RCC_USB_FORCE_RESET();
   __DSB();
   for (volatile uint32_t i = 0U; i < 64U; ++i) __NOP();
@@ -28,7 +39,7 @@ void ResetUsbPeripheralWhileDetached() {
   __DSB();
 }
 
-void ForceUsbDisconnectPulse() {
+void ForceUsbDisconnectPulse(uint32_t hold_ms) {
   // Blue Pill boards normally expose USB D+ through an external pull-up.
   // Keep D+ physically low while the F1 USB peripheral is hard-reset so every
   // stack start begins from a clean endpoint/register state.
@@ -40,10 +51,9 @@ void ForceUsbDisconnectPulse() {
   HAL_GPIO_Init(GPIOA, &gpio);
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
   ResetUsbPeripheralWhileDetached();
-  HAL_Delay(500U);
+  HAL_Delay(hold_ms);
   HAL_GPIO_DeInit(GPIOA, GPIO_PIN_12);
 }
-#endif
 
 uint16_t RingUsed(uint16_t head, uint16_t tail, uint16_t size) {
   return head >= tail ? static_cast<uint16_t>(head - tail)
@@ -108,9 +118,7 @@ bool UsbCdcPort::startUsbStack() {
 }
 
 bool UsbCdcPort::begin() {
-#if defined(BOARD_F103C8)
-  ForceUsbDisconnectPulse();
-#endif
+  ForceUsbDisconnectPulse(500U);
   resetSessionState(true, false);
   rx_dropped_ = tx_dropped_ = 0U;
   tx_low_dropped_ = tx_high_dropped_ = 0U;
@@ -287,14 +295,10 @@ bool UsbCdcPort::softRestartUsb() {
   (void)USBD_DeInit(&hUsbDeviceFS);
   resetSessionState(true, true);
 
-#if defined(BOARD_F103C8)
   // F103 boards use an external D+ pull-up. A logical USB stop/deinit alone
   // cannot guarantee that the host observes a detach, so always force a real
   // D+ low interval and reset the peripheral before rebuilding the CDC stack.
-  ForceUsbDisconnectPulse();
-#else
-  HAL_Delay(10U);
-#endif
+  ForceUsbDisconnectPulse(2500U);
   return startUsbStack();
 }
 
@@ -437,7 +441,7 @@ bool UsbCdcPort::writeLineCritical(const char *line, uint32_t timeout_ms) {
   (void)timeout_ms;
   if (line == nullptr || !connected())
     return false;
-  // Critical means high-priority, not permission to block the F411 main context.
+  // Critical means high-priority, not permission to block the F103C8 main context.
   // Give the endpoint state machine one cooperative service opportunity and then
   // fail closed. Safety STOP messages have their own persistent retry latch in
   // main.cpp; maintenance commands can simply be retried by the operator/host.
@@ -473,11 +477,27 @@ void UsbCdcPort::service() {
   // down the USB device. This handles a temporarily wedged OUT endpoint while
   // keeping /dev/ttyACM stable on the Jetson.
   const uint32_t now = HAL_GetTick();
+
+  /*
+   * A stack can start successfully while the host never reaches CONFIGURED
+   * (for example after a clone MCU/hub suspend corner case). In that state no
+   * class callback will ever arrive, so perform a small bounded number of real
+   * D+ detach/peripheral-reset retries. Once CONFIGURED has ever been seen,
+   * normal cable loss remains non-destructive.
+   */
+  if (!connected() && !usb_seen_configured_ && usb_stack_started_ms_ != 0U &&
+      static_cast<uint32_t>(now - usb_stack_started_ms_) >=
+          kInitialEnumerationRecoveryMs &&
+      usb_auto_restart_count_ < kMaxInitialEnumerationRecoveries) {
+    ++usb_auto_restart_count_;
+    (void)softRestartUsb();
+  }
+
   if (rx_rearm_pending_ && connected() &&
       (rx_rearm_last_attempt_ms_ == 0U ||
        static_cast<uint32_t>(now - rx_rearm_last_attempt_ms_) >= kRxRearmRetryMs)) {
     rx_rearm_last_attempt_ms_ = now;
-    if (F4Gateway_CdcTryRearmRxFromMain()) {
+    if (F103Gateway_CdcTryRearmRxFromMain()) {
       rx_rearm_pending_ = false;
       ++rx_rearm_recovery_count_;
     }
@@ -678,3 +698,5 @@ void UsbCdcPort::onTransmitComplete() {
   // service event; main-loop gUsb.service() starts the next packet.
   tx_service_pending_ = true;
 }
+
+#endif

@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "usbd_core.h"
 #include "usbd_desc.h"
 #include "usbd_conf.h"
@@ -6,15 +7,7 @@
 #define USBD_PID 0x5740U
 #define USBD_LANGID_STRING 0x0409U
 #define USBD_MANUFACTURER_STRING "STMicroelectronics"
-#if defined(BOARD_F103C8)
 #define USBD_PRODUCT_STRING "BLUEPILL_F103 CDC in FS Mode"
-#elif defined(BOARD_F401CD)
-#define USBD_PRODUCT_STRING "BLACKPILL_F401CD CDC in FS Mode"
-#elif defined(BOARD_F411CC)
-#define USBD_PRODUCT_STRING "BLACKPILL_F411CC CDC in FS Mode"
-#else
-#define USBD_PRODUCT_STRING "BLACKPILL_F411CE CDC in FS Mode"
-#endif
 #define USBD_CONFIGURATION_STRING "CDC Config"
 #define USBD_INTERFACE_STRING "CDC Interface"
 
@@ -91,3 +84,5 @@ static void IntToUnicode(uint32_t value, uint8_t *buffer, uint8_t length) {
     value <<= 4U;
   }
 }
+
+#endif

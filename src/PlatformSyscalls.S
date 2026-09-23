@@ -1,4 +1,4 @@
-#if defined(BOARD_F103C8)
+#if !defined(F103_BUILD_BOOTLOADER)
 .syntax unified
 .thumb
 
@@ -23,4 +23,5 @@ Platform_UnsupportedSyscall:
 .thumb_set _write, Platform_UnsupportedSyscall
 .global _fstat
 .thumb_set _fstat, Platform_UnsupportedSyscall
+
 #endif

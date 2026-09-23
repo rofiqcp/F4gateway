@@ -1,3 +1,4 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "HmiTouchService.h"
 #include "HmiConfig.h"
 #include "HmiDisplay.h"
@@ -22,12 +23,47 @@ uint16_t gRawX[5]{};
 uint16_t gRawY[5]{};
 constexpr int16_t kTargetX[5] = {20, 299, 20, 299, 160};
 constexpr int16_t kTargetY[5] = {20, 20, 219, 219, 120};
-constexpr uint16_t kMargin = 20U;
+constexpr int32_t kRawEdgeGuard = 24;
 constexpr uint16_t kMinSpan = 500U;
 constexpr uint32_t kRawModeTimeoutMs = 60000U;
 constexpr uint32_t kCalibrationTimeoutMs = 120000U;
 
 void emit(const char *line) { if (gEmit != nullptr && line != nullptr) gEmit(line); }
+
+struct RawAxisCalibration {
+  uint16_t origin{0U};
+  uint16_t span{0U};
+  bool inverted{false};
+};
+
+bool projectAxisToPanelEdges(int32_t rawAtFirstTarget, int32_t rawAtLastTarget,
+                             int32_t firstTargetPx, int32_t lastTargetPx,
+                             int32_t screenMaxPx, RawAxisCalibration &out) {
+  const int32_t pixelSpan = lastTargetPx - firstTargetPx;
+  const int32_t rawDelta = rawAtLastTarget - rawAtFirstTarget;
+  if (pixelSpan <= 0 || std::abs(rawDelta) < static_cast<int32_t>(kMinSpan))
+    return false;
+
+  // Corner targets sit 20 px inside the LCD. Extrapolate the measured line to
+  // the physical screen edges instead of treating those inner samples as the
+  // raw minima/maxima; otherwise the outer touch band is mapped out-of-bounds.
+  const int32_t rawAtZero = rawAtFirstTarget -
+      (rawDelta * firstTargetPx) / pixelSpan;
+  const int32_t rawAtScreenMax = rawAtLastTarget +
+      (rawDelta * (screenMaxPx - lastTargetPx)) / pixelSpan;
+  int32_t low = std::min(rawAtZero, rawAtScreenMax) - kRawEdgeGuard;
+  int32_t high = std::max(rawAtZero, rawAtScreenMax) + kRawEdgeGuard;
+  low = std::clamp<int32_t>(low, 0, 4095);
+  high = std::clamp<int32_t>(high, 0, 4095);
+  if (high - low < static_cast<int32_t>(kMinSpan))
+    return false;
+
+  out.origin = static_cast<uint16_t>(low);
+  out.span = static_cast<uint16_t>(high - low);
+  out.inverted = rawAtScreenMax < rawAtZero;
+  return true;
+}
+
 void drawTarget() {
   tft.beginFrame();
   tft.fillScreen(C_BG);
@@ -41,41 +77,43 @@ void drawTarget() {
   tft.endFrame();
 }
 void finishCalibration() {
-  uint16_t minX=gRawX[0], maxX=gRawX[0], minY=gRawY[0], maxY=gRawY[0];
-  for (uint8_t i=1U;i<4U;++i) {
-    minX=std::min(minX,gRawX[i]); maxX=std::max(maxX,gRawX[i]);
-    minY=std::min(minY,gRawY[i]); maxY=std::max(maxY,gRawY[i]);
-  }
-  minX = minX > kMargin ? uint16_t(minX-kMargin) : 0U;
-  minY = minY > kMargin ? uint16_t(minY-kMargin) : 0U;
-  maxX = std::min<uint16_t>(4095U, uint16_t(maxX+kMargin));
-  maxY = std::min<uint16_t>(4095U, uint16_t(maxY+kMargin));
-  const uint16_t spanX = uint16_t(maxX-minX), spanY = uint16_t(maxY-minY);
-  if (spanX < kMinSpan || spanY < kMinSpan) {
-    emit("ERR:TOUCH:CAL:SPAN"); gMode=Mode::NORMAL; gRedraw=true; return;
-  }
-  // Infer panel orientation from the four corner samples. F4 v1 proved that
-  // this installed panel is normally unrotated (RAW-X -> screen X) with Y
-  // inverted. Keeping inference here also makes field recalibration robust.
+  // Infer panel orientation from the four corner samples. The targets are
+  // intentionally inset from the bezel, so the raw ranges below are projected
+  // back out to screen x=0..319 and y=0..239 before being stored.
   const int32_t leftX=(int32_t(gRawX[0])+gRawX[2])/2, rightX=(int32_t(gRawX[1])+gRawX[3])/2;
   const int32_t leftY=(int32_t(gRawY[0])+gRawY[2])/2, rightY=(int32_t(gRawY[1])+gRawY[3])/2;
   const int32_t topX=(int32_t(gRawX[0])+gRawX[1])/2, bottomX=(int32_t(gRawX[2])+gRawX[3])/2;
   const int32_t topY=(int32_t(gRawY[0])+gRawY[1])/2, bottomY=(int32_t(gRawY[2])+gRawY[3])/2;
   const bool rotate = std::abs(rightY-leftY) > std::abs(rightX-leftX) &&
                       std::abs(bottomX-topX) > std::abs(bottomY-topY);
-  const bool invertX = rotate ? (rightY < leftY) : (rightX < leftX);
-  const bool invertY = rotate ? (bottomX < topX) : (bottomY < topY);
-  uint16_t flags = uint16_t((rotate?1U:0U) | (invertX?2U:0U) | (invertY?4U:0U));
-  const uint16_t p[5] = {rotate?minY:minX, rotate?spanY:spanX,
-                         rotate?minX:minY, rotate?spanX:spanY, flags};
+
+  RawAxisCalibration screenX{}, screenY{};
+  const int32_t rawXAtLeft = rotate ? leftY : leftX;
+  const int32_t rawXAtRight = rotate ? rightY : rightX;
+  const int32_t rawYAtTop = rotate ? topX : topY;
+  const int32_t rawYAtBottom = rotate ? bottomX : bottomY;
+  if (!projectAxisToPanelEdges(rawXAtLeft, rawXAtRight,
+                               kTargetX[0], kTargetX[1], W - 1, screenX) ||
+      !projectAxisToPanelEdges(rawYAtTop, rawYAtBottom,
+                               kTargetY[0], kTargetY[2], H - 1, screenY)) {
+    emit("ERR:TOUCH:CAL:SPAN"); gMode=Mode::NORMAL; gRedraw=true; return;
+  }
+
+  const uint16_t flags = uint16_t((rotate?1U:0U) |
+                                  (screenX.inverted?2U:0U) |
+                                  (screenY.inverted?4U:0U));
+  const uint16_t p[5] = {screenX.origin, screenX.span,
+                         screenY.origin, screenY.span, flags};
   tft.setTouch(p);
   const bool persisted = gPersist == nullptr || gPersist(p);
   if (!persisted)
     emit("WARN:TOUCH:CAL:NOT_PERSISTED");
-  char line[150];
-  std::snprintf(line,sizeof(line),"ACK:TOUCH:CAL:XRAW=%u-%u:YRAW=%u-%u:CENTER=%u,%u:PERSIST=%u",
-                unsigned(minX),unsigned(maxX),unsigned(minY),unsigned(maxY),
-                unsigned(gRawX[4]),unsigned(gRawY[4]),persisted?1U:0U);
+  char line[170];
+  std::snprintf(line,sizeof(line),
+                "ACK:TOUCH:CAL:XRAW=%u-%u:YRAW=%u-%u:CENTER=%u,%u:FLAGS=%u:PERSIST=%u",
+                unsigned(screenX.origin),unsigned(screenX.origin+screenX.span),
+                unsigned(screenY.origin),unsigned(screenY.origin+screenY.span),
+                unsigned(gRawX[4]),unsigned(gRawY[4]),unsigned(flags),persisted?1U:0U);
   emit(line); gMode=Mode::NORMAL; gModeStartedMs=0U; gRedraw=true;
 }
 } // namespace
@@ -138,3 +176,5 @@ bool active() { return gMode != Mode::NORMAL; }
 bool consumeRedrawRequest() { const bool v=gRedraw; gRedraw=false; return v; }
 const char *modeName() { return gMode==Mode::RAW?"RAW":(gMode==Mode::CALIBRATION?"CAL":"NORMAL"); }
 } // namespace HmiTouchService
+
+#endif

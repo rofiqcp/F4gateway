@@ -2,18 +2,17 @@
 import argparse, fcntl, glob, os, signal, struct, subprocess, sys, time, zlib
 from pathlib import Path
 
-RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_CDC_in_FS_Mode*-if00"
-BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLACKPILL_F4*_BOOT_CDC*-if00"
-APP_BASE=0x08004000; APP_LIMIT=0x08060000; SRAM_END=0x20020000; CHUNK=240
-EXPECTED_LAYOUT="AGVBL3-04000-60000"; EXPECTED_BOARD="F411CE01"
-UPDATE_LOCK = Path('/tmp/f4gateway_firmware_update.lock')
+RUNTIME_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_CDC_in_FS_Mode*-if00"
+BOOT_GLOB = "/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_BOOT_CDC*-if00"
+APP_BASE=0x08002000; APP_LIMIT=0x0800F7F0; SRAM_END=0x20005000; CHUNK=16
+EXPECTED_LAYOUT="AGVBL4-C8-02000-F7F0"; EXPECTED_BOARD="F103C801"
+UPDATE_LOCK = Path(f'/tmp/f4gateway_firmware_update.{os.getuid()}.lock')
+CDC_OWNER_LOCK = Path('/tmp/f4gateway_cdc_owner.lock')
 _UPDATE_LOCK_FD = None
+_CDC_LOCK_FD = None
 
 PROFILES={
-    "f411ce": (0x08060000, "AGVBL3-04000-60000", "F411CE01", 0x20020000),
-    "f411cc": (0x08020000, "AGVBL3-04000-20000", "F411CC01", 0x20020000),
-    "f401cd": (0x08040000, "AGVBL3-04000-40000", "F401CD01", 0x20018000),
-    "f103": (0x0803E000, "AGVBL3-04000-3E000", "F1030101", 0x20005000),
+    "f103c8": (0x0800F7F0, "AGVBL4-C8-02000-F7F0", "F103C801", 0x20005000),
 }
 
 def normalize_image(path):
@@ -28,7 +27,17 @@ def normalize_image(path):
     return data
 
 def find_one(pattern):
-    a=sorted(glob.glob(pattern)); return a[0] if len(a)==1 else None
+    patterns=[pattern]
+    if pattern == RUNTIME_GLOB:
+        patterns.append('/dev/f4gateway')
+    elif pattern == BOOT_GLOB:
+        patterns.append('/dev/f4gateway-boot')
+    by_real={}
+    for pat in patterns:
+        for path in sorted(glob.glob(pat)):
+            if os.path.exists(path):
+                by_real.setdefault(os.path.realpath(path), path)
+    return next(iter(by_real.values())) if len(by_real)==1 else None
 
 def wait_one(pattern,seconds):
     end=time.monotonic()+seconds
@@ -50,9 +59,6 @@ def wait_runtime_or_boot(seconds):
             return runtime,None
         time.sleep(.05)
     return None,None
-
-def rom_dfu_active():
-    return subprocess.run(['lsusb','-d','0483:df11'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 
 def line_read(ser,timeout):
     end=time.monotonic()+timeout; b=bytearray()
@@ -85,7 +91,7 @@ def acquire_update_lock():
         fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
-        raise RuntimeError('another F4gateway firmware update is already active')
+        raise RuntimeError('another STM32F103C8 firmware update is already active')
     os.ftruncate(fd,0)
     os.write(fd,(str(os.getpid())+'\n').encode())
     os.fsync(fd)
@@ -104,22 +110,72 @@ def release_update_lock():
         os.close(_UPDATE_LOCK_FD)
         _UPDATE_LOCK_FD=None
 
+def acquire_cdc_owner_lock(timeout=3.0):
+    global _CDC_LOCK_FD
+    fd=os.open(CDC_OWNER_LOCK, os.O_CREAT|os.O_RDWR, 0o644)
+    end=time.monotonic()+timeout
+    while time.monotonic()<end:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)
+            _CDC_LOCK_FD=fd
+            print('[BOOT-CDC] CDC ownership lock acquired')
+            return
+        except BlockingIOError:
+            runtime=find_one(RUNTIME_GLOB)
+            if runtime:
+                release_port(runtime)
+            time.sleep(.05)
+    os.close(fd)
+    raise RuntimeError('CDC ownership lock is busy; another authorized owner is active')
+
+def release_cdc_owner_lock():
+    global _CDC_LOCK_FD
+    if _CDC_LOCK_FD is None:
+        return
+    try:
+        fcntl.flock(_CDC_LOCK_FD, fcntl.LOCK_UN)
+    finally:
+        os.close(_CDC_LOCK_FD)
+        _CDC_LOCK_FD=None
+
+def _cmdline(pid):
+    try:
+        return Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0',b' ').decode(errors='replace')
+    except OSError:
+        return ''
+
+def _owned_cdc_holder(pid):
+    cmd=_cmdline(pid)
+    gateway='/home/otomasi2/forclift/install/f4gateway/lib/f4gateway/f4gateway_node'
+    return cmd == gateway or cmd.startswith(gateway+' ')
+
 def release_port(path):
     deadline=time.monotonic()+1.0
     pids=port_holders(path)
     while pids and time.monotonic()<deadline:
         time.sleep(.04)
         pids=port_holders(path)
-    if not pids: return
-    print('[BOOT-CDC] force-releasing CDC holders',pids)
+    if not pids:
+        return
+
+    unknown=[pid for pid in pids if not _owned_cdc_holder(pid)]
+    if unknown:
+        detail='; '.join(f'PID {pid}: {_cmdline(pid)}' for pid in unknown)
+        raise RuntimeError(f'CDC port is owned by an unrelated process; refusing to terminate it: {detail}')
+
+    print('[BOOT-CDC] requesting graceful shutdown of F4 gateway holder(s)',pids)
     for pid in pids:
-        try: os.kill(pid,signal.SIGTERM)
-        except ProcessLookupError: pass
+        try:
+            os.kill(pid,signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     end=time.monotonic()+1.5
-    while time.monotonic()<end and port_holders(path): time.sleep(.03)
-    for pid in port_holders(path):
-        try: os.kill(pid,signal.SIGKILL)
-        except ProcessLookupError: pass
+    while time.monotonic()<end and port_holders(path):
+        time.sleep(.03)
+    remaining=port_holders(path)
+    if remaining:
+        detail='; '.join(f'PID {pid}: {_cmdline(pid)}' for pid in remaining)
+        raise RuntimeError(f'F4 gateway did not release CDC after SIGTERM; refusing SIGKILL: {detail}')
 
 def open_serial_claim(path, timeout=5.0):
     import serial
@@ -213,11 +269,6 @@ def trigger_resident(runtime):
             else:
                 print('[BOOT-CDC] runtime:',line)
 
-def fallback_rom(image_path):
-    script=Path(__file__).resolve().parent/'dfu_upload_blackpill.sh'
-    print('[BOOT-CDC] emergency ROM DFU already active; using USB ROM fallback')
-    subprocess.run([str(script),str(image_path)],check=True)
-
 def verify_runtime(port):
     import serial
     release_port(port)
@@ -230,6 +281,30 @@ def verify_runtime(port):
             print(f'[BOOT-CDC] runtime session verification failed: {e}')
             return False
 
+def boot_resync(ser):
+    # A reconnect can deliver a late DATA2 error/ACK from the previous USB
+    # transport instance. Establish a quiet command boundary before PING so
+    # stale protocol lines cannot abort a recoverable update.
+    try:
+        for _ in range(2):
+            ser.write(b'\n')
+            ser.flush()
+            time.sleep(.03)
+    except Exception:
+        pass
+    quiet_since=time.monotonic()
+    deadline=quiet_since+.8
+    while time.monotonic()<deadline:
+        if ser.in_waiting:
+            stale=line_read(ser,.08)
+            if stale:
+                print('[BOOT-CDC] boot resync discard:',stale)
+                quiet_since=time.monotonic()
+        elif time.monotonic()-quiet_since >= .15:
+            break
+        time.sleep(.01)
+    ser.reset_input_buffer()
+
 def upload_boot(port,data):
     import serial
     crc=zlib.crc32(data)&0xffffffff
@@ -238,55 +313,28 @@ def upload_boot(port,data):
     off=0
     last_pct=-1
 
-    def parse_state(line):
-        fields={}
-        for item in line.split(':')[2:]:
-            if '=' not in item:
-                continue
-            key,value=item.split('=',1)
-            fields[key]=value
-        try:
-            active=int(fields.get('active','0'),0)
-            offset=int(fields.get('offset','0'),0)
-            size=int(fields.get('size','0'),0)
-            state_crc=int(fields.get('crc','0'),16)
-        except Exception as e:
-            raise RuntimeError(f'bad STATE response {line}: {e}')
-        return active,offset,size,state_crc
-
     while True:
         current=find_one(BOOT_GLOB)
         if not current:
             current=wait_one(BOOT_GLOB,60)
         if not current:
-            raise RuntimeError('resident boot CDC did not reappear during resumable upload')
+            raise RuntimeError('resident boot CDC did not reappear during upload')
 
         try:
             release_port(current)
             with open_serial_claim(current,8.0) as s:
                 time.sleep(.2)
-                s.reset_input_buffer()
+                boot_resync(s)
                 print('[BOOT-CDC]',transact(s,'PING',['BOOT:PONG'],2))
                 info=transact(s,'INFO',['BOOT:INFO:'],2)
                 print('[BOOT-CDC]',info)
-                if ('proto=3' not in info or f'layout={EXPECTED_LAYOUT}' not in info or
+                if ('proto=4' not in info or f'layout={EXPECTED_LAYOUT}' not in info or
                         f'board={EXPECTED_BOARD}' not in info):
                     raise RuntimeError(
                         f'incompatible resident bootloader target/layout; provision once via ST-Link: {info}')
-
-                state=transact(s,'STATE',['BOOT:STATE:'],2)
-                print('[BOOT-CDC]',state)
-                active,state_off,state_size,state_crc=parse_state(state)
-                if (active==1 and state_size==len(data) and state_crc==crc and
-                        0 <= state_off <= len(data)):
-                    off=state_off
-                    print(f'[BOOT-CDC] resume accepted at offset={off}')
-                else:
-                    if active==1:
-                        print('[BOOT-CDC] resident update state does not match image; restarting BEGIN safely')
-                    r=transact(s,f'BEGIN:{len(data)}:{crc:08X}',['ACK:BEGIN:'],12)
-                    print('[BOOT-CDC]',r)
-                    off=0
+                r=transact(s,f'BEGIN:{len(data)}:{crc:08X}',['ACK:BEGIN:'],12)
+                print('[BOOT-CDC]',r)
+                off=0
 
                 pct=(off*100)//len(data) if data else 100
                 last_pct=(pct//5)-1
@@ -366,8 +414,9 @@ def upload_boot(port,data):
 
                     off=nxt
                     pct=(off*100)//len(data)
-                    if EXPECTED_BOARD == 'F1030101':
-                        time.sleep(.002)
+                    if EXPECTED_BOARD == 'F103C801':
+                        # Keep F1 USB FS/PMA and weak hubs below saturation.
+                        time.sleep(.015)
                     if pct//5!=last_pct//5:
                         last_pct=pct
                         print(f'[BOOT-CDC] write {pct}% ({off}/{len(data)})')
@@ -385,53 +434,63 @@ def upload_boot(port,data):
             if reconnects>max_reconnects:
                 raise RuntimeError(
                     f'boot CDC transport lost too many times; last offset={off}: {e}')
-            print(f'[BOOT-CDC] reconnect {reconnects}/{max_reconnects} after transport loss at offset={off}: {e}')
+            print(f'[BOOT-CDC] reconnect {reconnects}/{max_reconnects}; restart from BEGIN after transport loss at offset={off}: {e}')
             time.sleep(.20)
             continue
 
 def main():
-    global APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END, RUNTIME_GLOB, BOOT_GLOB, CHUNK
-    ap=argparse.ArgumentParser(description='AGV F411 resident USB bootloader uploader')
-    ap.add_argument('image'); ap.add_argument('--boot-wait',type=float,default=25.0)
-    ap.add_argument('--target',choices=sorted(PROFILES),default='f411ce')
+    global APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END
+    ap=argparse.ArgumentParser(description='STM32F103C8 resident USB bootloader uploader')
+    ap.add_argument('image')
+    ap.add_argument('--boot-wait',type=float,default=25.0)
+    ap.add_argument('--target',choices=sorted(PROFILES),default='f103c8')
     args=ap.parse_args()
+
     acquire_update_lock()
+    acquire_cdc_owner_lock()
     APP_LIMIT, EXPECTED_LAYOUT, EXPECTED_BOARD, SRAM_END = PROFILES[args.target]
-    if args.target == 'f103':
-        # 64-byte payload keeps each DATA2 line well below the 600-byte parser
-        # limit while reducing transaction count and exposure to USB hub hiccups.
-        CHUNK = 64
-        RUNTIME_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_CDC_in_FS_Mode*-if00'
-        BOOT_GLOB = '/dev/serial/by-id/usb-STMicroelectronics_BLUEPILL_F103_BOOT_CDC*-if00'
     data=normalize_image(args.image)
     print(f'[BOOT-CDC] image={len(data)} crc=0x{zlib.crc32(data)&0xffffffff:08X}')
+
     boot=find_one(BOOT_GLOB)
-    if not boot and args.target == 'f103':
-        # A lock-aware ROS bridge may already own the healthy runtime session.
-        # Give it first chance to ARM/CONFIRM DFU and release the port cleanly.
+    if not boot:
         boot=wait_one(BOOT_GLOB,4.0)
+
     if not boot:
         runtime=find_one(RUNTIME_GLOB)
         if runtime:
-            trigger_resident(runtime); boot=wait_one(BOOT_GLOB,args.boot_wait)
-        elif args.target != 'f103' and rom_dfu_active():
-            fallback_rom(Path(args.image)); return 0
+            trigger_resident(runtime)
+            boot=wait_one(BOOT_GLOB,args.boot_wait)
         else:
             print('[BOOT-CDC] no runtime/boot CDC; waiting for either identity')
             runtime,boot=wait_runtime_or_boot(args.boot_wait)
             if runtime:
-                print('[BOOT-CDC] runtime CDC appeared; claiming the short enumeration window')
+                print('[BOOT-CDC] runtime CDC appeared; requesting resident bootloader')
                 trigger_resident(runtime)
                 boot=wait_one(BOOT_GLOB,args.boot_wait)
-            elif not boot and args.target != 'f103' and rom_dfu_active():
-                fallback_rom(Path(args.image)); return 0
-    if not boot: raise RuntimeError('resident boot CDC did not appear; USB/NRST/power path unavailable')
-    print('[BOOT-CDC] resident port',boot); release_port(boot); upload_boot(boot,data)
+
+    if not boot:
+        runtime_after_handoff=find_one(RUNTIME_GLOB)
+        if runtime_after_handoff:
+            raise RuntimeError(
+                'F103C8 runtime CDC is present but resident boot CDC never appeared. '
+                'Provision once with: pio run -e f103_stlink -t upload')
+        raise RuntimeError(
+            'resident boot CDC did not appear and runtime CDC is absent; '
+            'check USB enumeration, NRST, power, and hub path')
+
+    print('[BOOT-CDC] resident port',boot)
+    release_port(boot)
+    upload_boot(boot,data)
+
     runtime=wait_one(RUNTIME_GLOB,45)
-    if not runtime: raise RuntimeError('runtime CDC did not return after committed update')
-    if not verify_runtime(runtime): raise RuntimeError('runtime CDC returned but ACK:PONG failed')
+    if not runtime:
+        raise RuntimeError('runtime CDC did not return after committed update')
+    if not verify_runtime(runtime):
+        raise RuntimeError('runtime CDC returned but ACK:PONG failed')
     print('[BOOT-CDC] SUCCESS committed image verified and runtime ACK:PONG healthy')
     return 0
+
 if __name__=='__main__':
     try:
         raise SystemExit(main())
@@ -439,4 +498,5 @@ if __name__=='__main__':
         print('[BOOT-CDC] ERROR:',e,file=sys.stderr)
         raise SystemExit(1)
     finally:
+        release_cdc_owner_lock()
         release_update_lock()

@@ -1,4 +1,4 @@
-#if defined(BOARD_F103_BOOT)
+#if defined(F103_BUILD_BOOTLOADER)
 #include <stddef.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -43,4 +43,5 @@ int _fstat(int fd, struct stat *status) {
   (void)status;
   return -1;
 }
+
 #endif

@@ -21,5 +21,5 @@ inline void drawSplashScreen() {
   tft.drawRoundRect(PB_X, PB_Y, PB_W, PB_H, PB_R, C_BORDER);
 
   drawSmallText("Initializing system...", W / 2, 189, C_TEXT_DIM, C_BG, MC_DATUM);
-  drawMicroText("STM32F411  |  ILI9341  |  320x240", W / 2, 222, C_DISABLED, C_BG, MC_DATUM);
+  drawMicroText("STM32F103C8  |  ILI9341  |  320x240", W / 2, 222, C_DISABLED, C_BG, MC_DATUM);
 }

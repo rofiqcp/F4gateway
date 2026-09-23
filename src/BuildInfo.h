@@ -27,6 +27,6 @@ inline constexpr uint16_t kSchemaVersion = static_cast<uint16_t>(FW_SCHEMA_VERSI
 #ifndef BUILD_APP_LIMIT
 #define BUILD_APP_LIMIT 0x08060000UL
 #endif
-inline constexpr uint32_t kAppBase = 0x08004000UL;
+inline constexpr uint32_t kAppBase = 0x08002000UL;
 inline constexpr uint32_t kAppLimit = BUILD_APP_LIMIT;
 }  // namespace BuildInfo

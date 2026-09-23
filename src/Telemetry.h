@@ -103,57 +103,32 @@ struct VehicleTelemetry {
   NavigationExtendedTelemetry navx{};
 
   float speedKmh{0.0F};
-  float driveTargetMps{0.0F};
   float driveActualMps{0.0F};
-  float motorErpm{0.0F};
   float vbusV{0.0F};
   bool vbusValid{false};
-  float steeringTargetDeg{0.0F};
   float steeringActualDeg{0.0F};
-  float steeringErrorDeg{0.0F};
-  char steeringTestState[12]{"IDLE"};
   float steeringTestAngleDeg{STEER_TEST_ANGLE_DEFAULT_DEG};
   bool escReady{false};
   bool encoderReady{false};
   uint8_t manualSpeedPct{MANUAL_SPEED_DEFAULT};
   float driveErpmPerMps{8000.0F};
 
-  bool gpsReady{false};
-  GpsFixState gpsFix{GPS_NO_FIX};
-#if defined(BOARD_F103C8)
-  float latitude{0.0F};
-  float longitude{0.0F};
-#else
-  double latitude{0.0};
-  double longitude{0.0};
-#endif
-  uint8_t satellites{0};
-  float hdop{0.0F};
-  float haccM{0.0F};
-  float gnssAgeSec{99.0F};
   float headingDeg{0.0F};
 
   bool imuReady{false};
-  float gyroZRps{0.0F};
-  bool magReady{false};
 
   bool cameraReady{false};
   bool perceptionReady{false};
   bool perceptionInference{false};
   float cameraFps{0.0F};
   char detectedObject[24]{"NONE"};
-  float objectDistanceM{0.0F};
-  float confidencePct{0.0F};
-  bool drivableAreaClear{false};
   bool obstacleDetected{false};
-  char laneState[20]{"UNKNOWN"};
 
   bool motionReady{false};
   bool nav2Ready{false};
   float goalRemainingDistanceM{0.0F};
   bool goalRemainingDistanceValid{false};
   char localizationState[24]{"WAIT"};
-  char gnssStatus[20]{"WAIT"};
   char imuStatus[20]{"WAIT"};
   char ekfLocalStatus[20]{"WAIT"};
   char ekfGlobalStatus[20]{"WAIT"};
@@ -252,29 +227,12 @@ inline const char* vehicleStateText(VehicleState s) {
   }
 }
 
-inline const char* gpsFixText(GpsFixState s) {
-  switch (s) {
-    case GPS_LOST: return "LOST";
-    case GPS_NO_FIX: return "NO FIX";
-    case GPS_2D_FIX: return "2D";
-    case GPS_3D_FIX: return "3D FIX";
-    case GPS_DEGRADED: return "DEGRADED";
-    default: return "NO FIX";
-  }
-}
-
 inline uint16_t healthColor(bool ok) { return ok ? C_READY : C_FAULT; }
 inline uint16_t systemStatusColor(SystemStatus s) {
   if (s == SYS_READY) return C_READY;
   if (s == SYS_FAULT || s == SYS_NOT_READY || s == SYS_OFF) return C_FAULT;
   return C_WARNING;
 }
-inline uint16_t gpsFixColor(GpsFixState s) {
-  if (s == GPS_3D_FIX) return C_READY;
-  if (s == GPS_2D_FIX || s == GPS_DEGRADED) return C_WARNING;
-  return C_FAULT;
-}
-
 inline const char* navigationStatusText(NavigationStatus s) {
   switch (s) {
     case NAV_SELECTED: return "SELECTED";

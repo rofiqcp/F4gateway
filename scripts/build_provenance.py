@@ -8,7 +8,22 @@ import zlib
 from pathlib import Path
 
 PROJECT_DIR = Path(env.subst("$PROJECT_DIR"))
+PIO_ENV = env.subst("$PIOENV")
 SCHEMA_VERSION = 3
+
+# C++-only size optimizations; keep C compiler command lines warning-free.
+env.Append(CXXFLAGS=["-fno-rtti", "-fno-use-cxa-atexit"])
+
+IMAGE_LAYOUTS = {
+    "f103_bootloader": (0x08000000, 0x08002000, "STM32F103C8T6-BOOT"),
+    "f103_stlink": (0x08002000, 0x0800F7F0, "STM32F103C8T6"),
+    "f103_usb": (0x08002000, 0x0800F7F0, "STM32F103C8T6"),
+}
+
+if PIO_ENV not in IMAGE_LAYOUTS:
+    raise RuntimeError("No firmware image layout declared for PIOENV={}".format(PIO_ENV))
+
+APP_BASE, APP_LIMIT, MCU_TARGET = IMAGE_LAYOUTS[PIO_ENV]
 
 
 def git_text(*args):
@@ -45,12 +60,14 @@ def write_identity(target, source, env):
         "git_full_sha": git_full_sha,
         "git_dirty": bool(git_dirty),
         "build_epoch_utc": build_epoch,
+        "environment": PIO_ENV,
+        "mcu_target": MCU_TARGET,
         "binary": binary.name,
         "size": len(payload),
         "crc32": "{:08X}".format(zlib.crc32(payload) & 0xFFFFFFFF),
         "sha256": hashlib.sha256(payload).hexdigest(),
-        "app_base": "0x08004000",
-        "app_limit": "0x08060000",
+        "app_base": "0x{:08X}".format(APP_BASE),
+        "app_limit": "0x{:08X}".format(APP_LIMIT),
     }
     output = binary.with_name("firmware.identity.json")
     output.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n")

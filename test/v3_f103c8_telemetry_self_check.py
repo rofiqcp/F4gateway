@@ -30,6 +30,6 @@ int main(){
 '''
 with tempfile.TemporaryDirectory() as td:
  src=Path(td)/'check.cpp'; exe=Path(td)/'check'; src.write_text(CPP)
- cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-DBOARD_F103C8','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocolF103.cpp'),str(ROOT/'src/NumericParse.cpp'),'-o',str(exe)]
+ cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-DBOARD_F103_FAMILY','-DBOARD_F103C8','-I',str(ROOT/'src'),str(src),str(ROOT/'src/TelemetryProtocolF103.cpp'),str(ROOT/'src/NumericParse.cpp'),'-o',str(exe)]
  subprocess.run(cmd,check=True); subprocess.run([str(exe)],check=True)
 print('V3_F103C8_TELEMETRY_SELF_CHECK_PASS')

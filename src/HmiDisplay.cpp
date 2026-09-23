@@ -1,30 +1,17 @@
+#if !defined(F103_BUILD_BOOTLOADER)
 #include "HmiDisplay.h"
 #include "BoardSupport.h"
 
 #include <algorithm>
-#if !defined(BOARD_F103C8)
-#include <cmath>
-#endif
 #include <cstdlib>
 #include <cstring>
 
 #include "fonts/Classic5x7.inc"
-#if !defined(BOARD_F103C8)
-#include "fonts/Font16.inc"
-#include "fonts/FreeSans9pt7b.h"
-#include "fonts/FreeSansBold12pt7b.h"
-#include "fonts/FreeSansBold24pt7b.h"
-#include "fonts/FreeSansBold9pt7b.h"
-#endif
 
 namespace {
 constexpr uint16_t kTftCs = GPIO_PIN_0;
 constexpr uint16_t kTftDc = GPIO_PIN_1;
-#if defined(BOARD_F103C8)
 constexpr uint16_t kTftRst = GPIO_PIN_10;
-#else
-constexpr uint16_t kTftRst = GPIO_PIN_2;
-#endif
 constexpr uint16_t kTouchCs = GPIO_PIN_4;
 inline void TftCs(bool high) {
   HAL_GPIO_WritePin(GPIOB, kTftCs, high ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -35,9 +22,6 @@ inline void TftDc(bool high) {
 inline void TouchCs(bool high) {
   HAL_GPIO_WritePin(GPIOA, kTouchCs, high ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
-int32_t ClampI32(int32_t value, int32_t low, int32_t high) {
-  return std::max(low, std::min(value, high));
-}
 uint16_t Median3(uint16_t a, uint16_t b, uint16_t c) {
   if (a > b)
     std::swap(a, b);
@@ -47,7 +31,6 @@ uint16_t Median3(uint16_t a, uint16_t b, uint16_t c) {
     std::swap(a, b);
   return b;
 }
-#if defined(BOARD_F103C8)
 int32_t PixelSqrt(int32_t value) {
   if (value <= 0) return 0;
   uint32_t n = static_cast<uint32_t>(value);
@@ -65,12 +48,6 @@ int32_t PixelSqrt(int32_t value) {
   }
   return static_cast<int32_t>(root);
 }
-#else
-int32_t PixelSqrt(int32_t value) {
-  return value <= 0 ? 0 :
-      static_cast<int32_t>(std::sqrt(static_cast<double>(value)));
-}
-#endif
 } // namespace
 
 bool HmiDisplay::waitSpiIdle(uint32_t timeoutUs) {
@@ -786,11 +763,7 @@ void HmiDisplay::fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
   }
   const int32_t dx01 = x1 - x0, dy01 = y1 - y0, dx02 = x2 - x0, dy02 = y2 - y0,
                 dx12 = x2 - x1, dy12 = y2 - y1;
-#if defined(BOARD_F103C8)
   int32_t sa = 0, sb = 0;
-#else
-  int64_t sa = 0, sb = 0;
-#endif
   int32_t y = y0;
   const int32_t last = y1 == y2 ? y1 : y1 - 1;
   for (; y <= last; ++y) {
@@ -800,13 +773,8 @@ void HmiDisplay::fillTriangle(int32_t x0, int32_t y0, int32_t x1, int32_t y1,
     sb += dx02;
     drawFastHLine(std::min(a, b), y, std::abs(a - b) + 1, color);
   }
-#if defined(BOARD_F103C8)
   sa = dx12 * (y - y1);
   sb = dx02 * (y - y0);
-#else
-  sa = static_cast<int64_t>(dx12) * (y - y1);
-  sb = static_cast<int64_t>(dx02) * (y - y0);
-#endif
   for (; y <= y2; ++y) {
     const int32_t a = x1 + (dy12 == 0 ? 0 : static_cast<int32_t>(sa / dy12)),
                   b = x0 + static_cast<int32_t>(sb / dy02);
@@ -854,19 +822,6 @@ void HmiDisplay::textBounds(const char *text, int32_t &min_x, int32_t &min_y,
     return;
   if (font_ == nullptr) {
     const int32_t scale = static_cast<int32_t>(text_size_);
-#if !defined(BOARD_F103C8)
-    if (builtin_font_ == 2U) {
-      for (const char *q = text; *q != '\0'; ++q) {
-        const uint8_t c = static_cast<uint8_t>(*q);
-        advance +=
-            (c >= 32U && c <= 127U ? widtbl_f16[c - 32U] : widtbl_f16[0]) *
-            scale;
-      }
-      max_x = advance > 0 ? advance - 1 : 0;
-      max_y = 16 * scale - 1;
-      return;
-    }
-#endif
     advance = static_cast<int32_t>(std::strlen(text)) * 6 * scale;
     max_x = advance - 1;
     max_y = 8 * scale - 1;
@@ -962,27 +917,6 @@ int16_t HmiDisplay::drawString(const char *text, int32_t x, int32_t y) {
       int32_t cur = left;
       for (const char *q = text; *q != '\0'; ++q) {
         const uint8_t c = static_cast<uint8_t>(*q);
-#if !defined(BOARD_F103C8)
-        if (builtin_font_ == 2U) {
-          const uint8_t idx =
-              (c >= 32U && c <= 127U) ? static_cast<uint8_t>(c - 32U) : 0U;
-          const uint8_t gw = widtbl_f16[idx];
-          const uint8_t bpr = static_cast<uint8_t>((gw + 6U) / 8U);
-          const unsigned char *glyph = chrtbl_f16[idx];
-          for (uint8_t row = 0U; row < 16U; ++row)
-            for (uint8_t bi = 0U; bi < bpr; ++bi) {
-              const uint8_t bits = glyph[static_cast<uint16_t>(row) * bpr + bi];
-              for (uint8_t bit = 0U; bit < 8U; ++bit) {
-                const uint8_t px = static_cast<uint8_t>(bi * 8U + bit);
-                if (px >= gw)
-                  break;
-                if ((bits & static_cast<uint8_t>(0x80U >> bit)) != 0U)
-                  putBlock(cur + px * scale, top + row * scale, scale);
-              }
-            }
-          cur += static_cast<int32_t>(gw) * scale;
-        } else
-#endif
         {
           for (uint8_t col = 0U; col < 5U; ++col) {
             uint8_t bits = kClassicFont[static_cast<uint16_t>(c) * 5U + col];
@@ -1179,13 +1113,17 @@ bool HmiDisplay::getTouch(uint16_t *x, uint16_t *y, uint16_t threshold) {
     sx = (width_ - 1) - sx;
   if (touch_invert_y_)
     sy = (height_ - 1) - sy;
+  // The persisted calibration already projects the inset targets to the
+  // physical LCD edges. Reject anything outside that calibrated rectangle;
+  // clamping an out-of-range noise sample could otherwise turn it into a real
+  // button press on the screen bezel (notably the top-right E-stop region).
   if (sx < 0 || sy < 0 || sx >= width_ || sy >= height_) {
     ++touch_reject_bounds_count_;
     return false;
   }
 
-  *x = static_cast<uint16_t>(ClampI32(sx, 0, width_ - 1));
-  *y = static_cast<uint16_t>(ClampI32(sy, 0, height_ - 1));
+  *x = static_cast<uint16_t>(sx);
+  *y = static_cast<uint16_t>(sy);
   touch_last_x_ = *x;
   touch_last_y_ = *y;
   return true;
@@ -1215,3 +1153,5 @@ void HmiDisplay::endFrame() {
     max_frame_bytes_ = last_frame_bytes_;
   frame_active_ = false;
 }
+
+#endif

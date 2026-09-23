@@ -7,16 +7,15 @@
 
 extern SPI_HandleTypeDef hspi1;
 extern TIM_HandleTypeDef htim1;
-#if defined(BOARD_F103C8)
 extern TIM_HandleTypeDef htim3;
 #define htim11 htim3
-#else
-extern TIM_HandleTypeDef htim11;
-#endif
 #if BTS_WINCH_ENABLED
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim4;
 void Board_BtsSetPwm(uint16_t rpwm, uint16_t lpwm);
+void Board_BtsEmergencyCut();
+uint16_t Board_BtsDutyTicks();
+int8_t Board_BtsDirection();
 #endif
 
 enum class BoardSpiOwner : uint8_t {
